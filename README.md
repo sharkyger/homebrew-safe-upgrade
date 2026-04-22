@@ -126,6 +126,9 @@ JSON output on stdout for programmatic use:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/sharkyger/homebrew-safe-upgrade/main/install.sh | bash
+
+# If you get a permission error:
+curl -fsSL https://raw.githubusercontent.com/sharkyger/homebrew-safe-upgrade/main/install.sh | sudo bash
 ```
 
 This places both files in your Homebrew bin directory (`/opt/homebrew/bin/` on Apple Silicon, `/usr/local/bin/` on Intel). Homebrew automatically adds external commands prefixed with `brew-` as subcommands.
