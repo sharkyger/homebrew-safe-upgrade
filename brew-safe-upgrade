@@ -90,13 +90,24 @@ if [ -n "$BLOCKED_PKGS" ]; then
         read -p "Proceed? [y/N] " CONFIRM
     fi
     if [[ "$CONFIRM" =~ ^[yY] ]]; then
-        echo "$OUTDATED" | while read -r name installed current; do
+        # Pin blocked packages so brew can't upgrade them as dependencies
+        for pkg in $BLOCKED_PKGS; do
+            brew pin "$pkg" 2>/dev/null || true
+        done
+
+        # Upgrade clean packages
+        while read -r name installed current; do
             if ! echo "$BLOCKED_PKGS" | grep -qw "$name"; then
                 echo "  Upgrading $name..."
-                brew upgrade "$name"
+                brew upgrade "$name" || true
             else
                 echo "  Skipping $name (vulnerable)"
             fi
+        done <<< "$OUTDATED"
+
+        # Unpin blocked packages
+        for pkg in $BLOCKED_PKGS; do
+            brew unpin "$pkg" 2>/dev/null || true
         done
     fi
 else
