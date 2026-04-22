@@ -155,6 +155,22 @@ brew safe-upgrade
 
 Homebrew automatically picks up any executable named `brew-<command>` in your PATH as a subcommand. Since the script is named `brew-safe-upgrade` and lives in `/opt/homebrew/bin/`, running `brew safe-upgrade` just works.
 
+## How is this different from brew-vulns?
+
+The Homebrew team released [`brew-vulns`](https://github.com/Homebrew/homebrew-brew-vulns) in January 2026 — a great tool that scans your installed packages for known vulnerabilities. If you're not using it yet, you should.
+
+The two tools solve different problems:
+
+| | `brew-vulns` | `brew safe-upgrade` |
+|---|---|---|
+| **When** | After install (audit) | Before upgrade (gate) |
+| **Action** | Reports vulnerabilities | Blocks vulnerable upgrades |
+| **Databases** | OSV.dev | OSV.dev + GitHub Advisory + NIST NVD |
+| **Version filtering** | OSV native | OSV native + CPE range/exact match + GitHub patch version |
+| **Workflow** | Separate step | Drop-in replacement for `brew upgrade` |
+
+`brew-vulns` tells you what's already on your machine. `brew safe-upgrade` prevents bad versions from landing in the first place. They complement each other.
+
 ## Acknowledgments
 
 This tool relies entirely on free, public vulnerability databases maintained by teams who believe security data should be accessible to everyone:
@@ -163,7 +179,11 @@ This tool relies entirely on free, public vulnerability databases maintained by 
 - **[OSV.dev](https://osv.dev/)** — Google's open-source vulnerability database with native ecosystem support and version filtering. A fantastic resource for the open-source community.
 - **[GitHub Advisory Database](https://github.com/advisories)** — GitHub's curated security advisories with detailed version range data and patch information.
 
-These organizations make it possible for anyone to build security tooling without paywalls or API key barriers. Thank you.
+And of course:
+
+- **[Homebrew](https://brew.sh/)** — the package manager that makes macOS development possible. And the [`brew-vulns`](https://github.com/Homebrew/homebrew-brew-vulns) team for pushing security scanning into the Homebrew ecosystem.
+
+These organizations and communities make it possible for anyone to build security tooling without paywalls or API key barriers. Thank you.
 
 ## License
 
