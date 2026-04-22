@@ -82,44 +82,53 @@ echo "Results: $CLEAN_COUNT clean, $SKIP_COUNT skipped"
 
 if [ -n "$BLOCKED_PKGS" ]; then
     echo "Blocked:$BLOCKED_PKGS"
-    echo ""
-    echo "Upgrade clean packages only? The blocked ones will be skipped."
-    if [ "$AUTO_YES" = true ]; then
-        CONFIRM="y"
-    else
-        read -p "Proceed? [y/N] " CONFIRM
-    fi
-    if [[ "$CONFIRM" =~ ^[yY] ]]; then
-        # Pin blocked packages so brew can't upgrade them as dependencies
-        for pkg in $BLOCKED_PKGS; do
-            echo "  Pinning $pkg (vulnerable — will not be upgraded)"
-            brew pin "$pkg" 2>/dev/null || true
-        done
 
-        # Upgrade clean packages one at a time
-        while read -r name installed current; do
-            if ! echo "$BLOCKED_PKGS" | grep -qw "$name"; then
-                echo "  Upgrading $name ($installed -> $current)..."
-                brew upgrade "$name" </dev/null 2>&1 || true
-            else
-                echo "  Skipping $name (vulnerable)"
-            fi
-        done <<< "$OUTDATED"
+    # Build list of clean package names
+    CLEAN_PKGS=""
+    while read -r name installed current; do
+        if ! echo "$BLOCKED_PKGS" | grep -qw "$name"; then
+            CLEAN_PKGS="$CLEAN_PKGS $name"
+        fi
+    done <<< "$OUTDATED"
 
-        # Unpin blocked packages
+    if [ -z "$CLEAN_PKGS" ]; then
         echo ""
-        for pkg in $BLOCKED_PKGS; do
-            echo "  Unpinning $pkg"
-            brew unpin "$pkg" 2>/dev/null || true
-        done
+        echo "No clean packages to upgrade. All outdated packages have vulnerabilities."
+    else
+        echo ""
+        echo "Clean packages to upgrade:$CLEAN_PKGS"
+        echo ""
+        if [ "$AUTO_YES" = true ]; then
+            CONFIRM="y"
+        else
+            read -p "Upgrade clean packages? Blocked ones will be skipped. [y/N] " CONFIRM
+        fi
+        if [[ "$CONFIRM" =~ ^[yY] ]]; then
+            # Pin blocked packages so brew can't upgrade them as dependencies
+            for pkg in $BLOCKED_PKGS; do
+                echo "  Pinning $pkg (vulnerable)"
+                brew pin "$pkg" 2>/dev/null || true
+            done
+
+            echo ""
+            # shellcheck disable=SC2086
+            brew upgrade $CLEAN_PKGS </dev/null 2>&1 || true
+
+            # Unpin blocked packages
+            echo ""
+            for pkg in $BLOCKED_PKGS; do
+                echo "  Unpinning $pkg"
+                brew unpin "$pkg" 2>/dev/null || true
+            done
+        fi
     fi
 else
     if [ "$AUTO_YES" = true ]; then
-        brew upgrade
+        brew upgrade </dev/null 2>&1 || true
     else
         read -p "All clean. Run brew upgrade? [Y/n] " CONFIRM
         if [[ ! "$CONFIRM" =~ ^[nN] ]]; then
-            brew upgrade
+            brew upgrade </dev/null 2>&1 || true
         fi
     fi
 fi
