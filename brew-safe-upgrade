@@ -4,7 +4,7 @@
 #
 # Usage: brew safe-upgrade [--yes|-y]
 
-set -euo pipefail
+set -uo pipefail
 
 # Locate the security check script relative to this script
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
