@@ -22,7 +22,7 @@ fi
 FAILED=0
 
 for file in brew-safe-upgrade brew-safe-install brew-safe-update dependency_security_check.py; do
-    if curl -fsSL "$REPO_URL/$file" -o "$INSTALL_DIR/$file.tmp" 2>/dev/null; then
+    if curl -fsSL -H "Cache-Control: no-cache" "$REPO_URL/$file?t=$(date +%s)" -o "$INSTALL_DIR/$file.tmp" 2>/dev/null; then
         mv "$INSTALL_DIR/$file.tmp" "$INSTALL_DIR/$file"
         chmod +x "$INSTALL_DIR/$file"
         echo "  [ok] $file"
