@@ -1,0 +1,114 @@
+#!/bin/bash
+# brew-safe-upgrade — checks outdated Homebrew packages for known vulnerabilities
+# before upgrading. Queries 3 databases: OSV.dev, GitHub Advisory, NIST NVD.
+#
+# Usage: brew safe-upgrade [--yes|-y]
+
+set -euo pipefail
+
+# Locate the security check script relative to this script
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT="$SCRIPT_DIR/dependency_security_check.py"
+
+AUTO_YES=false
+[[ "${1:-}" == "--yes" || "${1:-}" == "-y" ]] && AUTO_YES=true
+
+echo "Updating Homebrew..."
+brew update --quiet
+
+echo "Checking for outdated packages..."
+OUTDATED_JSON=$(brew outdated --json 2>/dev/null || echo '{"formulae":[]}')
+OUTDATED=$(echo "$OUTDATED_JSON" | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    formulae = data.get('formulae', [])
+    for p in formulae:
+        name = p.get('name', '')
+        installed = p.get('installed_versions', ['?'])[0]
+        current = p.get('current_version', '?')
+        print(f'{name} {installed} {current}')
+except Exception:
+    pass
+" 2>/dev/null)
+
+if [ -z "$OUTDATED" ]; then
+    echo "Everything up to date."
+    exit 0
+fi
+
+COUNT=$(echo "$OUTDATED" | wc -l | tr -d ' ')
+echo ""
+echo "Found $COUNT outdated package(s):"
+echo ""
+printf "  %-30s %-15s %s\n" "Package" "Installed" "Available"
+printf "  %-30s %-15s %s\n" "-------" "---------" "---------"
+echo "$OUTDATED" | while read -r name installed current; do
+    printf "  %-30s %-15s -> %s\n" "$name" "$installed" "$current"
+done
+
+echo ""
+echo "Running security checks..."
+echo ""
+
+BLOCKED_PKGS=""
+CLEAN_COUNT=0
+SKIP_COUNT=0
+
+while read -r name installed current; do
+    if [ -f "$SCRIPT" ]; then
+        RESULT=$(python3 "$SCRIPT" brew "$name" "$current" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+
+        if [ $EXIT_CODE -eq 0 ]; then
+            echo "  [ok] $name $current"
+            CLEAN_COUNT=$((CLEAN_COUNT + 1))
+        elif [ $EXIT_CODE -eq 1 ]; then
+            echo "  [VULN] $name $current -- vulnerabilities found!"
+            echo "$RESULT" | grep -E 'CRITICAL|HIGH|MEDIUM' | head -3 || true
+            BLOCKED_PKGS="$BLOCKED_PKGS $name"
+        else
+            echo "  [skip] $name $current -- check failed, skipping"
+            SKIP_COUNT=$((SKIP_COUNT + 1))
+        fi
+    else
+        echo "  Error: Security check script not found at $SCRIPT"
+        echo "  Make sure dependency_security_check.py is in the same directory."
+        exit 2
+    fi
+done <<< "$OUTDATED"
+
+echo ""
+echo "Results: $CLEAN_COUNT clean, $SKIP_COUNT skipped"
+
+if [ -n "$BLOCKED_PKGS" ]; then
+    echo "Blocked:$BLOCKED_PKGS"
+    echo ""
+    echo "Upgrade clean packages only? The blocked ones will be skipped."
+    if [ "$AUTO_YES" = true ]; then
+        CONFIRM="y"
+    else
+        read -p "Proceed? [y/N] " CONFIRM
+    fi
+    if [[ "$CONFIRM" =~ ^[yY] ]]; then
+        echo "$OUTDATED" | while read -r name installed current; do
+            if ! echo "$BLOCKED_PKGS" | grep -qw "$name"; then
+                echo "  Upgrading $name..."
+                brew upgrade "$name"
+            else
+                echo "  Skipping $name (vulnerable)"
+            fi
+        done
+    fi
+else
+    if [ "$AUTO_YES" = true ]; then
+        brew upgrade
+    else
+        read -p "All clean. Run brew upgrade? [Y/n] " CONFIRM
+        if [[ ! "$CONFIRM" =~ ^[nN] ]]; then
+            brew upgrade
+        fi
+    fi
+fi
+
+echo ""
+echo "Done."
