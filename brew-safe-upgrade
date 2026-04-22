@@ -100,7 +100,7 @@ if [ -n "$BLOCKED_PKGS" ]; then
         while read -r name installed current; do
             if ! echo "$BLOCKED_PKGS" | grep -qw "$name"; then
                 echo "  Upgrading $name ($installed -> $current)..."
-                brew upgrade "$name" 2>&1 || true
+                brew upgrade "$name" </dev/null 2>&1 || true
             else
                 echo "  Skipping $name (vulnerable)"
             fi
