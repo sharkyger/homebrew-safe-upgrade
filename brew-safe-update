@@ -1,0 +1,42 @@
+#!/bin/bash
+# brew-safe-update — updates brew-safe-upgrade, brew-safe-install, and
+# dependency_security_check.py to the latest version from GitHub.
+#
+# Usage: brew safe-update
+
+set -uo pipefail
+
+INSTALL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_URL="https://raw.githubusercontent.com/sharkyger/homebrew-safe-upgrade/main"
+
+echo "Updating homebrew-safe-upgrade tools..."
+echo ""
+
+# Check write permissions
+if [ ! -w "$INSTALL_DIR" ]; then
+    echo "Error: No write permission to $INSTALL_DIR"
+    echo "Try: sudo brew safe-update"
+    exit 1
+fi
+
+FAILED=0
+
+for file in brew-safe-upgrade brew-safe-install brew-safe-update dependency_security_check.py; do
+    if curl -fsSL "$REPO_URL/$file" -o "$INSTALL_DIR/$file.tmp" 2>/dev/null; then
+        mv "$INSTALL_DIR/$file.tmp" "$INSTALL_DIR/$file"
+        chmod +x "$INSTALL_DIR/$file"
+        echo "  [ok] $file"
+    else
+        rm -f "$INSTALL_DIR/$file.tmp"
+        echo "  [err] $file -- download failed"
+        FAILED=$((FAILED + 1))
+    fi
+done
+
+echo ""
+if [ $FAILED -eq 0 ]; then
+    echo "All tools updated."
+else
+    echo "$FAILED file(s) failed to update."
+    exit 1
+fi

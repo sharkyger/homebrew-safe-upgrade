@@ -128,6 +128,20 @@ brew safe-install --cask slack zoom discord
 
 Packages that are already installed are detected and skipped.
 
+## brew safe-update
+
+Updates all tools to the latest version from GitHub.
+
+```
+brew safe-update
+```
+
+No need to re-run the install script. If you get a permission error:
+
+```
+sudo brew safe-update
+```
+
 ## Standalone security checker
 
 The vulnerability checker works independently for any ecosystem:
@@ -184,8 +198,8 @@ This places all files in your Homebrew bin directory (`/opt/homebrew/bin/` on Ap
 ```bash
 git clone https://github.com/sharkyger/homebrew-safe-upgrade.git
 cd homebrew-safe-upgrade
-cp brew-safe-upgrade brew-safe-install dependency_security_check.py /opt/homebrew/bin/
-chmod +x /opt/homebrew/bin/brew-safe-upgrade /opt/homebrew/bin/brew-safe-install
+cp brew-safe-upgrade brew-safe-install brew-safe-update dependency_security_check.py /opt/homebrew/bin/
+chmod +x /opt/homebrew/bin/brew-safe-upgrade /opt/homebrew/bin/brew-safe-install /opt/homebrew/bin/brew-safe-update
 ```
 
 ### Verify

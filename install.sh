@@ -18,13 +18,10 @@ if [ ! -w "$INSTALL_DIR" ]; then
 fi
 
 # Download files
-curl -fsSL "$REPO_URL/brew-safe-upgrade" -o "$INSTALL_DIR/brew-safe-upgrade"
-curl -fsSL "$REPO_URL/brew-safe-install" -o "$INSTALL_DIR/brew-safe-install"
-curl -fsSL "$REPO_URL/dependency_security_check.py" -o "$INSTALL_DIR/dependency_security_check.py"
-
-chmod +x "$INSTALL_DIR/brew-safe-upgrade"
-chmod +x "$INSTALL_DIR/brew-safe-install"
-chmod +x "$INSTALL_DIR/dependency_security_check.py"
+for file in brew-safe-upgrade brew-safe-install brew-safe-update dependency_security_check.py; do
+    curl -fsSL "$REPO_URL/$file" -o "$INSTALL_DIR/$file"
+    chmod +x "$INSTALL_DIR/$file"
+done
 
 echo "Installed to $INSTALL_DIR/"
-echo "Commands: brew safe-upgrade, brew safe-install"
+echo "Commands: brew safe-upgrade, brew safe-install, brew safe-update"
