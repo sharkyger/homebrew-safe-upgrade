@@ -1,12 +1,12 @@
 # homebrew-safe-upgrade
 
-A security-first wrapper for `brew upgrade`. Checks every outdated Homebrew package against 3 vulnerability databases before upgrading, so you never blindly pull in a known CVE.
+Security-first wrappers for `brew upgrade` and `brew install`. Checks every Homebrew package against 3 vulnerability databases before it touches your system, so you never blindly pull in a known CVE.
 
 ## Why
 
-`brew upgrade` upgrades everything without checking whether the new version has known security issues. Most of the time that's fine. Sometimes it isn't.
+`brew upgrade` and `brew install` don't check whether a package has known security issues. Most of the time that's fine. Sometimes it isn't.
 
-`brew safe-upgrade` adds a security gate: it queries three public vulnerability databases for each outdated package, checks whether the *target version* is actually affected, and only upgrades packages that come back clean. Packages with known vulnerabilities are blocked and listed separately.
+`brew safe-upgrade` and `brew safe-install` add a security gate: they query three public vulnerability databases, check whether the *target version* is actually affected, and only proceed with packages that come back clean. Packages with known vulnerabilities are blocked and listed separately.
 
 ## What it checks
 
@@ -85,6 +85,49 @@ brew safe-upgrade --yes
 
 Automatically upgrades clean packages and skips vulnerable ones without prompting.
 
+## brew safe-install
+
+Same security gate, but for installing new packages.
+
+```
+brew safe-install [flags] package1 [package2 ...]
+```
+
+1. Resolves the version that would be installed (without installing yet)
+2. Checks each package against all 3 databases
+3. Reports results: clean, vulnerable, or check-failed
+4. Installs only verified clean packages
+
+```
+$ brew safe-install wget imagemagick
+
+Resolving package versions...
+
+  Checking wget (formula, version 1.25)...
+  [ok] wget 1.25
+  Checking imagemagick (formula, version 7.1.2-21)...
+  [ok] imagemagick 7.1.2-21
+
+Results: 2 clean out of 2 package(s)
+
+Install wget imagemagick? [Y/n]
+```
+
+Works with formulae, casks, and tap packages:
+
+```
+# Install a cask
+brew safe-install --cask firefox
+
+# Install from a tap
+brew safe-install ddev/ddev/ddev
+
+# Multiple packages with flags
+brew safe-install --cask slack zoom discord
+```
+
+Packages that are already installed are detected and skipped.
+
 ## Standalone security checker
 
 The vulnerability checker works independently for any ecosystem:
@@ -134,21 +177,25 @@ If you get a permission error:
 curl -fsSL https://raw.githubusercontent.com/sharkyger/homebrew-safe-upgrade/main/install.sh | sudo bash
 ```
 
-This places both files in your Homebrew bin directory (`/opt/homebrew/bin/` on Apple Silicon, `/usr/local/bin/` on Intel). Homebrew automatically adds external commands prefixed with `brew-` as subcommands.
+This places all files in your Homebrew bin directory (`/opt/homebrew/bin/` on Apple Silicon, `/usr/local/bin/` on Intel). Homebrew automatically adds external commands prefixed with `brew-` as subcommands.
 
 ### Manual install
 
 ```bash
 git clone https://github.com/sharkyger/homebrew-safe-upgrade.git
 cd homebrew-safe-upgrade
-cp brew-safe-upgrade dependency_security_check.py /opt/homebrew/bin/
-chmod +x /opt/homebrew/bin/brew-safe-upgrade
+cp brew-safe-upgrade brew-safe-install dependency_security_check.py /opt/homebrew/bin/
+chmod +x /opt/homebrew/bin/brew-safe-upgrade /opt/homebrew/bin/brew-safe-install
 ```
 
 ### Verify
 
 ```bash
 brew safe-upgrade
+```
+
+```bash
+brew safe-install wget
 ```
 
 ## Requirements
@@ -159,7 +206,7 @@ brew safe-upgrade
 
 ## How Homebrew discovers it
 
-Homebrew automatically picks up any executable named `brew-<command>` in your PATH as a subcommand. Since the script is named `brew-safe-upgrade` and lives in `/opt/homebrew/bin/`, running `brew safe-upgrade` just works.
+Homebrew automatically picks up any executable named `brew-<command>` in your PATH as a subcommand. Since the scripts are named `brew-safe-upgrade` and `brew-safe-install` and live in `/opt/homebrew/bin/`, running `brew safe-upgrade` or `brew safe-install` just works.
 
 ## How is this different from brew-vulns?
 
@@ -167,15 +214,15 @@ The Homebrew team released [`brew-vulns`](https://github.com/Homebrew/homebrew-b
 
 The two tools solve different problems:
 
-| | `brew-vulns` | `brew safe-upgrade` |
-|---|---|---|
-| **When** | After install (audit) | Before upgrade (gate) |
-| **Action** | Reports vulnerabilities | Blocks vulnerable upgrades |
-| **Databases** | OSV.dev | OSV.dev + GitHub Advisory + NIST NVD |
-| **Version filtering** | OSV native | OSV native + CPE range/exact match + GitHub patch version |
-| **Workflow** | Separate step | Drop-in replacement for `brew upgrade` |
+| | `brew-vulns` | `brew safe-upgrade` | `brew safe-install` |
+|---|---|---|---|
+| **When** | After install (audit) | Before upgrade (gate) | Before install (gate) |
+| **Action** | Reports vulnerabilities | Blocks vulnerable upgrades | Blocks vulnerable installs |
+| **Databases** | OSV.dev | OSV.dev + GitHub Advisory + NIST NVD | OSV.dev + GitHub Advisory + NIST NVD |
+| **Version filtering** | OSV native | OSV native + CPE range/exact match + GitHub patch version | Same as safe-upgrade |
+| **Workflow** | Separate step | Drop-in replacement for `brew upgrade` | Drop-in replacement for `brew install` |
 
-`brew-vulns` tells you what's already on your machine. `brew safe-upgrade` prevents bad versions from landing in the first place. They complement each other.
+`brew-vulns` tells you what's already on your machine. `brew safe-upgrade` and `brew safe-install` prevent bad versions from landing in the first place. They complement each other.
 
 ## Acknowledgments
 

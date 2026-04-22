@@ -1,0 +1,164 @@
+#!/bin/bash
+# brew-safe-install — checks packages for known vulnerabilities before installing.
+# Queries 3 databases: OSV.dev, GitHub Advisory, NIST NVD.
+#
+# Usage: brew safe-install [flags] package1 [package2 ...]
+
+set -uo pipefail
+
+# Locate the security check script relative to this script
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT="$SCRIPT_DIR/dependency_security_check.py"
+
+if [ ! -f "$SCRIPT" ]; then
+    echo "Error: Security check script not found at $SCRIPT"
+    echo "Make sure dependency_security_check.py is in the same directory."
+    exit 2
+fi
+
+# Separate flags from package names
+BREW_FLAGS=""
+PACKAGES=""
+for arg in "$@"; do
+    if [[ "$arg" == -* ]]; then
+        BREW_FLAGS="$BREW_FLAGS $arg"
+    else
+        PACKAGES="$PACKAGES $arg"
+    fi
+done
+
+PACKAGES=$(echo "$PACKAGES" | xargs)  # trim whitespace
+
+if [ -z "$PACKAGES" ]; then
+    echo "Usage: brew safe-install [flags] package1 [package2 ...]"
+    exit 2
+fi
+
+echo "Resolving package versions..."
+echo ""
+
+BLOCKED_PKGS=""
+SKIPPED_PKGS=""
+CLEAN_PKGS=""
+CLEAN_COUNT=0
+PKG_COUNT=0
+
+for pkg in $PACKAGES; do
+    PKG_COUNT=$((PKG_COUNT + 1))
+
+    # Resolve version via brew info
+    INFO_JSON=$(brew info --json=v2 "$pkg" 2>/dev/null) && INFO_OK=true || INFO_OK=false
+
+    if [ "$INFO_OK" != "true" ] || [ -z "$INFO_JSON" ]; then
+        echo "  [err] $pkg -- package not found"
+        SKIPPED_PKGS="$SKIPPED_PKGS $pkg"
+        continue
+    fi
+
+    # Extract version and bare name using Python
+    PKG_INFO=$(echo "$INFO_JSON" | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    formulae = data.get('formulae', [])
+    casks = data.get('casks', [])
+    if formulae and len(formulae) > 0:
+        f = formulae[0]
+        version = f.get('versions', {}).get('stable', '?')
+        full_name = f.get('full_name', f.get('name', ''))
+        bare_name = full_name.split('/')[-1] if '/' in full_name else full_name
+        pkg_type = 'formula'
+        installed = len(f.get('installed', [])) > 0
+    elif casks and len(casks) > 0:
+        c = casks[0]
+        version = c.get('version', '?')
+        full_name = c.get('full_token', c.get('token', ''))
+        bare_name = full_name
+        pkg_type = 'cask'
+        installed = c.get('installed') is not None
+    else:
+        print('unknown ? ? ? false')
+        sys.exit(0)
+    print(f'{pkg_type} {version} {bare_name} {full_name} {installed}')
+except Exception:
+    print('error ? ? ? false')
+" 2>/dev/null)
+
+    PKG_TYPE=$(echo "$PKG_INFO" | awk '{print $1}')
+    VERSION=$(echo "$PKG_INFO" | awk '{print $2}')
+    BARE_NAME=$(echo "$PKG_INFO" | awk '{print $3}')
+    FULL_NAME=$(echo "$PKG_INFO" | awk '{print $4}')
+    INSTALLED=$(echo "$PKG_INFO" | awk '{print $5}')
+
+    if [ "$PKG_TYPE" = "error" ] || [ "$PKG_TYPE" = "unknown" ]; then
+        echo "  [err] $pkg -- could not resolve package info"
+        SKIPPED_PKGS="$SKIPPED_PKGS $pkg"
+        continue
+    fi
+
+    if [ "$INSTALLED" = "True" ]; then
+        echo "  [installed] $pkg $VERSION -- already installed"
+        SKIPPED_PKGS="$SKIPPED_PKGS $pkg"
+        continue
+    fi
+
+    echo "  Checking $pkg ($PKG_TYPE, version $VERSION)..."
+
+    # Run security check
+    RESULT=$(python3 "$SCRIPT" brew "$BARE_NAME" "$VERSION" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+
+    if [ $EXIT_CODE -eq 0 ]; then
+        echo "  [ok] $pkg $VERSION"
+        CLEAN_PKGS="$CLEAN_PKGS $pkg"
+        CLEAN_COUNT=$((CLEAN_COUNT + 1))
+    elif [ $EXIT_CODE -eq 1 ]; then
+        echo "  [VULN] $pkg $VERSION -- vulnerabilities found!"
+        echo "$RESULT" | grep -E 'CRITICAL|HIGH|MEDIUM' | head -3 || true
+        BLOCKED_PKGS="$BLOCKED_PKGS $pkg"
+    else
+        echo "  [skip] $pkg $VERSION -- check failed, will not install"
+        SKIPPED_PKGS="$SKIPPED_PKGS $pkg"
+    fi
+done
+
+# Summary
+echo ""
+echo "Results: $CLEAN_COUNT clean out of $PKG_COUNT package(s)"
+if [ -n "$BLOCKED_PKGS" ]; then
+    echo "  Blocked (vulnerable):$BLOCKED_PKGS"
+fi
+if [ -n "$SKIPPED_PKGS" ]; then
+    echo "  Skipped:$SKIPPED_PKGS"
+fi
+
+# Install
+if [ -z "$CLEAN_PKGS" ]; then
+    echo ""
+    echo "No clean packages to install."
+    exit 1
+fi
+
+CLEAN_PKGS=$(echo "$CLEAN_PKGS" | xargs)  # trim
+
+echo ""
+if [ -n "$BLOCKED_PKGS" ] || [ -n "$SKIPPED_PKGS" ]; then
+    echo "Clean packages to install: $CLEAN_PKGS"
+    read -p "Install clean packages only? [y/N] " CONFIRM
+    if [[ ! "$CONFIRM" =~ ^[yY] ]]; then
+        echo "Cancelled."
+        exit 0
+    fi
+else
+    read -p "Install $CLEAN_PKGS? [Y/n] " CONFIRM
+    if [[ "$CONFIRM" =~ ^[nN] ]]; then
+        echo "Cancelled."
+        exit 0
+    fi
+fi
+
+echo ""
+# shellcheck disable=SC2086
+brew install $BREW_FLAGS $CLEAN_PKGS </dev/null 2>&1 || true
+
+echo ""
+echo "Done."
