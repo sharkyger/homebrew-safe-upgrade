@@ -52,8 +52,8 @@ echo "Running security checks..."
 echo ""
 
 BLOCKED_PKGS=""
+SKIPPED_PKGS=""
 CLEAN_COUNT=0
-SKIP_COUNT=0
 
 while read -r name installed current; do
     if [ -f "$SCRIPT" ]; then
@@ -67,8 +67,8 @@ while read -r name installed current; do
             echo "$RESULT" | grep -E 'CRITICAL|HIGH|MEDIUM' | head -3 || true
             BLOCKED_PKGS="$BLOCKED_PKGS $name"
         else
-            echo "  [skip] $name $current -- check failed, skipping"
-            SKIP_COUNT=$((SKIP_COUNT + 1))
+            echo "  [skip] $name $current -- check failed, will not upgrade"
+            SKIPPED_PKGS="$SKIPPED_PKGS $name"
         fi
     else
         echo "  Error: Security check script not found at $SCRIPT"
@@ -77,52 +77,31 @@ while read -r name installed current; do
     fi
 done <<< "$OUTDATED"
 
-echo ""
-echo "Results: $CLEAN_COUNT clean, $SKIP_COUNT skipped"
-
-if [ -n "$BLOCKED_PKGS" ]; then
-    echo "Blocked:$BLOCKED_PKGS"
-
-    # Build list of clean package names
-    CLEAN_PKGS=""
-    while read -r name installed current; do
-        if ! echo "$BLOCKED_PKGS" | grep -qw "$name"; then
-            CLEAN_PKGS="$CLEAN_PKGS $name"
-        fi
-    done <<< "$OUTDATED"
-
-    if [ -z "$CLEAN_PKGS" ]; then
-        echo ""
-        echo "No clean packages to upgrade. All outdated packages have vulnerabilities."
-    else
-        echo ""
-        echo "Clean packages to upgrade:$CLEAN_PKGS"
-        echo ""
-        if [ "$AUTO_YES" = true ]; then
-            CONFIRM="y"
-        else
-            read -p "Upgrade clean packages? Blocked ones will be skipped. [y/N] " CONFIRM
-        fi
-        if [[ "$CONFIRM" =~ ^[yY] ]]; then
-            # Pin blocked packages so brew can't upgrade them as dependencies
-            for pkg in $BLOCKED_PKGS; do
-                echo "  Pinning $pkg (vulnerable)"
-                brew pin "$pkg" 2>/dev/null || true
-            done
-
-            echo ""
-            # shellcheck disable=SC2086
-            brew upgrade $CLEAN_PKGS </dev/null 2>&1 || true
-
-            # Unpin blocked packages
-            echo ""
-            for pkg in $BLOCKED_PKGS; do
-                echo "  Unpinning $pkg"
-                brew unpin "$pkg" 2>/dev/null || true
-            done
-        fi
+# Build list of verified clean packages (exclude both blocked AND skipped)
+EXCLUDE_PKGS="$BLOCKED_PKGS $SKIPPED_PKGS"
+CLEAN_PKGS=""
+while read -r name installed current; do
+    if ! echo "$EXCLUDE_PKGS" | grep -qw "$name"; then
+        CLEAN_PKGS="$CLEAN_PKGS $name"
     fi
-else
+done <<< "$OUTDATED"
+
+# Summary
+echo ""
+echo "Results: $CLEAN_COUNT clean"
+if [ -n "$BLOCKED_PKGS" ]; then
+    echo "  Blocked (vulnerable):$BLOCKED_PKGS"
+fi
+if [ -n "$SKIPPED_PKGS" ]; then
+    echo "  Skipped (check failed):$SKIPPED_PKGS"
+fi
+
+# Upgrade
+if [ -z "$CLEAN_PKGS" ]; then
+    echo ""
+    echo "No verified clean packages to upgrade."
+elif [ -z "$EXCLUDE_PKGS" ] || [ "$EXCLUDE_PKGS" = " " ]; then
+    # All packages are clean — plain brew upgrade
     if [ "$AUTO_YES" = true ]; then
         brew upgrade </dev/null 2>&1 || true
     else
@@ -130,6 +109,37 @@ else
         if [[ ! "$CONFIRM" =~ ^[nN] ]]; then
             brew upgrade </dev/null 2>&1 || true
         fi
+    fi
+else
+    echo ""
+    echo "Clean packages to upgrade:$CLEAN_PKGS"
+    echo ""
+    if [ "$AUTO_YES" = true ]; then
+        CONFIRM="y"
+    else
+        read -p "Upgrade clean packages? Excluded ones will be skipped. [y/N] " CONFIRM
+    fi
+    if [[ "$CONFIRM" =~ ^[yY] ]]; then
+        # Pin excluded packages so brew can't upgrade them as dependencies
+        for pkg in $EXCLUDE_PKGS; do
+            if [ -n "$pkg" ]; then
+                echo "  Pinning $pkg"
+                brew pin "$pkg" 2>/dev/null || true
+            fi
+        done
+
+        echo ""
+        # shellcheck disable=SC2086
+        brew upgrade $CLEAN_PKGS </dev/null 2>&1 || true
+
+        # Unpin excluded packages
+        echo ""
+        for pkg in $EXCLUDE_PKGS; do
+            if [ -n "$pkg" ]; then
+                echo "  Unpinning $pkg"
+                brew unpin "$pkg" 2>/dev/null || true
+            fi
+        done
     fi
 fi
 
