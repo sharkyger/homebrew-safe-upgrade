@@ -126,8 +126,11 @@ JSON output on stdout for programmatic use:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/sharkyger/homebrew-safe-upgrade/main/install.sh | bash
+```
 
-# If you get a permission error:
+If you get a permission error:
+
+```bash
 curl -fsSL https://raw.githubusercontent.com/sharkyger/homebrew-safe-upgrade/main/install.sh | sudo bash
 ```
 
