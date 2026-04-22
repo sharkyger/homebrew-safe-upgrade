@@ -4,7 +4,7 @@
 
 set -euo pipefail
 
-INSTALL_DIR="${HOMEBREW_PREFIX:-/opt/homebrew}/bin"
+INSTALL_DIR="$(brew --prefix 2>/dev/null || echo "/opt/homebrew")/bin"
 REPO_URL="https://raw.githubusercontent.com/sharkyger/homebrew-safe-upgrade/main"
 
 echo "Installing brew-safe-upgrade..."
