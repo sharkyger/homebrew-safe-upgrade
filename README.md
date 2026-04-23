@@ -40,14 +40,15 @@ $ brew safe-upgrade
 Updating Homebrew...
 Checking for outdated packages...
 
-Found 7 outdated package(s):
+Found 5 outdated package(s) (4 formulae, 1 casks):
 
-  Package                        Installed       Available
-  -------                        ---------       ---------
-  ddev/ddev/ddev                 1.25.1          -> 1.25.2
-  gh                             2.90.0          -> 2.91.0
-  imagemagick                    7.1.2-19        -> 7.1.2-21
-  pydantic                       2.13.2          -> 2.13.3
+  Package                        Type            Installed       Available
+  -------                        ----            ---------       ---------
+  ddev/ddev/ddev                 formula         1.25.1          -> 1.25.2
+  gh                             formula         2.90.0          -> 2.91.0
+  imagemagick                    formula         7.1.2-19        -> 7.1.2-21
+  pydantic                       formula         2.13.2          -> 2.13.3
+  claude-code                    cask            2.1.100         -> 2.1.108
 
 Running security checks...
 
@@ -55,8 +56,9 @@ Running security checks...
   [ok] gh 2.91.0
   [ok] imagemagick 7.1.2-21
   [ok] pydantic 2.13.3
+  [ok] claude-code 2.1.108
 
-Results: 4 clean, 0 skipped
+Results: 5 clean
 All clean. Run brew upgrade? [Y/n]
 ```
 
