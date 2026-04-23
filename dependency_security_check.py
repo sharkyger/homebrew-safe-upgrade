@@ -75,9 +75,7 @@ def resolve_latest_version(package_name, ecosystem):
                 data = json.loads(resp.read())
             return data.get("info", {}).get("version")
         elif ecosystem == "npm":
-            url = (
-                f"https://registry.npmjs.org/{urllib.parse.quote(package_name)}/latest"
-            )
+            url = f"https://registry.npmjs.org/{urllib.parse.quote(package_name)}/latest"
             req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
             with _urlopen(req, timeout=8) as resp:
                 data = json.loads(resp.read())
@@ -181,9 +179,7 @@ def query_osv(package_name, ecosystem, version=None):
                     severity = "CRITICAL"
 
             aliases = vuln.get("aliases", [])
-            cve_id = next(
-                (a for a in aliases if a.startswith("CVE-")), vuln.get("id", "unknown")
-            )
+            cve_id = next((a for a in aliases if a.startswith("CVE-")), vuln.get("id", "unknown"))
 
             findings.append(
                 {
@@ -246,9 +242,7 @@ def query_github(package_name, ecosystem, version=None):
                     else:
                         patched_ver = None
 
-                    if patched_ver and parse_version(version) >= parse_version(
-                        patched_ver
-                    ):
+                    if patched_ver and parse_version(version) >= parse_version(patched_ver):
                         not_affected = True
                         break
 
@@ -304,18 +298,13 @@ def query_nvd(package_name, ecosystem, version=None):
             cve = vuln.get("cve", {})
             cve_id = cve.get("id", "unknown")
             desc_list = cve.get("descriptions", [])
-            desc = next(
-                (d["value"] for d in desc_list if d["lang"] == "en"), "No description"
-            )
+            desc = next((d["value"] for d in desc_list if d["lang"] == "en"), "No description")
 
             # Filter out CVEs that mention the keyword but are about different software
             desc_lower = desc.lower()
             pkg_lower = package_name.lower()
 
-            if (
-                pkg_lower not in desc_lower
-                and pkg_lower.replace("-", "") not in desc_lower
-            ):
+            if pkg_lower not in desc_lower and pkg_lower.replace("-", "") not in desc_lower:
                 continue
 
             # Reject if the first sentence names a different product as the subject
@@ -360,29 +349,24 @@ def query_nvd(package_name, ecosystem, version=None):
                             ver_start_inc = cpe.get("versionStartIncluding")
                             ver_start_exc = cpe.get("versionStartExcluding")
 
-                            if (
-                                ver_end_exc
-                                or ver_end_inc
-                                or ver_start_inc
-                                or ver_start_exc
-                            ):
+                            if ver_end_exc or ver_end_inc or ver_start_inc or ver_start_exc:
                                 # Range-based CPE — check if our version falls within
                                 in_range = True
-                                if ver_start_inc and parse_version(
-                                    version
-                                ) < parse_version(ver_start_inc):
+                                if ver_start_inc and parse_version(version) < parse_version(
+                                    ver_start_inc
+                                ):
                                     in_range = False
-                                if ver_start_exc and parse_version(
-                                    version
-                                ) <= parse_version(ver_start_exc):
+                                if ver_start_exc and parse_version(version) <= parse_version(
+                                    ver_start_exc
+                                ):
                                     in_range = False
-                                if ver_end_exc and parse_version(
-                                    version
-                                ) >= parse_version(ver_end_exc):
+                                if ver_end_exc and parse_version(version) >= parse_version(
+                                    ver_end_exc
+                                ):
                                     in_range = False
-                                if ver_end_inc and parse_version(
-                                    version
-                                ) > parse_version(ver_end_inc):
+                                if ver_end_inc and parse_version(version) > parse_version(
+                                    ver_end_inc
+                                ):
                                     in_range = False
                                 if in_range:
                                     affected = True
@@ -395,9 +379,7 @@ def query_nvd(package_name, ecosystem, version=None):
                                     cpe_ver = cpe_parts[5]
                                     if cpe_ver in ("*", "-", ""):
                                         affected = True  # Wildcard — can't determine
-                                    elif parse_version(version) == parse_version(
-                                        cpe_ver
-                                    ):
+                                    elif parse_version(version) == parse_version(cpe_ver):
                                         affected = True
 
                 # If CPE data exists and our version isn't in any affected range, skip

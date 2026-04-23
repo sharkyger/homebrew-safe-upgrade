@@ -1,0 +1,36 @@
+[project]
+name = "homebrew-safe-upgrade"
+version = "0.1.0"
+description = "Security-first brew upgrade — checks packages against NIST NVD, OSV.dev, and GitHub Advisory before upgrading"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [{ name = "sharkyger" }]
+
+[tool.ruff]
+line-length = 100
+target-version = "py38"
+
+[tool.ruff.lint]
+select = [
+    "E",
+    "F",
+    "W",
+    "I",
+    "B",
+    "S",
+    "UP",
+    "SIM",
+]
+ignore = [
+    "S101",
+    "S310",  # urlopen — only queries known vuln APIs (NVD, OSV, GitHub)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101", "S603", "S607"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-v --strict-markers"

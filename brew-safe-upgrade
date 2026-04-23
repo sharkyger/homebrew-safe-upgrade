@@ -59,10 +59,10 @@ while read -r name installed current; do
     if [ -f "$SCRIPT" ]; then
         RESULT=$(python3 "$SCRIPT" brew "$name" "$current" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
 
-        if [ $EXIT_CODE -eq 0 ]; then
+        if [ "$EXIT_CODE" -eq 0 ]; then
             echo "  [ok] $name $current"
             CLEAN_COUNT=$((CLEAN_COUNT + 1))
-        elif [ $EXIT_CODE -eq 1 ]; then
+        elif [ "$EXIT_CODE" -eq 1 ]; then
             echo "  [VULN] $name $current -- vulnerabilities found!"
             echo "$RESULT" | grep -E 'CRITICAL|HIGH|MEDIUM' | head -3 || true
             BLOCKED_PKGS="$BLOCKED_PKGS $name"
@@ -105,7 +105,7 @@ elif [ -z "$EXCLUDE_PKGS" ] || [ "$EXCLUDE_PKGS" = " " ]; then
     if [ "$AUTO_YES" = true ]; then
         brew upgrade </dev/null 2>&1 || true
     else
-        read -p "All clean. Run brew upgrade? [Y/n] " CONFIRM
+        read -rp "All clean. Run brew upgrade? [Y/n] " CONFIRM
         if [[ ! "$CONFIRM" =~ ^[nN] ]]; then
             brew upgrade </dev/null 2>&1 || true
         fi
@@ -117,7 +117,7 @@ else
     if [ "$AUTO_YES" = true ]; then
         CONFIRM="y"
     else
-        read -p "Upgrade clean packages? Excluded ones will be skipped. [y/N] " CONFIRM
+        read -rp "Upgrade clean packages? Excluded ones will be skipped. [y/N] " CONFIRM
     fi
     if [[ "$CONFIRM" =~ ^[yY] ]]; then
         # Pin excluded packages so brew can't upgrade them as dependencies
