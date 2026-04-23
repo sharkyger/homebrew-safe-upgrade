@@ -489,6 +489,14 @@ def main():
     package_name = sys.argv[2]
     version = sys.argv[3] if len(sys.argv) > 3 else None
 
+    # Input validation — prevent SSRF via crafted package names
+    if not re.match(r"^[a-zA-Z0-9@._/\-]+$", package_name):
+        print(f"Invalid package name: {package_name}", file=sys.stderr)
+        sys.exit(2)
+    if version and not re.match(r"^[a-zA-Z0-9._\-+]+$", version):
+        print(f"Invalid version: {version}", file=sys.stderr)
+        sys.exit(2)
+
     valid_ecosystems = ["pip", "npm", "composer", "cargo", "go", "maven", "gem", "brew"]
     if ecosystem not in valid_ecosystems:
         print(
