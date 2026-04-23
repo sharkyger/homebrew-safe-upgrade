@@ -17,13 +17,14 @@ echo "Updating Homebrew..."
 brew update --quiet
 
 echo "Checking for outdated packages..."
-OUTDATED_JSON=$(brew outdated --json 2>/dev/null || echo '{"formulae":[]}')
-OUTDATED=$(echo "$OUTDATED_JSON" | python3 -c "
+OUTDATED_JSON=$(brew outdated --json=v2 2>/dev/null || echo '{"formulae":[],"casks":[]}')
+
+# Parse formulae
+OUTDATED_FORMULAE=$(echo "$OUTDATED_JSON" | python3 -c "
 import sys, json
 try:
     data = json.load(sys.stdin)
-    formulae = data.get('formulae', [])
-    for p in formulae:
+    for p in data.get('formulae', []):
         name = p.get('name', '')
         installed = p.get('installed_versions', ['?'])[0]
         current = p.get('current_version', '?')
@@ -32,20 +33,58 @@ except Exception:
     pass
 " 2>/dev/null)
 
-if [ -z "$OUTDATED" ]; then
+# Parse casks (same JSON keys as formulae: name, installed_versions, current_version)
+OUTDATED_CASKS=$(echo "$OUTDATED_JSON" | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    for c in data.get('casks', []):
+        name = c.get('name', '')
+        installed = c.get('installed_versions', ['?'])[0]
+        current = str(c.get('current_version', '?'))
+        # Strip SHA suffix from cask versions (e.g. '1.2.3,abc123' -> '1.2.3')
+        if ',' in current:
+            current = current.split(',')[0]
+        if ',' in str(installed):
+            installed = str(installed).split(',')[0]
+        print(f'{name} {installed} {current}')
+except Exception:
+    pass
+" 2>/dev/null)
+
+if [ -z "$OUTDATED_FORMULAE" ] && [ -z "$OUTDATED_CASKS" ]; then
     echo "Everything up to date."
     exit 0
 fi
 
-COUNT=$(echo "$OUTDATED" | wc -l | tr -d ' ')
+FORMULA_COUNT=0
+CASK_COUNT=0
+[ -n "$OUTDATED_FORMULAE" ] && FORMULA_COUNT=$(echo "$OUTDATED_FORMULAE" | wc -l | tr -d ' ')
+[ -n "$OUTDATED_CASKS" ] && CASK_COUNT=$(echo "$OUTDATED_CASKS" | wc -l | tr -d ' ')
+TOTAL_COUNT=$((FORMULA_COUNT + CASK_COUNT))
+
 echo ""
-echo "Found $COUNT outdated package(s):"
+echo "Found $TOTAL_COUNT outdated package(s) ($FORMULA_COUNT formulae, $CASK_COUNT casks):"
 echo ""
-printf "  %-30s %-15s %s\n" "Package" "Installed" "Available"
-printf "  %-30s %-15s %s\n" "-------" "---------" "---------"
-echo "$OUTDATED" | while read -r name installed current; do
-    printf "  %-30s %-15s -> %s\n" "$name" "$installed" "$current"
-done
+printf "  %-30s %-15s %-15s %s\n" "Package" "Type" "Installed" "Available"
+printf "  %-30s %-15s %-15s %s\n" "-------" "----" "---------" "---------"
+if [ -n "$OUTDATED_FORMULAE" ]; then
+    echo "$OUTDATED_FORMULAE" | while read -r name installed current; do
+        printf "  %-30s %-15s %-15s -> %s\n" "$name" "formula" "$installed" "$current"
+    done
+fi
+if [ -n "$OUTDATED_CASKS" ]; then
+    echo "$OUTDATED_CASKS" | while read -r name installed current; do
+        printf "  %-30s %-15s %-15s -> %s\n" "$name" "cask" "$installed" "$current"
+    done
+fi
+
+# Combine for security checking
+OUTDATED=""
+[ -n "$OUTDATED_FORMULAE" ] && OUTDATED="$OUTDATED_FORMULAE"
+if [ -n "$OUTDATED_CASKS" ]; then
+    [ -n "$OUTDATED" ] && OUTDATED="$OUTDATED"$'\n'"$OUTDATED_CASKS" || OUTDATED="$OUTDATED_CASKS"
+fi
 
 echo ""
 echo "Running security checks..."
@@ -57,14 +96,29 @@ CLEAN_COUNT=0
 
 while read -r name installed current; do
     if [ -f "$SCRIPT" ]; then
-        RESULT=$(python3 "$SCRIPT" brew "$name" "$current" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+        # Capture stdout (JSON) and stderr separately
+        RESULT_JSON=$(python3 "$SCRIPT" brew "$name" "$current" 2>/dev/null) && EXIT_CODE=0 || EXIT_CODE=$?
 
         if [ "$EXIT_CODE" -eq 0 ]; then
             echo "  [ok] $name $current"
             CLEAN_COUNT=$((CLEAN_COUNT + 1))
         elif [ "$EXIT_CODE" -eq 1 ]; then
             echo "  [VULN] $name $current -- vulnerabilities found!"
-            echo "$RESULT" | grep -E 'CRITICAL|HIGH|MEDIUM' | head -3 || true
+            # Parse CVE details from JSON output
+            echo "$RESULT_JSON" | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    for v in data.get('vulnerabilities', [])[:5]:
+        sev = v.get('severity', '?')
+        vid = v.get('id', '?')
+        score = v.get('score', 0)
+        src = v.get('source', '?')
+        score_str = f' (CVSS {score})' if score > 0 else ''
+        print(f'    [{sev}] {vid}{score_str} — {src}')
+except Exception:
+    pass
+" 2>/dev/null || true
             BLOCKED_PKGS="$BLOCKED_PKGS $name"
         else
             echo "  [skip] $name $current -- check failed, will not upgrade"
@@ -77,14 +131,28 @@ while read -r name installed current; do
     fi
 done <<< "$OUTDATED"
 
-# Build list of verified clean packages (exclude both blocked AND skipped)
+# Build separate clean lists for formulae and casks
 EXCLUDE_PKGS="$BLOCKED_PKGS $SKIPPED_PKGS"
-CLEAN_PKGS=""
-while read -r name installed current; do
-    if ! echo "$EXCLUDE_PKGS" | grep -qw "$name"; then
-        CLEAN_PKGS="$CLEAN_PKGS $name"
-    fi
-done <<< "$OUTDATED"
+CLEAN_PKGS_FORMULAE=""
+CLEAN_PKGS_CASKS=""
+
+if [ -n "$OUTDATED_FORMULAE" ]; then
+    while read -r name installed current; do
+        if ! echo "$EXCLUDE_PKGS" | grep -qw "$name"; then
+            CLEAN_PKGS_FORMULAE="$CLEAN_PKGS_FORMULAE $name"
+        fi
+    done <<< "$OUTDATED_FORMULAE"
+fi
+
+if [ -n "$OUTDATED_CASKS" ]; then
+    while read -r name installed current; do
+        if ! echo "$EXCLUDE_PKGS" | grep -qw "$name"; then
+            CLEAN_PKGS_CASKS="$CLEAN_PKGS_CASKS $name"
+        fi
+    done <<< "$OUTDATED_CASKS"
+fi
+
+CLEAN_PKGS="${CLEAN_PKGS_FORMULAE}${CLEAN_PKGS_CASKS}"
 
 # Summary
 echo ""
@@ -100,43 +168,47 @@ fi
 if [ -z "$CLEAN_PKGS" ]; then
     echo ""
     echo "No verified clean packages to upgrade."
-elif [ -z "$EXCLUDE_PKGS" ] || [ "$EXCLUDE_PKGS" = " " ]; then
-    # All packages are clean — plain brew upgrade
-    if [ "$AUTO_YES" = true ]; then
-        brew upgrade </dev/null 2>&1 || true
-    else
-        read -rp "All clean. Run brew upgrade? [Y/n] " CONFIRM
-        if [[ ! "$CONFIRM" =~ ^[nN] ]]; then
-            brew upgrade </dev/null 2>&1 || true
-        fi
-    fi
 else
     echo ""
-    echo "Clean packages to upgrade:$CLEAN_PKGS"
+    if [ -n "$CLEAN_PKGS_FORMULAE" ]; then
+        echo "Clean formulae to upgrade:$CLEAN_PKGS_FORMULAE"
+    fi
+    if [ -n "$CLEAN_PKGS_CASKS" ]; then
+        echo "Clean casks to upgrade:$CLEAN_PKGS_CASKS"
+    fi
     echo ""
     if [ "$AUTO_YES" = true ]; then
         CONFIRM="y"
     else
-        read -rp "Upgrade clean packages? Excluded ones will be skipped. [y/N] " CONFIRM
+        if [ -z "$EXCLUDE_PKGS" ] || [ "$EXCLUDE_PKGS" = " " ]; then
+            read -rp "All clean. Run brew upgrade? [Y/n] " CONFIRM
+            [[ "$CONFIRM" =~ ^[nN] ]] && CONFIRM="n" || CONFIRM="y"
+        else
+            read -rp "Upgrade clean packages? Excluded ones will be skipped. [y/N] " CONFIRM
+            [[ "$CONFIRM" =~ ^[yY] ]] && CONFIRM="y" || CONFIRM="n"
+        fi
     fi
-    if [[ "$CONFIRM" =~ ^[yY] ]]; then
-        # Pin excluded packages so brew can't upgrade them as dependencies
+    if [ "$CONFIRM" = "y" ]; then
+        # Pin excluded formulae so brew can't upgrade them as dependencies
         for pkg in $EXCLUDE_PKGS; do
             if [ -n "$pkg" ]; then
-                echo "  Pinning $pkg"
                 brew pin "$pkg" 2>/dev/null || true
             fi
         done
 
-        echo ""
-        # shellcheck disable=SC2086
-        brew upgrade $CLEAN_PKGS </dev/null 2>&1 || true
+        # Upgrade formulae and casks separately by name
+        if [ -n "$CLEAN_PKGS_FORMULAE" ]; then
+            # shellcheck disable=SC2086
+            brew upgrade --formula $CLEAN_PKGS_FORMULAE </dev/null 2>&1 || true
+        fi
+        if [ -n "$CLEAN_PKGS_CASKS" ]; then
+            # shellcheck disable=SC2086
+            brew upgrade --cask $CLEAN_PKGS_CASKS </dev/null 2>&1 || true
+        fi
 
         # Unpin excluded packages
-        echo ""
         for pkg in $EXCLUDE_PKGS; do
             if [ -n "$pkg" ]; then
-                echo "  Unpinning $pkg"
                 brew unpin "$pkg" 2>/dev/null || true
             fi
         done
