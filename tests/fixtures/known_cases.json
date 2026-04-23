@@ -1,0 +1,31 @@
+{
+  "comment": "Known-vulnerable and known-clean triples. Verified against live databases 2026-04-22.",
+  "vulnerable": [
+    {
+      "ecosystem": "pip",
+      "package": "requests",
+      "version": "2.19.0",
+      "reason": "CVE-2018-18074 — exposes Authorization header on redirect"
+    },
+    {
+      "ecosystem": "npm",
+      "package": "lodash",
+      "version": "4.17.15",
+      "reason": "CVE-2020-8203 — prototype pollution"
+    },
+    {
+      "ecosystem": "pip",
+      "package": "django",
+      "version": "2.2.0",
+      "reason": "Multiple CVEs in early 2.2.x series"
+    }
+  ],
+  "clean": [
+    {
+      "ecosystem": "brew",
+      "package": "wget",
+      "version": "1.25.0",
+      "reason": "Current stable, verified clean 2026-04-22"
+    }
+  ]
+}

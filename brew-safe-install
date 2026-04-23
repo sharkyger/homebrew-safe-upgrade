@@ -87,7 +87,6 @@ except Exception:
     PKG_TYPE=$(echo "$PKG_INFO" | awk '{print $1}')
     VERSION=$(echo "$PKG_INFO" | awk '{print $2}')
     BARE_NAME=$(echo "$PKG_INFO" | awk '{print $3}')
-    FULL_NAME=$(echo "$PKG_INFO" | awk '{print $4}')
     INSTALLED=$(echo "$PKG_INFO" | awk '{print $5}')
 
     if [ "$PKG_TYPE" = "error" ] || [ "$PKG_TYPE" = "unknown" ]; then
@@ -107,11 +106,11 @@ except Exception:
     # Run security check
     RESULT=$(python3 "$SCRIPT" brew "$BARE_NAME" "$VERSION" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
 
-    if [ $EXIT_CODE -eq 0 ]; then
+    if [ "$EXIT_CODE" -eq 0 ]; then
         echo "  [ok] $pkg $VERSION"
         CLEAN_PKGS="$CLEAN_PKGS $pkg"
         CLEAN_COUNT=$((CLEAN_COUNT + 1))
-    elif [ $EXIT_CODE -eq 1 ]; then
+    elif [ "$EXIT_CODE" -eq 1 ]; then
         echo "  [VULN] $pkg $VERSION -- vulnerabilities found!"
         echo "$RESULT" | grep -E 'CRITICAL|HIGH|MEDIUM' | head -3 || true
         BLOCKED_PKGS="$BLOCKED_PKGS $pkg"
@@ -143,13 +142,13 @@ CLEAN_PKGS=$(echo "$CLEAN_PKGS" | xargs)  # trim
 echo ""
 if [ -n "$BLOCKED_PKGS" ] || [ -n "$SKIPPED_PKGS" ]; then
     echo "Clean packages to install: $CLEAN_PKGS"
-    read -p "Install clean packages only? [y/N] " CONFIRM
+    read -rp "Install clean packages only? [y/N] " CONFIRM
     if [[ ! "$CONFIRM" =~ ^[yY] ]]; then
         echo "Cancelled."
         exit 0
     fi
 else
-    read -p "Install $CLEAN_PKGS? [Y/n] " CONFIRM
+    read -rp "Install $CLEAN_PKGS? [Y/n] " CONFIRM
     if [[ "$CONFIRM" =~ ^[nN] ]]; then
         echo "Cancelled."
         exit 0
