@@ -297,8 +297,18 @@ def query_nvd(package_name, ecosystem, version=None):
         for vuln in data.get("vulnerabilities", []):
             cve = vuln.get("cve", {})
             cve_id = cve.get("id", "unknown")
+
+            # Skip disputed CVEs — upstream doesn't consider them valid
+            vuln_status = cve.get("vulnStatus", "")
+            if "DISPUTED" in vuln_status.upper() or "REJECTED" in vuln_status.upper():
+                continue
+
             desc_list = cve.get("descriptions", [])
             desc = next((d["value"] for d in desc_list if d["lang"] == "en"), "No description")
+
+            # Skip CVEs explicitly marked as disputed in description
+            if desc.strip().startswith("** DISPUTED **"):
+                continue
 
             # Filter out CVEs that mention the keyword but are about different software
             desc_lower = desc.lower()
@@ -337,12 +347,37 @@ def query_nvd(package_name, ecosystem, version=None):
             if version:
                 affected = False
                 has_cpe = False
+                has_any_cpe = False
+                # Distro-specific vendors whose package versions don't match upstream
+                distro_vendors = {
+                    "opensuse",
+                    "suse",
+                    "redhat",
+                    "debian",
+                    "ubuntu",
+                    "canonical",
+                    "fedoraproject",
+                    "oracle",
+                    "centos",
+                }
                 configurations = cve.get("configurations", [])
                 for config in configurations:
                     for node in config.get("nodes", []):
                         for cpe in node.get("cpeMatch", []):
                             if not cpe.get("vulnerable", False):
                                 continue
+                            has_any_cpe = True
+                            # Skip distro/OS-specific CPEs — their versions don't match upstream
+                            cpe_str = cpe.get("criteria", "")
+                            cpe_parts = cpe_str.split(":")
+                            if len(cpe_parts) >= 5:
+                                cpe_type = cpe_parts[2].lower()  # a=app, o=os, h=hw
+                                cpe_vendor = cpe_parts[3].lower()
+                                # OS-type CPEs are distro packages, not upstream
+                                if cpe_type == "o":
+                                    continue
+                                if cpe_vendor in distro_vendors:
+                                    continue
                             has_cpe = True
                             ver_end_exc = cpe.get("versionEndExcluding")
                             ver_end_inc = cpe.get("versionEndIncluding")
@@ -384,6 +419,10 @@ def query_nvd(package_name, ecosystem, version=None):
 
                 # If CPE data exists and our version isn't in any affected range, skip
                 if has_cpe and not affected:
+                    continue
+
+                # All CPEs were distro-specific — not relevant to upstream/Homebrew
+                if has_any_cpe and not has_cpe:
                     continue
 
                 # Fallback: if no CPE data, try to extract version range from description
