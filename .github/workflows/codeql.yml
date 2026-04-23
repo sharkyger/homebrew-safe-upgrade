@@ -19,8 +19,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
-      - uses: github/codeql-action/init@b2f9ef845756500b97acbdaf5c1dd4e9c1d15734  # v3.35.2
+      - uses: github/codeql-action/init@ce64ddcb0d8d890d2df4a9d1c04ff297367dea2a  # v3.35.2
         with:
           languages: python
           queries: security-and-quality
-      - uses: github/codeql-action/analyze@b2f9ef845756500b97acbdaf5c1dd4e9c1d15734  # v3.35.2
+      - uses: github/codeql-action/analyze@ce64ddcb0d8d890d2df4a9d1c04ff297367dea2a  # v3.35.2
