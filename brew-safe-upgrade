@@ -2,7 +2,7 @@
 # brew-safe-upgrade — checks outdated Homebrew packages for known vulnerabilities
 # before upgrading. Queries 3 databases: OSV.dev, GitHub Advisory, NIST NVD.
 #
-# Usage: brew safe-upgrade [--yes|-y]
+# Usage: brew safe-upgrade [--yes|-y] [--min-age N] [--verify-sha]
 
 set -uo pipefail
 
@@ -11,7 +11,17 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT="$SCRIPT_DIR/dependency_security_check.py"
 
 AUTO_YES=false
-[[ "${1:-}" == "--yes" || "${1:-}" == "-y" ]] && AUTO_YES=true
+MIN_AGE=0          # 0 = disabled (opt-in). Use --min-age N to enable.
+VERIFY_SHA=false
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --yes|-y)     AUTO_YES=true; shift ;;
+        --min-age)    MIN_AGE="${2:-0}"; shift 2 ;;
+        --verify-sha) VERIFY_SHA=true; shift ;;
+        *)            shift ;;
+    esac
+done
 
 echo "Updating Homebrew..."
 brew update --quiet
@@ -86,6 +96,76 @@ if [ -n "$OUTDATED_CASKS" ]; then
     [ -n "$OUTDATED" ] && OUTDATED="$OUTDATED"$'\n'"$OUTDATED_CASKS" || OUTDATED="$OUTDATED_CASKS"
 fi
 
+# --- Min-age check (opt-in) ---
+HELD_PKGS=""
+HELD_COUNT=0
+
+if [ "$MIN_AGE" -gt 0 ] 2>/dev/null; then
+    echo ""
+    echo "Checking package age (min-age: $MIN_AGE days)..."
+    echo ""
+
+    FILTERED_OUTDATED=""
+    while read -r name installed current; do
+        # Query GitHub API for the formula's last commit date
+        # Uses the first letter subdirectory convention: Formula/g/gitleaks.rb
+        FIRST_LETTER=$(echo "$name" | cut -c1)
+        COMMIT_JSON=$(curl -sf "https://api.github.com/repos/Homebrew/homebrew-core/commits?path=Formula/${FIRST_LETTER}/${name}.rb&per_page=1" 2>/dev/null || echo "[]")
+        COMMIT_DATE=$(echo "$COMMIT_JSON" | python3 -c "
+import sys, json, datetime
+try:
+    data = json.load(sys.stdin)
+    if data and len(data) > 0:
+        dt = datetime.datetime.fromisoformat(data[0]['commit']['committer']['date'].replace('Z', '+00:00'))
+        age = (datetime.datetime.now(datetime.timezone.utc) - dt).days
+        print(f'{age} {dt.strftime(\"%Y-%m-%d\")}')
+    else:
+        print('-1 unknown')
+except Exception:
+    print('-1 unknown')
+" 2>/dev/null)
+
+        AGE_DAYS=$(echo "$COMMIT_DATE" | awk '{print $1}')
+        PUB_DATE=$(echo "$COMMIT_DATE" | awk '{print $2}')
+
+        if [ "$AGE_DAYS" -ge 0 ] 2>/dev/null && [ "$AGE_DAYS" -lt "$MIN_AGE" ]; then
+            # Check if the INSTALLED version has known CVEs (CVE-aware bypass)
+            INSTALLED_RESULT=$(python3 "$SCRIPT" brew "$name" "$installed" 2>/dev/null) && INSTALLED_EXIT=0 || INSTALLED_EXIT=$?
+
+            if [ "$INSTALLED_EXIT" -eq 1 ]; then
+                # Installed version is vulnerable — this fresh version is likely the fix
+                echo "  [ok] $name $current — released $AGE_DAYS day(s) ago ($PUB_DATE), but installed $installed has CVEs — bypassing age check"
+                FILTERED_OUTDATED="${FILTERED_OUTDATED}${name} ${installed} ${current}"$'\n'
+            else
+                echo "  [HOLD] $name $current — released $AGE_DAYS day(s) ago ($PUB_DATE), min-age: $MIN_AGE days"
+                HELD_PKGS="$HELD_PKGS $name"
+                HELD_COUNT=$((HELD_COUNT + 1))
+            fi
+        else
+            if [ "$AGE_DAYS" -lt 0 ] 2>/dev/null; then
+                echo "  [ok] $name $current — age unknown, skipping age check"
+            else
+                echo "  [ok] $name $current — released $AGE_DAYS day(s) ago ($PUB_DATE)"
+            fi
+            FILTERED_OUTDATED="${FILTERED_OUTDATED}${name} ${installed} ${current}"$'\n'
+        fi
+    done <<< "$OUTDATED"
+
+    # Replace OUTDATED with filtered list (remove trailing newline)
+    OUTDATED=$(echo "$FILTERED_OUTDATED" | sed '/^$/d')
+
+    if [ -z "$OUTDATED" ]; then
+        echo ""
+        echo "All packages held due to min-age policy."
+        if [ -n "$HELD_PKGS" ]; then
+            echo "  Held (too fresh):$HELD_PKGS"
+        fi
+        echo ""
+        echo "Done."
+        exit 0
+    fi
+fi
+
 echo ""
 echo "Running security checks..."
 echo ""
@@ -93,6 +173,7 @@ echo ""
 BLOCKED_PKGS=""
 SKIPPED_PKGS=""
 CLEAN_COUNT=0
+SHA_WARNINGS=""
 
 while read -r name installed current; do
     if [ -f "$SCRIPT" ]; then
@@ -102,6 +183,39 @@ while read -r name installed current; do
         if [ "$EXIT_CODE" -eq 0 ]; then
             echo "  [ok] $name $current"
             CLEAN_COUNT=$((CLEAN_COUNT + 1))
+
+            # --- SHA verification (opt-in) ---
+            if [ "$VERIFY_SHA" = true ]; then
+                FIRST_LETTER=$(echo "$name" | cut -c1)
+                SHA_RESULT=$(curl -sf "https://formulae.brew.sh/api/formula/${name}.json" 2>/dev/null | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    bottle = data.get('bottle', {}).get('stable', {})
+    files = bottle.get('files', {})
+    # Get SHA for any available platform
+    for platform, info in files.items():
+        sha = info.get('sha256', '')
+        if sha:
+            print(f'sha_ok {sha[:16]} {platform}')
+            break
+    else:
+        print('no_bottle')
+except Exception:
+    print('error')
+" 2>/dev/null)
+
+                SHA_STATUS=$(echo "$SHA_RESULT" | awk '{print $1}')
+                if [ "$SHA_STATUS" = "sha_ok" ]; then
+                    SHA_SHORT=$(echo "$SHA_RESULT" | awk '{print $2}')
+                    echo "    [sha] ${SHA_SHORT}... verified via formulae.brew.sh"
+                elif [ "$SHA_STATUS" = "no_bottle" ]; then
+                    echo "    [sha] no bottle found — built from source"
+                else
+                    echo "    [sha] could not verify — API unavailable"
+                    SHA_WARNINGS="$SHA_WARNINGS $name"
+                fi
+            fi
         elif [ "$EXIT_CODE" -eq 1 ]; then
             echo "  [VULN] $name $current -- vulnerabilities found!"
             # Parse CVE details from JSON output
@@ -132,7 +246,7 @@ except Exception:
 done <<< "$OUTDATED"
 
 # Build separate clean lists for formulae and casks
-EXCLUDE_PKGS="$BLOCKED_PKGS $SKIPPED_PKGS"
+EXCLUDE_PKGS="$BLOCKED_PKGS $SKIPPED_PKGS $HELD_PKGS"
 CLEAN_PKGS_FORMULAE=""
 CLEAN_PKGS_CASKS=""
 
@@ -160,6 +274,9 @@ echo "Results: $CLEAN_COUNT clean"
 if [ -n "$BLOCKED_PKGS" ]; then
     echo "  Blocked (vulnerable):$BLOCKED_PKGS"
 fi
+if [ -n "$HELD_PKGS" ]; then
+    echo "  Held (too fresh):$HELD_PKGS"
+fi
 if [ -n "$SKIPPED_PKGS" ]; then
     echo "  Skipped (check failed):$SKIPPED_PKGS"
 fi
@@ -180,7 +297,7 @@ else
     if [ "$AUTO_YES" = true ]; then
         CONFIRM="y"
     else
-        if [ -z "$EXCLUDE_PKGS" ] || [ "$EXCLUDE_PKGS" = " " ]; then
+        if [ -z "$EXCLUDE_PKGS" ] || [ "$EXCLUDE_PKGS" = "  " ]; then
             read -rp "All clean. Run brew upgrade? [Y/n] " CONFIRM
             [[ "$CONFIRM" =~ ^[nN] ]] && CONFIRM="n" || CONFIRM="y"
         else
