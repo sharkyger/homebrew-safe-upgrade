@@ -87,6 +87,44 @@ brew safe-upgrade --yes
 
 Automatically upgrades clean packages and skips vulnerable ones without prompting.
 
+
+### Minimum-age check (opt-in)
+
+Hold back packages published less than N days ago. Protects against supply chain attacks where a compromised version is published minutes after credential theft — before any CVE database knows about it.
+
+```
+brew safe-upgrade --min-age 3
+```
+
+```
+Checking package age (min-age: 3 days)...
+
+  [ok] gh 2.91.0 — released 12 day(s) ago (2026-04-12)
+  [ok] imagemagick 7.1.2-21 — released 8 day(s) ago (2026-04-16)
+  [HOLD] some-pkg 2.0.0 — released 1 day(s) ago (2026-04-23), min-age: 3 days
+```
+
+**CVE-aware bypass:** If your *installed* version has known CVEs, the age check is skipped — the fresh version is likely the fix, and holding it back would leave you exposed. This means `--min-age` never prevents security patches from reaching you.
+
+Use `--min-age 0` to disable (default behavior).
+
+> **What should the default be?** We ship with off by default (opt-in). The community is discussing whether it should be on by default: [Discussion #14](https://github.com/sharkyger/homebrew-safe-upgrade/discussions/14)
+
+### SHA verification (opt-in)
+
+Verify bottle checksums against the Homebrew formulae API before upgrading. Detects local tap tampering.
+
+```
+brew safe-upgrade --verify-sha
+```
+
+```
+  [ok] gh 2.91.0
+    [sha] ea543daa28d39acc... verified via formulae.brew.sh
+```
+
+Note: Homebrew already verifies bottle SHAs during install. This adds a pre-upgrade check against the remote API as an independent verification. Advisory only — never blocks.
+
 ## brew safe-install
 
 Same security gate, but for installing new packages.
@@ -113,6 +151,14 @@ Resolving package versions...
 Results: 2 clean out of 2 package(s)
 
 Install wget imagemagick? [Y/n]
+```
+
+
+Supports the same `--min-age` and `--verify-sha` flags:
+
+```
+brew safe-install --min-age 3 wget curl
+brew safe-install --verify-sha --cask firefox
 ```
 
 Works with formulae, casks, and tap packages:

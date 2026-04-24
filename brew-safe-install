@@ -3,6 +3,8 @@
 # Queries 3 databases: OSV.dev, GitHub Advisory, NIST NVD.
 #
 # Usage: brew safe-install [flags] package1 [package2 ...]
+#        --min-age N     Hold packages published less than N days ago (default: 0 = off)
+#        --verify-sha    Verify bottle SHA against formulae.brew.sh API
 
 set -uo pipefail
 
@@ -16,21 +18,30 @@ if [ ! -f "$SCRIPT" ]; then
     exit 2
 fi
 
-# Separate flags from package names
+# Separate our flags, brew flags, and package names
 BREW_FLAGS=""
 PACKAGES=""
-for arg in "$@"; do
-    if [[ "$arg" == -* ]]; then
-        BREW_FLAGS="$BREW_FLAGS $arg"
-    else
-        PACKAGES="$PACKAGES $arg"
-    fi
+MIN_AGE=0
+VERIFY_SHA=false
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --min-age)    MIN_AGE="${2:-0}"; shift 2 ;;
+        --verify-sha) VERIFY_SHA=true; shift ;;
+        -*)           BREW_FLAGS="$BREW_FLAGS $1"; shift ;;
+        *)            PACKAGES="$PACKAGES $1"; shift ;;
+    esac
 done
 
 PACKAGES=$(echo "$PACKAGES" | xargs)  # trim whitespace
 
 if [ -z "$PACKAGES" ]; then
     echo "Usage: brew safe-install [flags] package1 [package2 ...]"
+    echo ""
+    echo "Options:"
+    echo "  --min-age N     Hold packages published less than N days ago (default: 0 = off)"
+    echo "  --verify-sha    Verify bottle SHA against formulae.brew.sh API"
+    echo "  All other flags are passed through to brew install."
     exit 2
 fi
 
@@ -39,6 +50,7 @@ echo ""
 
 BLOCKED_PKGS=""
 SKIPPED_PKGS=""
+HELD_PKGS=""
 CLEAN_PKGS=""
 CLEAN_COUNT=0
 PKG_COUNT=0
@@ -101,7 +113,39 @@ except Exception:
         continue
     fi
 
-    echo "  Checking $pkg ($PKG_TYPE, version $VERSION)..."
+    # --- Min-age check (opt-in) ---
+    if [ "$MIN_AGE" -gt 0 ] 2>/dev/null && [ "$PKG_TYPE" = "formula" ]; then
+        FIRST_LETTER=$(echo "$BARE_NAME" | cut -c1)
+        COMMIT_JSON=$(curl -sf "https://api.github.com/repos/Homebrew/homebrew-core/commits?path=Formula/${FIRST_LETTER}/${BARE_NAME}.rb&per_page=1" 2>/dev/null || echo "[]")
+        AGE_INFO=$(echo "$COMMIT_JSON" | python3 -c "
+import sys, json, datetime
+try:
+    data = json.load(sys.stdin)
+    if data and len(data) > 0:
+        dt = datetime.datetime.fromisoformat(data[0]['commit']['committer']['date'].replace('Z', '+00:00'))
+        age = (datetime.datetime.now(datetime.timezone.utc) - dt).days
+        print(f'{age} {dt.strftime(\"%Y-%m-%d\")}')
+    else:
+        print('-1 unknown')
+except Exception:
+    print('-1 unknown')
+" 2>/dev/null)
+
+        AGE_DAYS=$(echo "$AGE_INFO" | awk '{print $1}')
+        PUB_DATE=$(echo "$AGE_INFO" | awk '{print $2}')
+
+        if [ "$AGE_DAYS" -ge 0 ] 2>/dev/null && [ "$AGE_DAYS" -lt "$MIN_AGE" ]; then
+            echo "  [HOLD] $pkg $VERSION — released $AGE_DAYS day(s) ago ($PUB_DATE), min-age: $MIN_AGE days"
+            HELD_PKGS="$HELD_PKGS $pkg"
+            continue
+        elif [ "$AGE_DAYS" -ge 0 ] 2>/dev/null; then
+            echo "  Checking $pkg ($PKG_TYPE, version $VERSION, released $AGE_DAYS day(s) ago)..."
+        else
+            echo "  Checking $pkg ($PKG_TYPE, version $VERSION, age unknown)..."
+        fi
+    else
+        echo "  Checking $pkg ($PKG_TYPE, version $VERSION)..."
+    fi
 
     # Run security check
     RESULT=$(python3 "$SCRIPT" brew "$BARE_NAME" "$VERSION" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
@@ -110,6 +154,36 @@ except Exception:
         echo "  [ok] $pkg $VERSION"
         CLEAN_PKGS="$CLEAN_PKGS $pkg"
         CLEAN_COUNT=$((CLEAN_COUNT + 1))
+
+        # --- SHA verification (opt-in) ---
+        if [ "$VERIFY_SHA" = true ] && [ "$PKG_TYPE" = "formula" ]; then
+            SHA_RESULT=$(curl -sf "https://formulae.brew.sh/api/formula/${BARE_NAME}.json" 2>/dev/null | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    bottle = data.get('bottle', {}).get('stable', {})
+    files = bottle.get('files', {})
+    for platform, info in files.items():
+        sha = info.get('sha256', '')
+        if sha:
+            print(f'sha_ok {sha[:16]} {platform}')
+            break
+    else:
+        print('no_bottle')
+except Exception:
+    print('error')
+" 2>/dev/null)
+
+            SHA_STATUS=$(echo "$SHA_RESULT" | awk '{print $1}')
+            if [ "$SHA_STATUS" = "sha_ok" ]; then
+                SHA_SHORT=$(echo "$SHA_RESULT" | awk '{print $2}')
+                echo "    [sha] ${SHA_SHORT}... verified via formulae.brew.sh"
+            elif [ "$SHA_STATUS" = "no_bottle" ]; then
+                echo "    [sha] no bottle found — built from source"
+            else
+                echo "    [sha] could not verify — API unavailable"
+            fi
+        fi
     elif [ "$EXIT_CODE" -eq 1 ]; then
         echo "  [VULN] $pkg $VERSION -- vulnerabilities found!"
         echo "$RESULT" | grep -E 'CRITICAL|HIGH|MEDIUM' | head -3 || true
@@ -126,6 +200,9 @@ echo "Results: $CLEAN_COUNT clean out of $PKG_COUNT package(s)"
 if [ -n "$BLOCKED_PKGS" ]; then
     echo "  Blocked (vulnerable):$BLOCKED_PKGS"
 fi
+if [ -n "$HELD_PKGS" ]; then
+    echo "  Held (too fresh):$HELD_PKGS"
+fi
 if [ -n "$SKIPPED_PKGS" ]; then
     echo "  Skipped:$SKIPPED_PKGS"
 fi
@@ -140,7 +217,7 @@ fi
 CLEAN_PKGS=$(echo "$CLEAN_PKGS" | xargs)  # trim
 
 echo ""
-if [ -n "$BLOCKED_PKGS" ] || [ -n "$SKIPPED_PKGS" ]; then
+if [ -n "$BLOCKED_PKGS" ] || [ -n "$SKIPPED_PKGS" ] || [ -n "$HELD_PKGS" ]; then
     echo "Clean packages to install: $CLEAN_PKGS"
     read -rp "Install clean packages only? [y/N] " CONFIRM
     if [[ ! "$CONFIRM" =~ ^[yY] ]]; then
