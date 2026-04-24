@@ -130,7 +130,7 @@ except Exception:
 
         if [ "$AGE_DAYS" -ge 0 ] 2>/dev/null && [ "$AGE_DAYS" -lt "$MIN_AGE" ]; then
             # Check if the INSTALLED version has known CVEs (CVE-aware bypass)
-            INSTALLED_RESULT=$(python3 "$SCRIPT" brew "$name" "$installed" 2>/dev/null) && INSTALLED_EXIT=0 || INSTALLED_EXIT=$?
+            _INSTALLED_RESULT=$(python3 "$SCRIPT" brew "$name" "$installed" 2>/dev/null) && INSTALLED_EXIT=0 || INSTALLED_EXIT=$?
 
             if [ "$INSTALLED_EXIT" -eq 1 ]; then
                 # Installed version is vulnerable — this fresh version is likely the fix
