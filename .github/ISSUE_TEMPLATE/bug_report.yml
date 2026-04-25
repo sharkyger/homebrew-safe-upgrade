@@ -1,0 +1,68 @@
+name: Bug report
+description: Something doesn't work the way it should
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. If the issue is a CVE check that flagged a package incorrectly, please use the **False positive** template instead.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description of the bug.
+      placeholder: When I run `brew safe-upgrade`, it...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect to happen?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Run `brew safe-upgrade ...`
+        2. See output
+    validations:
+      required: true
+  - type: input
+    id: install-source
+    attributes:
+      label: How did you install the tool?
+      placeholder: e.g. install.sh on 2026-04-20, or git clone of commit abc123
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - macOS Apple Silicon
+        - macOS Intel
+        - Linux
+    validations:
+      required: true
+  - type: input
+    id: brew-version
+    attributes:
+      label: Homebrew version
+      description: Output of `brew --version`
+    validations:
+      required: true
+  - type: input
+    id: python-version
+    attributes:
+      label: Python version
+      description: Output of `python3 --version`
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant output / logs
+      description: Paste the full command output. Use code blocks.
+      render: shell

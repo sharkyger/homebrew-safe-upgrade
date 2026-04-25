@@ -1,0 +1,59 @@
+name: False positive (CVE check)
+description: A package was flagged but the version isn't actually affected
+labels: [false-positive, cve-check]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        False positives usually come from CVE descriptions that don't include precise CPE version data — the tool falls back to keyword/version-string matching, which can misfire.
+
+        Please include enough detail that the fix can be tested.
+  - type: input
+    id: package
+    attributes:
+      label: Package name
+      placeholder: e.g. imagemagick
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version that was flagged
+      placeholder: e.g. 7.1.2-21
+    validations:
+      required: true
+  - type: input
+    id: cve
+    attributes:
+      label: CVE ID(s) flagged
+      description: Comma-separated if multiple
+      placeholder: e.g. CVE-2026-12345
+    validations:
+      required: true
+  - type: dropdown
+    id: source
+    attributes:
+      label: Which database flagged it?
+      multiple: true
+      options:
+        - NIST NVD
+        - OSV.dev
+        - GitHub Advisory
+        - Not sure / multiple
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Why this is a false positive
+      description: Link the CVE entry, paste the affected-version range, or explain why your version isn't in scope.
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Tool output
+      description: Paste the full output of the security check.
+      render: shell
+    validations:
+      required: true
