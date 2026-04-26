@@ -8,6 +8,28 @@ The project is pre-1.0; expect minor breaking changes between 0.x releases until
 
 ## [Unreleased]
 
+## [0.1.1] — 2026-04-26
+
+Hardening pass following the v0.1.0 review. All changes are internal correctness and defense-in-depth improvements; the public flag/env-var surface is unchanged.
+
+### Fixed
+- `brew list --versions` parsing now uses `awk '$NF'` instead of `awk '$2'`, so when multiple kegs of one formula are installed the **latest** version is used for the incoming-vs-installed comparison rather than the oldest.
+- `INCOMING_DEPS` is now a proper bash array. Iteration uses quoted `${INCOMING_DEPS_ARR[@]}` expansion, preserving whitespace in pathological tap dep names that the previous flat-string approach would have split.
+- `--min-age` for tap-namespaced deps (`foo/bar/baz`) is now an explicit `[skip-dep-age]` log line. Previously the GitHub `homebrew-core` lookup would 404 silently and the age gate fell through unenforced.
+
+### Security (defense in depth)
+- Dep names from `brew deps` output are validated against a `^[a-zA-Z0-9@._/-]+$` regex before being interpolated into any curl URL or passed to the CVE checker. A malformed name from a compromised tap is rejected with `[skip-dep] -- invalid name, refusing to query`.
+- The same regex guard is now applied to the **main-package** age check in both `brew-safe-install` and `brew-safe-upgrade`. (Previously only the dep-check code was protected; the main-package path inherited a pre-existing gap from before the SSRF input validation in PR #11.)
+
+### Changed
+- The pre-install / pre-upgrade warning block no longer combines vulnerable and too-fresh deps under one `"known issues"` header. Vulnerable deps now appear under `"WARNING: incoming dependencies have known CVEs:"`; fresh deps under `"Incoming dependencies are below --min-age:"`. They are distinct risk signals and the previous wording conflated them.
+- `brew-safe-upgrade --yes` stderr bypass message reworded from `"despite dep CVE warnings"` to `"despite dep warnings"` (now covers both CVE and freshness holds).
+
+### Documented
+- Added an in-code design note explaining why transitive deps deliberately do **not** receive the CVE-aware `--min-age` bypass that applies to the user-named package.
+
+
+
 ### Added
 - Transitive dependency check for `brew safe-install` and `brew safe-upgrade`. The same vulnerability gate that protects the package you're installing is now applied to the dependencies that come in with it — both brand-new deps and existing deps whose version is being bumped. Already-installed deps that aren't changing are deliberately left to [`brew-vulns`](https://github.com/Homebrew/homebrew-brew-vulns).
 - For `safe-upgrade`, incoming deps are deduplicated across the whole upgrade batch (so `openssl@3` appearing in five outdated packages is checked once).
