@@ -1,16 +1,23 @@
 #!/bin/bash
-# brew-safe-install — checks packages for known vulnerabilities before installing.
+# brew-safe-install — checks packages AND their incoming dependencies for known
+# vulnerabilities before installing.
 # Queries 3 databases: OSV.dev, GitHub Advisory, NIST NVD.
 #
 # Usage: brew safe-install [flags] package1 [package2 ...]
 #        --min-age N     Hold packages published less than N days ago (default: 0 = off)
 #        --verify-sha    Verify bottle SHA against formulae.brew.sh API
+#        --no-deps       Skip transitive dependency checking (default: check)
+#
+# Environment:
+#        BREW_SAFE_NO_DEPS=1   Same as --no-deps (handy for CI / aliases)
 
 set -uo pipefail
 
-# Locate the security check script relative to this script
+# Locate the security check script relative to this script.
+# DEPENDENCY_SECURITY_CHECK env var overrides the path (used by the test suite
+# to inject a stub; production users should leave it unset).
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SCRIPT="$SCRIPT_DIR/dependency_security_check.py"
+SCRIPT="${DEPENDENCY_SECURITY_CHECK:-$SCRIPT_DIR/dependency_security_check.py}"
 
 if [ ! -f "$SCRIPT" ]; then
     echo "Error: Security check script not found at $SCRIPT"
@@ -23,11 +30,16 @@ BREW_FLAGS=""
 PACKAGES=""
 MIN_AGE=0
 VERIFY_SHA=false
+CHECK_DEPS=true
+case "${BREW_SAFE_NO_DEPS:-}" in
+    1|true|TRUE|yes|YES) CHECK_DEPS=false ;;
+esac
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --min-age)    MIN_AGE="${2:-0}"; shift 2 ;;
         --verify-sha) VERIFY_SHA=true; shift ;;
+        --no-deps)    CHECK_DEPS=false; shift ;;
         -*)           BREW_FLAGS="$BREW_FLAGS $1"; shift ;;
         *)            PACKAGES="$PACKAGES $1"; shift ;;
     esac
@@ -41,6 +53,8 @@ if [ -z "$PACKAGES" ]; then
     echo "Options:"
     echo "  --min-age N     Hold packages published less than N days ago (default: 0 = off)"
     echo "  --verify-sha    Verify bottle SHA against formulae.brew.sh API"
+    echo "  --no-deps       Skip transitive dependency checking (default: check)"
+    echo "                  Or set BREW_SAFE_NO_DEPS=1 in your environment."
     echo "  All other flags are passed through to brew install."
     exit 2
 fi
@@ -215,6 +229,134 @@ if [ -z "$CLEAN_PKGS" ]; then
 fi
 
 CLEAN_PKGS=$(echo "$CLEAN_PKGS" | xargs)  # trim
+
+# --- Transitive dependency check (default on; --no-deps to skip) ---
+# Entry format inside INCOMING_DEPS: "<dep>|<version>"
+# `|` is used as the separator because Homebrew formula names contain `@`
+# (e.g. openssl@3) and versions occasionally contain `@` too. `|` cannot.
+DEP_BLOCKED=""
+DEP_BLOCKED_REASONS=""
+DEP_SKIPPED=""
+
+if [ "$CHECK_DEPS" = true ] && [ -n "$CLEAN_PKGS" ]; then
+    echo ""
+    echo "Checking transitive dependencies..."
+
+    INCOMING_DEPS=""
+    for pkg in $CLEAN_PKGS; do
+        # Read deps into an array preserving lines so a dep name with a space
+        # (third-party taps) isn't word-split. macOS ships bash 3.2, so no
+        # `mapfile` — explicit `while read` instead.
+        DEPS_ARR=()
+        while IFS= read -r line; do
+            [ -n "$line" ] && DEPS_ARR+=("$line")
+        done < <(brew deps "$pkg" 2>/dev/null || true)
+
+        for dep in ${DEPS_ARR[@]+"${DEPS_ARR[@]}"}; do
+            [ -z "$dep" ] && continue
+
+            LATEST=$(brew info --json=v2 --formula "$dep" 2>/dev/null | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    f = d.get('formulae', [])
+    if f:
+        print(f[0].get('versions', {}).get('stable', ''))
+except Exception:
+    pass
+" 2>/dev/null)
+            # Strip Homebrew revision suffix (`_1`, `_2`, …) so a revision bump
+            # of an already-current formula isn't classified as incoming.
+            INSTALLED_VER=$(brew list --versions --formula "$dep" 2>/dev/null | awk '{print $2}' | sed 's/_[0-9]*$//')
+
+            [ -z "$LATEST" ] && continue
+
+            if [ -z "$INSTALLED_VER" ] || [ "$INSTALLED_VER" != "$LATEST" ]; then
+                if ! echo " $INCOMING_DEPS " | grep -qF " ${dep}|${LATEST} "; then
+                    INCOMING_DEPS="$INCOMING_DEPS ${dep}|${LATEST}"
+                fi
+            fi
+        done
+    done
+
+    INCOMING_DEPS=$(echo "$INCOMING_DEPS" | xargs)
+
+    if [ -z "$INCOMING_DEPS" ]; then
+        echo "  No new dependency versions coming in."
+    else
+        DEP_COUNT=$(echo "$INCOMING_DEPS" | wc -w | tr -d ' ')
+        echo "  Found $DEP_COUNT incoming dependency version(s) to check"
+        echo ""
+
+        for entry in $INCOMING_DEPS; do
+            DEP=${entry%|*}
+            DEP_VER=${entry##*|}
+
+            if [ "$MIN_AGE" -gt 0 ] 2>/dev/null; then
+                FIRST_LETTER=$(echo "$DEP" | cut -c1)
+                COMMIT_JSON=$(curl -sf "https://api.github.com/repos/Homebrew/homebrew-core/commits?path=Formula/${FIRST_LETTER}/${DEP}.rb&per_page=1" 2>/dev/null || echo "[]")
+                AGE_INFO=$(echo "$COMMIT_JSON" | python3 -c "
+import sys, json, datetime
+try:
+    data = json.load(sys.stdin)
+    if data and len(data) > 0:
+        dt = datetime.datetime.fromisoformat(data[0]['commit']['committer']['date'].replace('Z', '+00:00'))
+        age = (datetime.datetime.now(datetime.timezone.utc) - dt).days
+        print(f'{age} {dt.strftime(\"%Y-%m-%d\")}')
+    else:
+        print('-1 unknown')
+except Exception:
+    print('-1 unknown')
+" 2>/dev/null)
+                AGE_DAYS=$(echo "$AGE_INFO" | awk '{print $1}')
+                PUB_DATE=$(echo "$AGE_INFO" | awk '{print $2}')
+                if [ "$AGE_DAYS" -ge 0 ] 2>/dev/null && [ "$AGE_DAYS" -lt "$MIN_AGE" ]; then
+                    echo "    [HOLD-DEP] $DEP $DEP_VER -- released $AGE_DAYS day(s) ago ($PUB_DATE), min-age: $MIN_AGE days"
+                    DEP_BLOCKED="$DEP_BLOCKED $DEP"
+                    DEP_BLOCKED_REASONS="${DEP_BLOCKED_REASONS}    $DEP $DEP_VER: too fresh ($AGE_DAYS days old, min-age $MIN_AGE)"$'\n'
+                    continue
+                fi
+            fi
+
+            DEP_RESULT=$(python3 "$SCRIPT" brew "$DEP" "$DEP_VER" 2>&1) && DEP_EXIT=0 || DEP_EXIT=$?
+
+            if [ "$DEP_EXIT" -eq 0 ]; then
+                echo "    [ok-dep] $DEP $DEP_VER"
+            elif [ "$DEP_EXIT" -eq 1 ]; then
+                echo "    [VULN-DEP] $DEP $DEP_VER -- vulnerabilities found"
+                SUMMARY=$(echo "$DEP_RESULT" | grep -E 'CRITICAL|HIGH|MEDIUM' | head -1 || true)
+                DEP_BLOCKED="$DEP_BLOCKED $DEP"
+                DEP_BLOCKED_REASONS="${DEP_BLOCKED_REASONS}    $DEP $DEP_VER: ${SUMMARY:-vulnerabilities reported}"$'\n'
+            else
+                echo "    [skip-dep] $DEP $DEP_VER -- check failed (network or DB error)"
+                DEP_SKIPPED="$DEP_SKIPPED $DEP"
+            fi
+        done
+
+        if [ -n "$DEP_SKIPPED" ]; then
+            echo ""
+            echo "  Note: dep checks failed for:$DEP_SKIPPED"
+            echo "  These will install unchecked. Re-run later or use --no-deps to suppress."
+        fi
+
+        if [ -n "$DEP_BLOCKED" ]; then
+            echo ""
+            echo "WARNING: incoming dependencies have known issues:"
+            printf "%s" "$DEP_BLOCKED_REASONS"
+            echo "Proceeding will let brew install them anyway."
+            read -rp "Continue install of $CLEAN_PKGS? [y/N] " DEP_CONFIRM
+            if [[ ! "$DEP_CONFIRM" =~ ^[yY] ]]; then
+                echo "Cancelled."
+                exit 0
+            fi
+        fi
+    fi
+else
+    if [ "$CHECK_DEPS" = false ]; then
+        echo ""
+        echo "Dependency check skipped (--no-deps / BREW_SAFE_NO_DEPS=1)."
+    fi
+fi
 
 echo ""
 if [ -n "$BLOCKED_PKGS" ] || [ -n "$SKIPPED_PKGS" ] || [ -n "$HELD_PKGS" ]; then

@@ -1,0 +1,57 @@
+#!/bin/bash
+# Mock `brew` for testing brew-safe-install / brew-safe-upgrade.
+# Reads canned responses from MOCK_BREW_DIR.
+#
+# Supported subcommands (just enough for the wrappers):
+#   brew info --json=v2 [--formula] <name>
+#   brew deps <name>
+#   brew list --versions [--formula] <name>
+#   brew install <args...>           — no-op success
+#   brew update                      — no-op success
+#   brew upgrade <args...>           — no-op success
+#   brew outdated --json=v2          — returns outdated.json
+#   brew pin/unpin <name>            — no-op success
+
+DIR="${MOCK_BREW_DIR:-/dev/null}"
+
+case "$1" in
+    info)
+        # last positional arg is the package name
+        for arg in "$@"; do :; done
+        NAME="$arg"
+        F="$DIR/info_${NAME}.json"
+        if [ -f "$F" ]; then
+            cat "$F"
+        else
+            echo '{"formulae":[],"casks":[]}'
+        fi
+        ;;
+    deps)
+        # last positional arg is the package name
+        for arg in "$@"; do :; done
+        NAME="$arg"
+        F="$DIR/deps_${NAME}.txt"
+        [ -f "$F" ] && cat "$F" || true
+        ;;
+    list)
+        # `brew list --versions --formula <name>` → installed versions
+        for arg in "$@"; do :; done
+        NAME="$arg"
+        F="$DIR/list_${NAME}.txt"
+        [ -f "$F" ] && cat "$F" || true
+        ;;
+    outdated)
+        F="$DIR/outdated.json"
+        if [ -f "$F" ]; then
+            cat "$F"
+        else
+            echo '{"formulae":[],"casks":[]}'
+        fi
+        ;;
+    install|update|upgrade|pin|unpin)
+        exit 0
+        ;;
+    *)
+        exit 0
+        ;;
+esac
