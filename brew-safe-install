@@ -128,7 +128,9 @@ except Exception:
     fi
 
     # --- Min-age check (opt-in) ---
-    if [ "$MIN_AGE" -gt 0 ] 2>/dev/null && [ "$PKG_TYPE" = "formula" ]; then
+    # Defense in depth: only allow Homebrew-shaped names through the URL we
+    # construct from `brew info` output.
+    if [ "$MIN_AGE" -gt 0 ] 2>/dev/null && [ "$PKG_TYPE" = "formula" ] && [[ "$BARE_NAME" =~ ^[a-zA-Z0-9@._/-]+$ ]]; then
         FIRST_LETTER=$(echo "$BARE_NAME" | cut -c1)
         COMMIT_JSON=$(curl -sf "https://api.github.com/repos/Homebrew/homebrew-core/commits?path=Formula/${FIRST_LETTER}/${BARE_NAME}.rb&per_page=1" 2>/dev/null || echo "[]")
         AGE_INFO=$(echo "$COMMIT_JSON" | python3 -c "
@@ -231,29 +233,52 @@ fi
 CLEAN_PKGS=$(echo "$CLEAN_PKGS" | xargs)  # trim
 
 # --- Transitive dependency check (default on; --no-deps to skip) ---
-# Entry format inside INCOMING_DEPS: "<dep>|<version>"
-# `|` is used as the separator because Homebrew formula names contain `@`
-# (e.g. openssl@3) and versions occasionally contain `@` too. `|` cannot.
-DEP_BLOCKED=""
-DEP_BLOCKED_REASONS=""
+#
+# Design note: the CVE-aware bypass that skips --min-age for the user-named
+# package when the installed version has known CVEs is intentionally NOT
+# applied to transitive deps. Reasons: (1) the user explicitly opted into
+# the named package, deps came along; (2) deps follow stricter rules so a
+# fresh unverified dep can't ride in under cover of "the parent has CVEs";
+# (3) running an installed-version CVE query for every dep would double
+# rate-limited NVD traffic with little practical benefit. Held deps are
+# surfaced via [HOLD-DEP]; user can override at the prompt.
+#
+# Storage: INCOMING_DEPS_ARR holds "<dep>|<version>" entries. `|` chosen
+# because Homebrew formula names contain `@` (e.g. openssl@3) and versions
+# occasionally do too — `|` cannot appear in either.
+DEP_BLOCKED_VULN=""
+DEP_BLOCKED_VULN_REASONS=""
+DEP_BLOCKED_HOLD=""
+DEP_BLOCKED_HOLD_REASONS=""
 DEP_SKIPPED=""
+
+# Defense in depth: only allow Homebrew-shaped names through any URL or
+# subprocess argument we construct from `brew deps` output.
+DEP_NAME_RE='^[a-zA-Z0-9@._/-]+$'
 
 if [ "$CHECK_DEPS" = true ] && [ -n "$CLEAN_PKGS" ]; then
     echo ""
     echo "Checking transitive dependencies..."
 
-    INCOMING_DEPS=""
+    INCOMING_DEPS_ARR=()
     for pkg in $CLEAN_PKGS; do
         # Read deps into an array preserving lines so a dep name with a space
         # (third-party taps) isn't word-split. macOS ships bash 3.2, so no
         # `mapfile` — explicit `while read` instead.
-        DEPS_ARR=()
+        DEPS_PARSED_ARR=()
         while IFS= read -r line; do
-            [ -n "$line" ] && DEPS_ARR+=("$line")
+            [ -n "$line" ] && DEPS_PARSED_ARR+=("$line")
         done < <(brew deps "$pkg" 2>/dev/null || true)
 
-        for dep in ${DEPS_ARR[@]+"${DEPS_ARR[@]}"}; do
+        for dep in ${DEPS_PARSED_ARR[@]+"${DEPS_PARSED_ARR[@]}"}; do
             [ -z "$dep" ] && continue
+
+            # Reject malformed names from compromised taps before any URL or
+            # subprocess argument is constructed.
+            if [[ ! "$dep" =~ $DEP_NAME_RE ]]; then
+                echo "    [skip-dep] $dep -- invalid name, refusing to query"
+                continue
+            fi
 
             LATEST=$(brew info --json=v2 --formula "$dep" 2>/dev/null | python3 -c "
 import sys, json
@@ -265,37 +290,48 @@ try:
 except Exception:
     pass
 " 2>/dev/null)
-            # Strip Homebrew revision suffix (`_1`, `_2`, …) so a revision bump
-            # of an already-current formula isn't classified as incoming.
-            INSTALLED_VER=$(brew list --versions --formula "$dep" 2>/dev/null | awk '{print $2}' | sed 's/_[0-9]*$//')
+            # awk '$NF' grabs the LAST version when multiple kegs are installed.
+            # sed strips Homebrew revision suffix (`_1`, `_2`, …) so a revision
+            # bump of an already-current formula isn't classified as incoming.
+            INSTALLED_VER=$(brew list --versions --formula "$dep" 2>/dev/null | awk '{print $NF}' | sed 's/_[0-9]*$//')
 
             [ -z "$LATEST" ] && continue
 
             if [ -z "$INSTALLED_VER" ] || [ "$INSTALLED_VER" != "$LATEST" ]; then
-                if ! echo " $INCOMING_DEPS " | grep -qF " ${dep}|${LATEST} "; then
-                    INCOMING_DEPS="$INCOMING_DEPS ${dep}|${LATEST}"
-                fi
+                # Array-based dedup — quoted iteration preserves whitespace
+                # in pathological dep names (taps); flat-string dedup did not.
+                _entry="${dep}|${LATEST}"
+                _seen=0
+                for _e in ${INCOMING_DEPS_ARR[@]+"${INCOMING_DEPS_ARR[@]}"}; do
+                    [ "$_e" = "$_entry" ] && _seen=1 && break
+                done
+                [ "$_seen" -eq 0 ] && INCOMING_DEPS_ARR+=("$_entry")
             fi
         done
     done
 
-    INCOMING_DEPS=$(echo "$INCOMING_DEPS" | xargs)
+    DEP_COUNT=${#INCOMING_DEPS_ARR[@]}
 
-    if [ -z "$INCOMING_DEPS" ]; then
+    if [ "$DEP_COUNT" -eq 0 ]; then
         echo "  No new dependency versions coming in."
     else
-        DEP_COUNT=$(echo "$INCOMING_DEPS" | wc -w | tr -d ' ')
         echo "  Found $DEP_COUNT incoming dependency version(s) to check"
         echo ""
 
-        for entry in $INCOMING_DEPS; do
+        for entry in ${INCOMING_DEPS_ARR[@]+"${INCOMING_DEPS_ARR[@]}"}; do
             DEP=${entry%|*}
             DEP_VER=${entry##*|}
 
             if [ "$MIN_AGE" -gt 0 ] 2>/dev/null; then
-                FIRST_LETTER=$(echo "$DEP" | cut -c1)
-                COMMIT_JSON=$(curl -sf "https://api.github.com/repos/Homebrew/homebrew-core/commits?path=Formula/${FIRST_LETTER}/${DEP}.rb&per_page=1" 2>/dev/null || echo "[]")
-                AGE_INFO=$(echo "$COMMIT_JSON" | python3 -c "
+                # Tap-namespaced deps (foo/bar/baz) don't live in homebrew-core,
+                # so the GitHub commits API cannot tell us their age. Skip the
+                # age gate explicitly rather than falling through silently.
+                if [[ "$DEP" == */* ]]; then
+                    echo "    [skip-dep-age] $DEP — tap formula, age unavailable from homebrew-core"
+                else
+                    FIRST_LETTER=$(echo "$DEP" | cut -c1)
+                    COMMIT_JSON=$(curl -sf "https://api.github.com/repos/Homebrew/homebrew-core/commits?path=Formula/${FIRST_LETTER}/${DEP}.rb&per_page=1" 2>/dev/null || echo "[]")
+                    AGE_INFO=$(echo "$COMMIT_JSON" | python3 -c "
 import sys, json, datetime
 try:
     data = json.load(sys.stdin)
@@ -308,13 +344,14 @@ try:
 except Exception:
     print('-1 unknown')
 " 2>/dev/null)
-                AGE_DAYS=$(echo "$AGE_INFO" | awk '{print $1}')
-                PUB_DATE=$(echo "$AGE_INFO" | awk '{print $2}')
-                if [ "$AGE_DAYS" -ge 0 ] 2>/dev/null && [ "$AGE_DAYS" -lt "$MIN_AGE" ]; then
-                    echo "    [HOLD-DEP] $DEP $DEP_VER -- released $AGE_DAYS day(s) ago ($PUB_DATE), min-age: $MIN_AGE days"
-                    DEP_BLOCKED="$DEP_BLOCKED $DEP"
-                    DEP_BLOCKED_REASONS="${DEP_BLOCKED_REASONS}    $DEP $DEP_VER: too fresh ($AGE_DAYS days old, min-age $MIN_AGE)"$'\n'
-                    continue
+                    AGE_DAYS=$(echo "$AGE_INFO" | awk '{print $1}')
+                    PUB_DATE=$(echo "$AGE_INFO" | awk '{print $2}')
+                    if [ "$AGE_DAYS" -ge 0 ] 2>/dev/null && [ "$AGE_DAYS" -lt "$MIN_AGE" ]; then
+                        echo "    [HOLD-DEP] $DEP $DEP_VER -- released $AGE_DAYS day(s) ago ($PUB_DATE), min-age: $MIN_AGE days"
+                        DEP_BLOCKED_HOLD="$DEP_BLOCKED_HOLD $DEP"
+                        DEP_BLOCKED_HOLD_REASONS="${DEP_BLOCKED_HOLD_REASONS}    $DEP $DEP_VER: too fresh ($AGE_DAYS days old, min-age $MIN_AGE)"$'\n'
+                        continue
+                    fi
                 fi
             fi
 
@@ -325,8 +362,8 @@ except Exception:
             elif [ "$DEP_EXIT" -eq 1 ]; then
                 echo "    [VULN-DEP] $DEP $DEP_VER -- vulnerabilities found"
                 SUMMARY=$(echo "$DEP_RESULT" | grep -E 'CRITICAL|HIGH|MEDIUM' | head -1 || true)
-                DEP_BLOCKED="$DEP_BLOCKED $DEP"
-                DEP_BLOCKED_REASONS="${DEP_BLOCKED_REASONS}    $DEP $DEP_VER: ${SUMMARY:-vulnerabilities reported}"$'\n'
+                DEP_BLOCKED_VULN="$DEP_BLOCKED_VULN $DEP"
+                DEP_BLOCKED_VULN_REASONS="${DEP_BLOCKED_VULN_REASONS}    $DEP $DEP_VER: ${SUMMARY:-vulnerabilities reported}"$'\n'
             else
                 echo "    [skip-dep] $DEP $DEP_VER -- check failed (network or DB error)"
                 DEP_SKIPPED="$DEP_SKIPPED $DEP"
@@ -339,10 +376,18 @@ except Exception:
             echo "  These will install unchecked. Re-run later or use --no-deps to suppress."
         fi
 
-        if [ -n "$DEP_BLOCKED" ]; then
+        # Distinct sections for vulnerable vs. too-fresh: they are different
+        # risk signals and the previous combined header conflated them.
+        if [ -n "$DEP_BLOCKED_VULN" ] || [ -n "$DEP_BLOCKED_HOLD" ]; then
             echo ""
-            echo "WARNING: incoming dependencies have known issues:"
-            printf "%s" "$DEP_BLOCKED_REASONS"
+            if [ -n "$DEP_BLOCKED_VULN" ]; then
+                echo "WARNING: incoming dependencies have known CVEs:"
+                printf "%s" "$DEP_BLOCKED_VULN_REASONS"
+            fi
+            if [ -n "$DEP_BLOCKED_HOLD" ]; then
+                echo "Incoming dependencies are below --min-age:"
+                printf "%s" "$DEP_BLOCKED_HOLD_REASONS"
+            fi
             echo "Proceeding will let brew install them anyway."
             read -rp "Continue install of $CLEAN_PKGS? [y/N] " DEP_CONFIRM
             if [[ ! "$DEP_CONFIRM" =~ ^[yY] ]]; then

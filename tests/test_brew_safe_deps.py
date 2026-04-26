@@ -48,16 +48,22 @@ def write_formula_info(fixture_dir: Path, name: str, stable: str, installed=Fals
         ],
         "casks": [],
     }
-    (fixture_dir / f"info_{name}.json").write_text(json.dumps(payload))
+    target = fixture_dir / f"info_{name}.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(payload))
 
 
 def write_deps(fixture_dir: Path, name: str, deps: list[str]):
-    (fixture_dir / f"deps_{name}.txt").write_text("\n".join(deps) + "\n" if deps else "")
+    target = fixture_dir / f"deps_{name}.txt"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("\n".join(deps) + "\n" if deps else "")
 
 
 def write_installed_version(fixture_dir: Path, name: str, version: str):
     """Mimic `brew list --versions --formula <name>` → '<name> <version>'."""
-    (fixture_dir / f"list_{name}.txt").write_text(f"{name} {version}\n")
+    target = fixture_dir / f"list_{name}.txt"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(f"{name} {version}\n")
 
 
 def run_safe_install(
@@ -233,7 +239,7 @@ def test_vulnerable_dep_triggers_warning_and_cancellation(mock_env, tmp_path):
         input_text="n\n",
     )
     assert "[VULN-DEP] libfoo 1.2.3" in result.stdout
-    assert "WARNING: incoming dependencies have known issues" in result.stdout
+    assert "WARNING: incoming dependencies have known CVEs" in result.stdout
     assert "Cancelled." in result.stdout
     assert result.returncode == 0  # current contract; cancel = clean exit
 
@@ -258,6 +264,105 @@ def test_dep_check_failure_is_surfaced_in_summary(mock_env, tmp_path):
     assert "[skip-dep] libfoo 1.2.3" in result.stdout
     assert "dep checks failed for:" in result.stdout
     assert "libfoo" in result.stdout
+
+
+# ----------------------- hardening (#19, #20, #22, #23, #24) -----------------------
+
+
+def test_multi_keg_installed_uses_latest_version_for_compare(mock_env, tmp_path):
+    """
+    `brew list --versions` returns multiple kegs space-separated on one line.
+    The classifier must compare against the LAST (newest) version, not the first,
+    otherwise an already-current dep is misclassified as incoming. (#19)
+    """
+    write_formula_info(mock_env, "wget", "1.25.0")
+    write_formula_info(mock_env, "openssl@3", "3.5.0")
+    write_deps(mock_env, "wget", ["openssl@3"])
+    # Two kegs installed: an old one and the current one.
+    (mock_env / "list_openssl@3.txt").write_text("openssl@3 3.0.0 3.5.0\n")
+
+    stub = make_cve_stub(tmp_path)
+
+    result = run_safe_install(
+        ["wget"],
+        env_extra={"DEPENDENCY_SECURITY_CHECK": str(stub)},
+        input_text="n\n",
+    )
+    # Latest is already installed → not incoming
+    assert "No new dependency versions coming in." in result.stdout
+
+
+def test_invalid_dep_name_is_rejected_before_query(mock_env, tmp_path):
+    """
+    A dep name that fails the regex guard must be skipped with [skip-dep] —
+    no curl URL constructed, no python invocation. (#22)
+    """
+    write_formula_info(mock_env, "wget", "1.25.0")
+    # `evil; rm -rf /` would pass through the old code; the regex must catch it.
+    write_deps(mock_env, "wget", ["evil; rm -rf /"])
+
+    stub = make_cve_stub(tmp_path)
+
+    result = run_safe_install(
+        ["wget"],
+        env_extra={"DEPENDENCY_SECURITY_CHECK": str(stub)},
+        input_text="n\n",
+    )
+    assert "[skip-dep] evil; rm -rf / -- invalid name" in result.stdout
+    # Critical: no [VULN-DEP] / [ok-dep] / [HOLD-DEP] line for this name.
+    assert "[ok-dep] evil" not in result.stdout
+    assert "[VULN-DEP] evil" not in result.stdout
+
+
+def test_tap_dep_skips_age_check_with_clear_log_line(mock_env, tmp_path):
+    """
+    A tap-namespaced dep (foo/bar/baz) must skip the age check explicitly
+    with [skip-dep-age], not silently bypass it. (#23)
+    """
+    write_formula_info(mock_env, "wget", "1.25.0")
+    write_formula_info(mock_env, "foo/bar/baz", "1.0.0")
+    write_deps(mock_env, "wget", ["foo/bar/baz"])
+    # baz not installed → incoming
+
+    stub = make_cve_stub(tmp_path)
+
+    result = run_safe_install(
+        ["wget", "--min-age", "30"],
+        env_extra={"DEPENDENCY_SECURITY_CHECK": str(stub)},
+        input_text="n\n",
+    )
+    assert "[skip-dep-age] foo/bar/baz" in result.stdout
+    # CVE check still runs even though age is skipped
+    assert "[ok-dep] foo/bar/baz 1.0.0" in result.stdout
+
+
+def test_warning_splits_vuln_and_hold_into_separate_sections(mock_env, tmp_path):
+    """
+    When both a vulnerable dep AND a too-fresh dep land in the same run, the
+    warning output must show two distinct sections — not one combined header. (#24)
+
+    The age check requires real GitHub API calls, which we don't mock; this
+    test focuses on the case where ONLY a vulnerable dep is present and asserts
+    the new header text. The HOLD-only header is exercised manually.
+    """
+    write_formula_info(mock_env, "wget", "1.25.0")
+    write_formula_info(mock_env, "libfoo", "1.2.3")
+    write_deps(mock_env, "wget", ["libfoo"])
+
+    stub = make_cve_stub(
+        tmp_path,
+        per_package={"libfoo": (1, '{"status":"vulnerable"}', "[HIGH] CVE-2026-99999")},
+    )
+
+    result = run_safe_install(
+        ["wget"],
+        env_extra={"DEPENDENCY_SECURITY_CHECK": str(stub)},
+        input_text="n\n",
+    )
+    # New header text — distinguishes vulnerable from too-fresh
+    assert "WARNING: incoming dependencies have known CVEs:" in result.stdout
+    # Old conflated header must NOT appear
+    assert "WARNING: incoming dependencies have known issues" not in result.stdout
 
 
 # ----------------------- safe-upgrade --yes bypass -----------------------
@@ -298,12 +403,12 @@ def test_yes_flag_continues_past_vuln_dep_with_stderr_warning(mock_env, tmp_path
 
     # Dep was correctly flagged
     assert "[VULN-DEP] libfoo 1.2.3" in result.stdout
-    assert "WARNING: incoming dependencies have known issues" in result.stdout
+    assert "WARNING: incoming dependencies have known CVEs" in result.stdout
 
     # The bypass notice must be on STDERR (not stdout) so it survives `>/dev/null`
     # and is conspicuous in CI log streams.
-    assert "[--yes] continuing despite dep CVE warnings" in result.stderr
-    assert "[--yes] continuing despite dep CVE warnings" not in result.stdout
+    assert "[--yes] continuing despite dep warnings" in result.stderr
+    assert "[--yes] continuing despite dep warnings" not in result.stdout
 
     # The script reached the final "Done." line — i.e. upgrade was attempted.
     assert "Done." in result.stdout
