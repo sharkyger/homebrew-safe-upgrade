@@ -239,7 +239,7 @@ def test_vulnerable_dep_triggers_warning_and_cancellation(mock_env, tmp_path):
 
 
 def test_dep_check_failure_is_surfaced_in_summary(mock_env, tmp_path):
-    """If the CVE checker errors (exit 2) on a dep, it's listed as skipped — not silently dropped."""
+    """CVE checker error (exit 2) on a dep → listed as skipped, not silently dropped."""
     write_formula_info(mock_env, "wget", "1.25.0")
     write_formula_info(mock_env, "libfoo", "1.2.3")
     write_deps(mock_env, "wget", ["libfoo"])
