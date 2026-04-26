@@ -8,6 +8,8 @@ Security-first wrappers for `brew upgrade` and `brew install`. Checks every Home
 
 `brew safe-upgrade` and `brew safe-install` add a security gate: they query three public vulnerability databases, check whether the *target version* is actually affected, and only proceed with packages that come back clean. Packages with known vulnerabilities are blocked and listed separately.
 
+The same gate is then applied to **transitive dependencies coming in with the install or upgrade** — both brand-new deps and existing deps whose version is being bumped. Already-installed deps that aren't changing are left to [`brew-vulns`](https://github.com/Homebrew/homebrew-brew-vulns).
+
 ## What it checks
 
 Every outdated package is checked against:
@@ -87,6 +89,59 @@ brew safe-upgrade --yes
 
 Automatically upgrades clean packages and skips vulnerable ones without prompting.
 
+### Transitive dependency check (default on)
+
+Every `safe-install` or `safe-upgrade` also checks the dependencies that would land on your system as part of the operation:
+
+- Deps that aren't installed at all → checked.
+- Deps that are installed, but a newer version is coming in → checked.
+- Deps that are installed at the same version that would be installed → skipped (already on your system; that's `brew-vulns`' job).
+
+For `safe-upgrade`, deps are deduplicated across the entire upgrade batch — `openssl@3` showing up in five outdated packages is checked once.
+
+```
+$ brew safe-install gh
+
+Resolving package versions...
+  Checking gh (formula, version 2.91.0)...
+  [ok] gh 2.91.0
+
+Results: 1 clean out of 1 package(s)
+
+Checking transitive dependencies...
+  Found 2 incoming dependency version(s) to check
+
+    [ok-dep] openssl@3 3.5.0
+    [ok-dep] ca-certificates 2026-04-01
+
+Install gh? [Y/n]
+```
+
+If a dep has a known CVE, the check warns and asks whether to proceed:
+
+```
+WARNING: incoming dependencies have known issues:
+    libfoo 1.2.3: [HIGH] CVE-2026-99999 (CVSS 7.5) — NIST NVD
+Proceeding will let brew install them anyway.
+Continue install of gh? [y/N]
+```
+
+**Skipping the dep check.** If you know what you're doing — fast iteration, CI runs where you've already vetted upstream — opt out per invocation:
+
+```
+brew safe-install --no-deps gh
+brew safe-upgrade --no-deps
+```
+
+…or set the env var once for the current shell:
+
+```
+export BREW_SAFE_NO_DEPS=1
+```
+
+The flag is per-invocation by design — the safe default always returns the next time you run the command without it. The env var is the only way to make it sticky, and you have to put it in your shell rc yourself; the tool never writes any persistent config.
+
+> **Note on big upgrade batches.** `brew safe-upgrade` deduplicates incoming deps across the batch, but a large run with many unique deps can still hit NIST NVD's anonymous rate limit (5 requests / 30 seconds). When that happens you'll see `[skip-dep]` lines in the output — those deps were not vetted. Re-run the upgrade later, or pass `--no-deps` if you've vetted upstream another way.
 
 ### Minimum-age check (opt-in)
 
@@ -154,11 +209,12 @@ Install wget imagemagick? [Y/n]
 ```
 
 
-Supports the same `--min-age` and `--verify-sha` flags:
+Supports the same `--min-age`, `--verify-sha`, and `--no-deps` flags:
 
 ```
 brew safe-install --min-age 3 wget curl
 brew safe-install --verify-sha --cask firefox
+brew safe-install --no-deps wget          # skip transitive dep check
 ```
 
 Works with formulae, casks, and tap packages:
@@ -263,7 +319,7 @@ brew safe-install wget
 ## Requirements
 
 - macOS or Linux with Homebrew
-- Python 3.8+
+- Python 3.11+
 - No additional Python packages required (uses stdlib only; `certifi` optional for macOS SSL)
 
 ## How Homebrew discovers it
@@ -280,6 +336,7 @@ The two tools solve different problems:
 |---|---|---|---|
 | **When** | After install (audit) | Before upgrade (gate) | Before install (gate) |
 | **Action** | Reports vulnerabilities | Blocks vulnerable upgrades | Blocks vulnerable installs |
+| **Scope** | Everything currently installed | Outdated package + incoming deps | Target package + incoming deps |
 | **Databases** | OSV.dev | OSV.dev + GitHub Advisory + NIST NVD | OSV.dev + GitHub Advisory + NIST NVD |
 | **Version filtering** | OSV native | OSV native + CPE range/exact match + GitHub patch version | Same as safe-upgrade |
 | **Workflow** | Separate step | Drop-in replacement for `brew upgrade` | Drop-in replacement for `brew install` |
