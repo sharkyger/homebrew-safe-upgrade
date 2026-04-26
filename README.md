@@ -319,7 +319,7 @@ brew safe-install wget
 ## Requirements
 
 - macOS or Linux with Homebrew
-- Python 3.8+
+- Python 3.11+
 - No additional Python packages required (uses stdlib only; `certifi` optional for macOS SSL)
 
 ## How Homebrew discovers it

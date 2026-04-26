@@ -25,6 +25,7 @@ The project is pre-1.0; expect minor breaking changes between 0.x releases until
 ### Documentation
 - New "Transitive dependency check" section in README, including a note on NVD's 5 req/30s anonymous rate limit for large upgrade batches.
 - `brew-vulns` comparison table now includes a "Scope" row that makes the division of labour explicit.
+- Stated minimum Python version corrected to 3.11 in README and `pyproject.toml`. CI has tested on 3.11 and 3.13 since #16 dropped 3.9; the README and `requires-python` were left at the original 3.8 by oversight. `ruff target-version` bumped to `py311` for consistency.
 
 ## Earlier history (pre-0.1.0, untagged)
 

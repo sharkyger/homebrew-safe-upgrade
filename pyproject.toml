@@ -3,13 +3,13 @@ name = "homebrew-safe-upgrade"
 version = "0.1.0"
 description = "Security-first brew upgrade — checks packages against NIST NVD, OSV.dev, and GitHub Advisory before upgrading"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "sharkyger" }]
 
 [tool.ruff]
 line-length = 100
-target-version = "py38"
+target-version = "py311"
 
 [tool.ruff.lint]
 select = [
