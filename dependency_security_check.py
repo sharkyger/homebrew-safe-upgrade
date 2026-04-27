@@ -310,11 +310,18 @@ def query_nvd(package_name, ecosystem, version=None):
             if desc.strip().startswith("** DISPUTED **"):
                 continue
 
-            # Filter out CVEs that mention the keyword but are about different software
+            # Filter out CVEs that mention the keyword but are about different software.
+            # Use boundary matching that prevents "claude-code" from matching
+            # "claude-code-router" — hyphens connect compound package names, so
+            # the match must not be followed or preceded by [-\w].
             desc_lower = desc.lower()
             pkg_lower = package_name.lower()
+            pkg_nodash = pkg_lower.replace("-", "")
 
-            if pkg_lower not in desc_lower and pkg_lower.replace("-", "") not in desc_lower:
+            pkg_re = re.compile(r"(?<![a-z0-9\-])" + re.escape(pkg_lower) + r"(?![a-z0-9\-])")
+            pkg_nodash_re = re.compile(r"(?<![a-z0-9])" + re.escape(pkg_nodash) + r"(?![a-z0-9])")
+
+            if not pkg_re.search(desc_lower) and not pkg_nodash_re.search(desc_lower):
                 continue
 
             # Reject if the first sentence names a different product as the subject
@@ -326,10 +333,11 @@ def query_nvd(package_name, ecosystem, version=None):
                 .strip()
             )
             first_word = first_sentence.split()[0] if first_sentence.split() else ""
+            first_lower = first_word.lower()
             if (
-                first_word.lower() != pkg_lower
-                and first_word.lower() != pkg_lower.replace("-", "")
-                and pkg_lower not in first_word.lower()
+                first_lower != pkg_lower
+                and first_lower != pkg_nodash
+                and not pkg_re.search(first_lower)
             ):
                 continue
 
