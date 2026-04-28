@@ -433,16 +433,41 @@ def query_nvd(package_name, ecosystem, version=None):
                 if has_any_cpe and not has_cpe:
                     continue
 
-                # Fallback: if no CPE data, try to extract version range from description
+                # Fallback: if no CPE data, try to extract version range from description.
+                # GitHub-style advisories often read "Starting in version X and prior to
+                # version Y" — handle the optional "version"/"v" prefix and inclusive vs
+                # exclusive boundaries.
                 if not has_cpe:
-                    # Match patterns like "through X.Y.Z", "before X.Y.Z", "up to X.Y.Z"
-                    end_match = re.search(
-                        r"(?:through|before|up to|prior to)\s+([\d]+(?:\.[\d]+)*)", desc
+                    v_re = r"(?:version\s+)?v?([\d]+(?:\.[\d]+)*)"
+
+                    # Exclusive upper bound: fixed at the matched version
+                    end_exc = re.search(
+                        rf"(?:before|prior to|fixed in|patched in)\s+{v_re}",
+                        desc,
+                        re.IGNORECASE,
                     )
-                    if end_match:
-                        upper = parse_version(end_match.group(1))
+                    if end_exc:
+                        upper = parse_version(end_exc.group(1))
+                        if upper and parse_version(version) >= upper:
+                            continue  # version is at or above the fix — not affected
+
+                    # Inclusive upper bound: last affected version
+                    end_inc = re.search(rf"\bthrough\s+{v_re}", desc, re.IGNORECASE)
+                    if end_inc:
+                        upper = parse_version(end_inc.group(1))
                         if upper and parse_version(version) > upper:
-                            continue  # Our version is above the affected range
+                            continue
+
+                    # Lower bound: affected starts at this version
+                    start_inc = re.search(
+                        rf"(?:starting in|introduced in|since)\s+{v_re}",
+                        desc,
+                        re.IGNORECASE,
+                    )
+                    if start_inc:
+                        lower = parse_version(start_inc.group(1))
+                        if lower and parse_version(version) < lower:
+                            continue
 
             findings.append(
                 {
