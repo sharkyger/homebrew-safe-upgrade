@@ -17,7 +17,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT="${DEPENDENCY_SECURITY_CHECK:-$SCRIPT_DIR/dependency_security_check.py}"
 
 AUTO_YES=false
-MIN_AGE=0          # 0 = disabled (opt-in). Use --min-age N to enable.
+MIN_AGE=3          # 3-day freshness hold for formulae; --min-age 0 to disable.
 VERIFY_SHA=false
 CHECK_DEPS=true
 case "${BREW_SAFE_NO_DEPS:-}" in
@@ -107,7 +107,7 @@ if [ -n "$OUTDATED_CASKS" ]; then
     [ -n "$OUTDATED" ] && OUTDATED="$OUTDATED"$'\n'"$OUTDATED_CASKS" || OUTDATED="$OUTDATED_CASKS"
 fi
 
-# --- Min-age check (opt-in) ---
+# --- Min-age check (default: 3 days; --min-age 0 to disable) ---
 HELD_PKGS=""
 HELD_COUNT=0
 

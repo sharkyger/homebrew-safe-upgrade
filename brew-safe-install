@@ -4,7 +4,7 @@
 # Queries 3 databases: OSV.dev, GitHub Advisory, NIST NVD.
 #
 # Usage: brew safe-install [flags] package1 [package2 ...]
-#        --min-age N     Hold packages published less than N days ago (default: 0 = off)
+#        --min-age N     Hold packages published less than N days ago (default: 3; --min-age 0 to disable)
 #        --verify-sha    Verify bottle SHA against formulae.brew.sh API
 #        --no-deps       Skip transitive dependency checking (default: check)
 #
@@ -28,7 +28,7 @@ fi
 # Separate our flags, brew flags, and package names
 BREW_FLAGS=""
 PACKAGES=""
-MIN_AGE=0
+MIN_AGE=3          # 3-day freshness hold for formulae; --min-age 0 to disable.
 VERIFY_SHA=false
 CHECK_DEPS=true
 case "${BREW_SAFE_NO_DEPS:-}" in
@@ -51,7 +51,7 @@ if [ -z "$PACKAGES" ]; then
     echo "Usage: brew safe-install [flags] package1 [package2 ...]"
     echo ""
     echo "Options:"
-    echo "  --min-age N     Hold packages published less than N days ago (default: 0 = off)"
+    echo "  --min-age N     Hold packages published less than N days ago (default: 3; --min-age 0 to disable)"
     echo "  --verify-sha    Verify bottle SHA against formulae.brew.sh API"
     echo "  --no-deps       Skip transitive dependency checking (default: check)"
     echo "                  Or set BREW_SAFE_NO_DEPS=1 in your environment."
@@ -127,7 +127,7 @@ except Exception:
         continue
     fi
 
-    # --- Min-age check (opt-in) ---
+    # --- Min-age check (default: 3 days; --min-age 0 to disable) ---
     # Defense in depth: only allow Homebrew-shaped names through the URL we
     # construct from `brew info` output.
     if [ "$MIN_AGE" -gt 0 ] 2>/dev/null && [ "$PKG_TYPE" = "formula" ] && [[ "$BARE_NAME" =~ ^[a-zA-Z0-9@._/-]+$ ]]; then
