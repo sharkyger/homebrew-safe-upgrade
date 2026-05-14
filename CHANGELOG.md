@@ -8,6 +8,9 @@ The project is pre-1.0; expect minor breaking changes between 0.x releases until
 
 ## [Unreleased]
 
+### Changed
+- **Default `--min-age` is now 3 days** (was 0 = disabled) for both `brew-safe-install` and `brew-safe-upgrade`. The freshness hold applies to formulae only; casks remain unaffected (brew enforces the SHA256 recorded in the cask file on every install, so the supply-chain shape is different). Use `--min-age 0` to restore the previous behaviour. Motivation: recurring npm worm campaigns (Shai-Hulud, Mini Shai-Hulud) compromise packages for live windows of 1–6 hours before takedown — too short for CVE databases to react. A multi-day freshness hold trades a small upgrade lag against the entire attack window. The CVE-aware bypass that skips the age check when the *installed* version has known CVEs is unchanged, so security patches still reach you immediately.
+
 ## [0.1.1] — 2026-04-26
 
 Hardening pass following the v0.1.0 review. All changes are internal correctness and defense-in-depth improvements; the public flag/env-var surface is unchanged.

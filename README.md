@@ -143,12 +143,13 @@ The flag is per-invocation by design — the safe default always returns the nex
 
 > **Note on big upgrade batches.** `brew safe-upgrade` deduplicates incoming deps across the batch, but a large run with many unique deps can still hit NIST NVD's anonymous rate limit (5 requests / 30 seconds). When that happens you'll see `[skip-dep]` lines in the output — those deps were not vetted. Re-run the upgrade later, or pass `--no-deps` if you've vetted upstream another way.
 
-### Minimum-age check (opt-in)
+### Minimum-age check (on by default, 3 days)
 
-Hold back packages published less than N days ago. Protects against supply chain attacks where a compromised version is published minutes after credential theft — before any CVE database knows about it.
+Hold back formulae published less than N days ago. Protects against supply chain attacks where a compromised version is published minutes after credential theft — before any CVE database knows about it. Worm-class npm compromises (Shai-Hulud, Mini Shai-Hulud) have repeatedly shown live windows of 1–6 hours between malicious publish and registry takedown; a multi-day freshness hold trades a small lag against the entire attack window.
 
 ```
-brew safe-upgrade --min-age 3
+brew safe-upgrade            # uses default --min-age 3
+brew safe-upgrade --min-age 7 # stricter
 ```
 
 ```
@@ -161,9 +162,9 @@ Checking package age (min-age: 3 days)...
 
 **CVE-aware bypass:** If your *installed* version has known CVEs, the age check is skipped — the fresh version is likely the fix, and holding it back would leave you exposed. This means `--min-age` never prevents security patches from reaching you.
 
-Use `--min-age 0` to disable (default behavior).
+**Casks are not age-gated.** The check applies to formulae only. Casks point at vendor-hosted binaries with their own signing, and brew enforces the SHA256 recorded in the cask file on every install — the supply-chain attack surface is narrower than for formulae.
 
-> **What should the default be?** We ship with off by default (opt-in). The community is discussing whether it should be on by default: [Discussion #14](https://github.com/sharkyger/homebrew-safe-upgrade/discussions/14)
+Use `--min-age 0` to disable.
 
 ### SHA verification (opt-in)
 
@@ -212,7 +213,8 @@ Install wget imagemagick? [Y/n]
 Supports the same `--min-age`, `--verify-sha`, and `--no-deps` flags:
 
 ```
-brew safe-install --min-age 3 wget curl
+brew safe-install wget curl               # default --min-age 3
+brew safe-install --min-age 7 wget curl   # stricter
 brew safe-install --verify-sha --cask firefox
 brew safe-install --no-deps wget          # skip transitive dep check
 ```
