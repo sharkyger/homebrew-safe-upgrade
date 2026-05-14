@@ -166,20 +166,33 @@ Checking package age (min-age: 3 days)...
 
 Use `--min-age 0` to disable.
 
-### SHA verification (opt-in)
+### SHA verification (default ON)
 
-Verify bottle checksums against the Homebrew formulae API before upgrading. Detects local tap tampering.
-
-```
-brew safe-upgrade --verify-sha
-```
+Both `brew-safe-install` and `brew-safe-upgrade` compare the local-tap bottle SHA (from `brew info --json=v2`) against the canonical SHA published at `formulae.brew.sh`. Tampered taps that ship a bottle with the same version number but a different SHA are blocked before brew sees them.
 
 ```
   [ok] gh 2.91.0
-    [sha] ea543daa28d39acc... verified via formulae.brew.sh
+    [sha] ea543daa28d39acc=ea543daa28d39acc
 ```
 
-Note: Homebrew already verifies bottle SHAs during install. This adds a pre-upgrade check against the remote API as an independent verification. Advisory only — never blocks.
+Five outcomes, all logged distinctly:
+
+| Outcome | Output | Exit behaviour |
+|---|---|---|
+| **Match** | `[sha] verified <local>=<canonical>` | install/upgrade proceeds |
+| **Mismatch** | `[BLOCKED] SHA mismatch` + both full fingerprints | package excluded, script exits non-zero; **`--yes` never overrides this** |
+| **No bottle** | `[sha] no bottle — built from source` | proceeds (canonical formula exists, isn't bottled) |
+| **Tap-only / 404** | `[sha] tap-only formula — no canonical SHA available` | proceeds without prompt (third-party taps) |
+| **API 5xx / timeout** | end-of-loop `[WARN] formulae.brew.sh unreachable... Install anyway? [y/N]` | interactive: prompt once for all; `--yes` / non-TTY: warn and continue |
+
+Opt out with `--no-verify-sha` if you trust your tap and want the older behaviour back:
+
+```
+brew safe-install --no-verify-sha wget
+brew safe-upgrade --no-verify-sha
+```
+
+Casks are out of scope — brew already enforces the cask-file SHA on every install, so duplicating that check here adds no signal.
 
 ## brew safe-install
 
@@ -210,12 +223,12 @@ Install wget imagemagick? [Y/n]
 ```
 
 
-Supports the same `--min-age`, `--verify-sha`, and `--no-deps` flags:
+Supports the same `--min-age`, `--no-verify-sha`, and `--no-deps` flags:
 
 ```
-brew safe-install wget curl               # default --min-age 3
+brew safe-install wget curl               # default --min-age 3, SHA verify on
 brew safe-install --min-age 7 wget curl   # stricter
-brew safe-install --verify-sha --cask firefox
+brew safe-install --no-verify-sha wget    # skip SHA check (e.g. on slow networks)
 brew safe-install --no-deps wget          # skip transitive dep check
 ```
 

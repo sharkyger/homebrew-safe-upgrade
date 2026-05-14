@@ -32,6 +32,15 @@ def mock_env(tmp_path, monkeypatch):
     # Ensure no leak from caller's env
     monkeypatch.delenv("BREW_SAFE_NO_DEPS", raising=False)
 
+    # SHA verification became default-on in v0.2.0. Tests in this file don't
+    # mock canonical formulae.brew.sh responses, so point the mock dir at an
+    # empty location — every formula then reads as "tap-only" (no canonical
+    # SHA known), which is a silent-pass outcome and preserves the pre-SHA
+    # behavior these tests were written against.
+    api_dir = tmp_path / "formulae_api_empty"
+    api_dir.mkdir()
+    monkeypatch.setenv("MOCK_FORMULAE_API_DIR", str(api_dir))
+
     return fixture_dir
 
 

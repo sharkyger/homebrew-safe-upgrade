@@ -3,10 +3,14 @@
 # dependencies for known vulnerabilities before upgrading.
 # Queries 3 databases: OSV.dev, GitHub Advisory, NIST NVD.
 #
-# Usage: brew safe-upgrade [--yes|-y] [--min-age N] [--verify-sha] [--no-deps]
+# Usage: brew safe-upgrade [--yes|-y] [--min-age N] [--no-verify-sha] [--no-deps]
 #
 # Environment:
-#        BREW_SAFE_NO_DEPS=1   Same as --no-deps (handy for CI / aliases)
+#        BREW_SAFE_NO_DEPS=1     Same as --no-deps (handy for CI / aliases)
+#        MOCK_FORMULAE_API_DIR   (test only) read canonical responses from this dir
+#                                instead of curling https://formulae.brew.sh
+#        MOCK_INTERACTIVE_MODE=1 (test only) force the interactive prompt branch
+#                                even when stdin is not a TTY
 
 set -uo pipefail
 
@@ -18,7 +22,7 @@ SCRIPT="${DEPENDENCY_SECURITY_CHECK:-$SCRIPT_DIR/dependency_security_check.py}"
 
 AUTO_YES=false
 MIN_AGE=3          # 3-day freshness hold for formulae; --min-age 0 to disable.
-VERIFY_SHA=false
+VERIFY_SHA=true    # Default-on as of v0.2.0 — opt out with --no-verify-sha.
 CHECK_DEPS=true
 case "${BREW_SAFE_NO_DEPS:-}" in
     1|true|TRUE|yes|YES) CHECK_DEPS=false ;;
@@ -26,11 +30,12 @@ esac
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --yes|-y)     AUTO_YES=true; shift ;;
-        --min-age)    MIN_AGE="${2:-0}"; shift 2 ;;
-        --verify-sha) VERIFY_SHA=true; shift ;;
-        --no-deps)    CHECK_DEPS=false; shift ;;
-        *)            shift ;;
+        --yes|-y)        AUTO_YES=true; shift ;;
+        --min-age)       MIN_AGE="${2:-0}"; shift 2 ;;
+        --verify-sha)    shift ;;  # Accepted for back-compat — verification is now on by default.
+        --no-verify-sha) VERIFY_SHA=false; shift ;;
+        --no-deps)       CHECK_DEPS=false; shift ;;
+        *)               shift ;;
     esac
 done
 
@@ -189,9 +194,10 @@ echo "Running security checks..."
 echo ""
 
 BLOCKED_PKGS=""
+TAMPERED_PKGS=""
 SKIPPED_PKGS=""
 CLEAN_COUNT=0
-SHA_WARNINGS=""
+SHA_API_ERROR_PKGS=""
 
 while read -r name installed current; do
     if [ -f "$SCRIPT" ]; then
@@ -199,40 +205,128 @@ while read -r name installed current; do
         RESULT_JSON=$(python3 "$SCRIPT" brew "$name" "$current" 2>/dev/null) && EXIT_CODE=0 || EXIT_CODE=$?
 
         if [ "$EXIT_CODE" -eq 0 ]; then
-            echo "  [ok] $name $current"
-            CLEAN_COUNT=$((CLEAN_COUNT + 1))
-
-            # --- SHA verification (opt-in) ---
+            # --- SHA verification (default ON; --no-verify-sha to opt out) ---
+            # See brew-safe-install for the full contract; this block must stay symmetric.
+            SHA_VERDICT="skip"
             if [ "$VERIFY_SHA" = true ]; then
-                FIRST_LETTER=$(echo "$name" | cut -c1)
-                SHA_RESULT=$(curl -sf "https://formulae.brew.sh/api/formula/${name}.json" 2>/dev/null | python3 -c "
+                # Determine type — upgrade lists formulae and casks together.
+                PKG_INFO_JSON=$(brew info --json=v2 "$name" 2>/dev/null)
+                PKG_TYPE_HERE=$(echo "$PKG_INFO_JSON" | python3 -c "
 import sys, json
 try:
-    data = json.load(sys.stdin)
-    bottle = data.get('bottle', {}).get('stable', {})
-    files = bottle.get('files', {})
-    # Get SHA for any available platform
-    for platform, info in files.items():
-        sha = info.get('sha256', '')
-        if sha:
-            print(f'sha_ok {sha[:16]} {platform}')
-            break
+    d = json.load(sys.stdin)
+    if d.get('casks'):
+        print('cask')
     else:
-        print('no_bottle')
+        print('formula')
 except Exception:
-    print('error')
+    print('formula')
 " 2>/dev/null)
 
-                SHA_STATUS=$(echo "$SHA_RESULT" | awk '{print $1}')
-                if [ "$SHA_STATUS" = "sha_ok" ]; then
-                    SHA_SHORT=$(echo "$SHA_RESULT" | awk '{print $2}')
-                    echo "    [sha] ${SHA_SHORT}... verified via formulae.brew.sh"
-                elif [ "$SHA_STATUS" = "no_bottle" ]; then
-                    echo "    [sha] no bottle found — built from source"
+                if [ "$PKG_TYPE_HERE" = "cask" ]; then
+                    echo "    [sha] casks not in scope — brew enforces cask-file SHA at install"
+                    SHA_VERDICT="cask"
                 else
-                    echo "    [sha] could not verify — API unavailable"
-                    SHA_WARNINGS="$SHA_WARNINGS $name"
+                    LOCAL_SHA=$(echo "$PKG_INFO_JSON" | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    f = d.get('formulae', [])
+    if f:
+        files = f[0].get('bottle', {}).get('stable', {}).get('files', {})
+        for plat, info in files.items():
+            sha = info.get('sha256', '')
+            if sha:
+                print(sha)
+                break
+except Exception:
+    pass
+" 2>/dev/null)
+
+                    if [ -n "${MOCK_FORMULAE_API_DIR:-}" ]; then
+                        MOCK_FILE="$MOCK_FORMULAE_API_DIR/${name}.json"
+                        if [ ! -f "$MOCK_FILE" ]; then
+                            SHA_HTTP_CODE=404
+                            CANON_JSON=""
+                        elif grep -q "__SIMULATE_API_ERROR__" "$MOCK_FILE"; then
+                            SHA_HTTP_CODE=503
+                            CANON_JSON=""
+                        else
+                            SHA_HTTP_CODE=200
+                            CANON_JSON=$(cat "$MOCK_FILE")
+                        fi
+                    else
+                        CANON_TMP=$(mktemp)
+                        SHA_HTTP_CODE=$(curl -s -o "$CANON_TMP" -w "%{http_code}" --max-time 10 \
+                            "https://formulae.brew.sh/api/formula/${name}.json" 2>/dev/null || echo "000")
+                        CANON_JSON=$(cat "$CANON_TMP" 2>/dev/null || echo "")
+                        rm -f "$CANON_TMP"
+                    fi
+
+                    # If the local tap has no bottle (built --from-source, or a tap
+                    # that never ships bottles), there is nothing to compare against
+                    # the canonical record — treat as no-bottle, not as tampering.
+                    if [ -z "$LOCAL_SHA" ]; then
+                        echo "    [sha] no local bottle — built from source, skipping canonical check"
+                        SHA_VERDICT="no_bottle"
+                        SHA_HTTP_CODE="SKIP"
+                    fi
+
+                    case "$SHA_HTTP_CODE" in
+                        SKIP) : ;;
+                        200)
+                            CANON_SHA=$(echo "$CANON_JSON" | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    files = d.get('bottle', {}).get('stable', {}).get('files', {})
+    if not files:
+        print('NO_BOTTLE')
+    else:
+        for plat, info in files.items():
+            sha = info.get('sha256', '')
+            if sha:
+                print(sha)
+                break
+        else:
+            print('NO_BOTTLE')
+except Exception:
+    print('PARSE_ERROR')
+" 2>/dev/null)
+                            if [ "$CANON_SHA" = "NO_BOTTLE" ]; then
+                                echo "    [sha] no bottle — built from source"
+                                SHA_VERDICT="no_bottle"
+                            elif [ "$CANON_SHA" = "PARSE_ERROR" ] || [ -z "$CANON_SHA" ]; then
+                                SHA_API_ERROR_PKGS="$SHA_API_ERROR_PKGS $name"
+                                SHA_VERDICT="api_error"
+                            elif [ "$LOCAL_SHA" = "$CANON_SHA" ]; then
+                                echo "    [sha] verified ${LOCAL_SHA:0:16}=${CANON_SHA:0:16}"
+                                SHA_VERDICT="match"
+                            else
+                                echo "    [BLOCKED] SHA mismatch for $name"
+                                echo "      local     : $LOCAL_SHA"
+                                echo "      canonical : $CANON_SHA"
+                                TAMPERED_PKGS="$TAMPERED_PKGS $name"
+                                SHA_VERDICT="mismatch"
+                            fi
+                            ;;
+                        404)
+                            echo "    [sha] tap-only formula — no canonical SHA available"
+                            SHA_VERDICT="tap_only"
+                            ;;
+                        *)
+                            SHA_API_ERROR_PKGS="$SHA_API_ERROR_PKGS $name"
+                            SHA_VERDICT="api_error"
+                            ;;
+                    esac
                 fi
+            fi
+
+            if [ "$SHA_VERDICT" = "mismatch" ]; then
+                : # [BLOCKED] already emitted; don't count as clean. --yes never overrides this.
+            else
+                echo "  [ok] $name $current"
+                CLEAN_COUNT=$((CLEAN_COUNT + 1))
             fi
         elif [ "$EXIT_CODE" -eq 1 ]; then
             echo "  [VULN] $name $current -- vulnerabilities found!"
@@ -263,8 +357,9 @@ except Exception:
     fi
 done <<< "$OUTDATED"
 
-# Build separate clean lists for formulae and casks
-EXCLUDE_PKGS="$BLOCKED_PKGS $SKIPPED_PKGS $HELD_PKGS"
+# Build separate clean lists for formulae and casks. TAMPERED_PKGS is excluded
+# alongside BLOCKED_PKGS so brew never sees a tampered formula on its cmdline.
+EXCLUDE_PKGS="$BLOCKED_PKGS $TAMPERED_PKGS $SKIPPED_PKGS $HELD_PKGS"
 CLEAN_PKGS_FORMULAE=""
 CLEAN_PKGS_CASKS=""
 
@@ -286,11 +381,37 @@ fi
 
 CLEAN_PKGS="${CLEAN_PKGS_FORMULAE}${CLEAN_PKGS_CASKS}"
 
+# --- SHA batch error prompt (same shape as brew-safe-install) ---
+if [ -n "$SHA_API_ERROR_PKGS" ]; then
+    SHA_API_ERROR_PKGS_TRIMMED=$(echo "$SHA_API_ERROR_PKGS" | xargs)
+    echo ""
+    echo "[WARN] formulae.brew.sh unreachable for SHA verification: $SHA_API_ERROR_PKGS_TRIMMED"
+    SHA_IS_INTERACTIVE=false
+    if [ "${MOCK_INTERACTIVE_MODE:-0}" = "1" ] || [ -t 0 ]; then
+        SHA_IS_INTERACTIVE=true
+    fi
+    # Under --yes we never prompt; we warn and continue. Same for non-TTY.
+    if [ "$SHA_IS_INTERACTIVE" = true ] && [ "$AUTO_YES" != true ]; then
+        # echo + read instead of read -rp — see brew-safe-install for rationale.
+        echo "Install anyway? [y/N] "
+        read -r SHA_CONFIRM
+        if [[ ! "$SHA_CONFIRM" =~ ^[yY] ]]; then
+            echo "Cancelled."
+            exit 1
+        fi
+    else
+        echo "[WARN] non-interactive or --yes — continuing without SHA verification for those packages"
+    fi
+fi
+
 # Summary
 echo ""
 echo "Results: $CLEAN_COUNT clean"
 if [ -n "$BLOCKED_PKGS" ]; then
     echo "  Blocked (vulnerable):$BLOCKED_PKGS"
+fi
+if [ -n "$TAMPERED_PKGS" ]; then
+    echo "  Blocked (SHA tampered):$TAMPERED_PKGS"
 fi
 if [ -n "$HELD_PKGS" ]; then
     echo "  Held (too fresh):$HELD_PKGS"
@@ -526,3 +647,9 @@ fi
 
 echo ""
 echo "Done."
+
+# Tampering must surface as a non-zero exit in CI / shell pipelines, even
+# when other clean packages upgraded successfully alongside.
+if [ -n "$TAMPERED_PKGS" ]; then
+    exit 1
+fi
