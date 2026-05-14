@@ -9,6 +9,17 @@ The project is pre-1.0; expect minor breaking changes between 0.x releases until
 ## [Unreleased]
 
 ### Changed
+- **SHA verification is now default-on** for both `brew-safe-install` and `brew-safe-upgrade`. The bottle SHA from `brew info --json=v2` is compared against the canonical SHA published at `formulae.brew.sh`. Five outcomes:
+  - **Match** — `[sha] verified <local>=<canonical>`, install/upgrade proceeds.
+  - **Mismatch** — `[BLOCKED] SHA mismatch` with both full fingerprints printed; the package is excluded from the install/upgrade set and the script exits non-zero. **Tampering is never overridable by `--yes`** — it's a deliberate security signal that must surface in CI/pipelines.
+  - **No bottle** — `[sha] no bottle — built from source`, proceeds (canonical formula exists but isn't bottled).
+  - **Tap-only / 404** — `[sha] tap-only formula — no canonical SHA available`, proceeds without a prompt (third-party taps don't publish to formulae.brew.sh).
+  - **Canonical API 5xx / timeout** — batched into a single end-of-loop prompt. Interactive: `[WARN] formulae.brew.sh unreachable... Install anyway? [y/N]`. Non-interactive or `--yes`: warn loudly and continue (so the script doesn't hang in CI).
+
+  Opt out with `--no-verify-sha`. The previous `--verify-sha` flag is accepted as a silent no-op for backward compatibility.
+
+  Motivation: defense in depth alongside the existing CVE check + freshness hold. If a tap or mirror is compromised and ships a tampered bottle with the same version number, the SHA divergence from formulae.brew.sh's canonical record is the first signal — long before CVE databases register the incident.
+
 - **Default `--min-age` is now 3 days** (was 0 = disabled) for both `brew-safe-install` and `brew-safe-upgrade`. The freshness hold applies to formulae only; casks remain unaffected (brew enforces the SHA256 recorded in the cask file on every install, so the supply-chain shape is different). Use `--min-age 0` to restore the previous behaviour. Motivation: recurring npm worm campaigns (Shai-Hulud, Mini Shai-Hulud) compromise packages for live windows of 1–6 hours before takedown — too short for CVE databases to react. A multi-day freshness hold trades a small upgrade lag against the entire attack window. The CVE-aware bypass that skips the age check when the *installed* version has known CVEs is unchanged, so security patches still reach you immediately.
 
 ## [0.1.1] — 2026-04-26

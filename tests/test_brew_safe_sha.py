@@ -26,6 +26,7 @@ Test escape hatches the production code must honor:
 
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -210,6 +211,20 @@ def test_install_no_bottle_formula_passes(sha_env):
     result = run_safe(SAFE_INSTALL, ["buildit"], input_text="n\n")
     assert "no bottle" in result.stdout, result.stdout
     assert "[BLOCKED]" not in result.stdout
+
+
+def test_install_no_local_bottle_is_not_tampering(sha_env):
+    """Symmetric case: local has no bottle (built --from-source), canonical does.
+    Must NOT be classified as tampering."""
+    # Note: write_formula_info(... sha256=None) omits the bottle entry from local.
+    write_formula_info(sha_env["brew"], "src_only", "1.0.0", sha256=None)
+    write_canonical_sha(sha_env["api"], "src_only", CLEAN_SHA)
+    write_deps(sha_env["brew"], "src_only", [])
+
+    result = run_safe(SAFE_INSTALL, ["src_only"], input_text="n\n")
+    assert "[BLOCKED]" not in result.stdout, result.stdout
+    assert "SHA mismatch" not in result.stdout
+    assert "no local bottle" in result.stdout
 
 
 # ----------------------- Case 4a: 404 tap-only formula -----------------------
