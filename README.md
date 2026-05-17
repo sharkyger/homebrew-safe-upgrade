@@ -385,6 +385,15 @@ And of course:
 
 These organizations and communities make it possible for anyone to build security tooling without paywalls or API key barriers. Thank you.
 
+## Sponsors
+
+This tool stays free and default-on thanks to the people and companies funding the maintenance time.
+
+<!-- sponsors -->
+<!-- sponsors -->
+
+[**Become a sponsor →**](https://github.com/sponsors/sharkyger)
+
 ## License
 
 MIT

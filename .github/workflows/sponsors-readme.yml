@@ -1,0 +1,23 @@
+name: Update sponsors in README
+
+on:
+  schedule:
+    - cron: '0 6 * * *'          # daily 06:00 UTC (08:00 CEST)
+  workflow_dispatch:               # allow manual trigger
+
+permissions:
+  contents: write                  # action commits the regenerated README
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+
+      - name: Render sponsors
+        uses: JamesIves/github-sponsors-readme-action@2fd9142e765f755780202122261dc85e78459405  # v1.6.0
+        with:
+          token: ${{ secrets.SPONSORS_PAT }}
+          file: 'README.md'
+          fallback: 'No sponsors yet — [become the first](https://github.com/sponsors/sharkyger).'
