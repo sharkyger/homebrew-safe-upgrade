@@ -6,7 +6,8 @@ on:
   workflow_dispatch:               # allow manual trigger
 
 permissions:
-  contents: write                  # action commits the regenerated README
+  contents: write                  # commit on a side branch
+  pull-requests: write             # open the PR
 
 jobs:
   update:
@@ -22,8 +23,18 @@ jobs:
           file: 'README.md'
           fallback: 'No sponsors yet — [become the first](https://github.com/sponsors/sharkyger).'
 
-      - name: Commit + push README updates
-        uses: stefanzweifel/git-auto-commit-action@04702edda442b2e678b25b537cec683a1493fcb9  # v7.1.0
+      - name: Open PR for README updates
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1  # v8.1.1
         with:
-          commit_message: 'chore: update sponsors in README'
-          file_pattern: 'README.md'
+          sign-commits: true             # GraphQL createCommitOnBranch → web-flow verified
+          commit-message: 'chore: update sponsors in README'
+          title: 'chore: update sponsors in README'
+          body: |
+            Auto-generated update to the Sponsors section by [`JamesIves/github-sponsors-readme-action`](https://github.com/JamesIves/github-sponsors-readme-action).
+
+            Merging this PR refreshes the sponsor logos and names rendered between the `<!-- sponsors -->` markers in `README.md`.
+
+            Triggered by the daily `Update sponsors in README` workflow run.
+          branch: chore/sponsors-readme-update
+          delete-branch: true
+          add-paths: README.md
