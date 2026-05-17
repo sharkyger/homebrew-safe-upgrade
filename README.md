@@ -389,8 +389,7 @@ These organizations and communities make it possible for anyone to build securit
 
 This tool stays free and default-on thanks to the people and companies funding the maintenance time.
 
-<!-- sponsors -->
-<!-- sponsors -->
+<!-- sponsors -->No sponsors yet — [become the first](https://github.com/sponsors/sharkyger).<!-- sponsors -->
 
 [**Become a sponsor →**](https://github.com/sponsors/sharkyger)
 
