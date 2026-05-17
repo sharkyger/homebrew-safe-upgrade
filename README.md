@@ -170,12 +170,12 @@ Use `--min-age 0` to disable.
 
 Casks **are** checked against NVD for known CVEs, but the coverage is uneven and worth being explicit about:
 
-- The scanner ships with a curated map (`cask_nvd_map.py`) translating ~55 common cask slugs into the canonical NVD search keywords vendors actually use in CVE descriptions. Cask `brave-browser` searches for "Brave Browser"; `vscodium` searches for "Visual Studio Code" (same core editor, same CVEs); `temurin` searches for "Eclipse Temurin"; etc.
+- The scanner ships with a curated map (`cask_nvd_map.py`) of ~55 common cask slugs → canonical product names. Keywords are sourced from Homebrew's own cask metadata (`formulae.brew.sh/api/cask/<token>.json` → `name[0]`), with a small set of documented overrides where brew's name is bad for NVD search (verbose vendor prefixes, edition suffixes, or names shorter than the scanner's 4-character minimum).
 - **Mapped casks** get accurate hits — covering the browser/IDE/communication tools most people install.
 - **Unmapped casks** fall back to a naive lookup using the cask slug, which rarely matches NVD descriptions. They will usually show as clean even when CVEs exist.
 - **No min-age, no SHA-tampering check** for casks (see above on the integrity side).
 
-If you rely on a cask not in the map, please open a PR adding it to `cask_nvd_map.py` — the map is plain-text and one line per entry. Each addition needs the cask slug, the NVD search keyword (the literal phrase NVD uses in CVE descriptions), and the CPE `vendor:product` pair. The validator at the bottom of the file flags accidental collisions on commit.
+To extend the map for a cask you rely on: pick the cask token, look up its `name[0]` via the brew API, and add one line to `cask_nvd_map.py`. The validator enforces a 4-character minimum so the scanner doesn't silently skip the NVD query.
 
 **Integrity ≠ vulnerability.** The cask-file SHA check prevents *download-channel tampering* (someone serving a different binary than the cask references). It does not prevent the *vendor* from shipping a binary with a known CVE — Chrome, Brave, Zoom and friends have all done so. The cask CVE check addresses that second problem; the map is the lever for how well it works.
 

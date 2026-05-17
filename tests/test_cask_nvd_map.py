@@ -1,14 +1,16 @@
-"""Tests for the cask → NVD keyword/CPE mapping.
+"""Tests for the cask → NVD keyword map.
 
 The mapping translates cask slugs (e.g. `brave-browser`) into the canonical
-NVD search keyword (e.g. "Brave Browser") so that `query_nvd` actually
-returns hits for vendor-shipped GUI apps. Tests cover:
+NVD search keyword brew already publishes for each cask, so that `query_nvd`
+actually returns hits for vendor-shipped GUI apps. Tests cover:
 
-  - Map well-formedness (no unintended CPE collisions)
+  - Map schema (string-valued, no empties, length ≥ 4)
   - User-installed casks resolve correctly
+  - Documented overrides remain in place
   - query_nvd uses the mapped keyword in its NVD URL
-  - query_nvd's description filter accepts the mapped keyword
-  - Unmapped brew packages (formulae) are unaffected
+  - query_nvd's description filter accepts mapped keyword AND raw slug
+  - Unmapped brew packages (formulae) are unaffected by the map
+  - Empty/short keywords are rejected by the validator
 """
 
 import json
@@ -18,64 +20,106 @@ from unittest.mock import patch
 
 import pytest
 
-# Import from the repo root, not the tests dir
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 import cask_nvd_map  # noqa: E402
 import dependency_security_check as dsc  # noqa: E402
 
-# ─── Map well-formedness ─────────────────────────────────────────────────────
+# ─── Map schema ──────────────────────────────────────────────────────────────
 
 
-def test_map_passes_collision_validation():
-    """The built-in self-check must run without raising."""
-    cask_nvd_map._validate_no_unintended_collisions()
+def test_validator_passes_on_current_map():
+    """Built-in validator runs without raising on the shipped map."""
+    cask_nvd_map._validate()
 
 
 def test_map_has_expected_size():
-    """Sanity floor — we curated ~50 entries; under 40 means something was
-    accidentally truncated."""
-    assert len(cask_nvd_map.CASK_NVD_MAP) >= 40
+    """Floor of 40 entries — under that means something was accidentally truncated."""
+    assert len(cask_nvd_map.CASK_NVD_KEYWORDS) >= 40
 
 
-def test_every_entry_has_required_keys():
-    """Each map entry must have keyword + vendor + product."""
-    for cask, meta in cask_nvd_map.CASK_NVD_MAP.items():
-        assert "keyword" in meta, f"{cask} missing 'keyword'"
-        assert "vendor" in meta, f"{cask} missing 'vendor'"
-        assert "product" in meta, f"{cask} missing 'product'"
-        assert meta["keyword"], f"{cask} has empty keyword"
+def test_every_entry_is_a_string():
+    """Schema is {token: str}, not {token: dict}."""
+    for token, keyword in cask_nvd_map.CASK_NVD_KEYWORDS.items():
+        assert isinstance(keyword, str), f"{token}: keyword must be str, got {type(keyword)}"
+        assert keyword, f"{token}: empty keyword"
+
+
+def test_every_keyword_meets_min_length():
+    """Keywords shorter than 4 chars would silently skip the NVD query."""
+    for token, keyword in cask_nvd_map.CASK_NVD_KEYWORDS.items():
+        assert len(keyword) >= cask_nvd_map.MIN_KEYWORD_LEN, (
+            f"{token}: {keyword!r} is shorter than {cask_nvd_map.MIN_KEYWORD_LEN}"
+        )
+
+
+def test_validator_rejects_short_keyword():
+    """Negative test — the validator must raise on a too-short keyword."""
+    original = cask_nvd_map.CASK_NVD_KEYWORDS.copy()
+    try:
+        cask_nvd_map.CASK_NVD_KEYWORDS["bad"] = "xy"  # 2 chars
+        with pytest.raises(ValueError, match="shorter than"):
+            cask_nvd_map._validate()
+    finally:
+        cask_nvd_map.CASK_NVD_KEYWORDS.clear()
+        cask_nvd_map.CASK_NVD_KEYWORDS.update(original)
+
+
+def test_validator_rejects_empty_keyword():
+    """Negative test — empty keyword must raise."""
+    original = cask_nvd_map.CASK_NVD_KEYWORDS.copy()
+    try:
+        cask_nvd_map.CASK_NVD_KEYWORDS["empty"] = ""
+        with pytest.raises(ValueError, match="empty"):
+            cask_nvd_map._validate()
+    finally:
+        cask_nvd_map.CASK_NVD_KEYWORDS.clear()
+        cask_nvd_map.CASK_NVD_KEYWORDS.update(original)
 
 
 @pytest.mark.parametrize(
-    "cask,expected_keyword,expected_vendor",
+    "cask,expected_keyword",
     [
-        # User's actually-installed casks — must be mapped correctly
-        ("chromium", "Chromium", "chromium"),
-        ("vscodium", "Visual Studio Code", "microsoft"),
-        ("claude-code", "Claude Code", "anthropic"),
-        ("temurin", "Eclipse Temurin", "eclipse"),
-        # Spot-check a few of the curated top-50
-        ("google-chrome", "Google Chrome", "google"),
-        ("brave-browser", "Brave Browser", "brave"),
-        ("visual-studio-code", "Visual Studio Code", "microsoft"),
-        ("docker", "Docker Desktop", "docker"),
-        ("1password", "1Password", "1password"),
+        # User-installed casks
+        ("chromium", "Chromium"),
+        ("vscodium", "Visual Studio Code"),  # documented override (shared source)
+        ("claude-code", "Claude Code"),
+        ("temurin", "Eclipse Temurin"),  # documented override (brew has verbose name)
+        # Brew-canonical names (not overridden)
+        ("google-chrome", "Google Chrome"),
+        ("brave-browser", "Brave"),  # brew's canonical, not "Brave Browser"
+        ("slack", "Slack"),
+        ("zoom", "Zoom"),
+        # Documented overrides
+        ("obs", "OBS Studio"),  # brew "OBS" too short
+        ("visual-studio-code", "Visual Studio Code"),  # strip "Microsoft" prefix
+        ("intellij-idea", "IntelliJ IDEA"),  # strip "Ultimate" suffix
+        ("intellij-idea-ce", "IntelliJ IDEA"),  # strip prefix + edition
     ],
 )
-def test_known_cask_mapping(cask, expected_keyword, expected_vendor):
-    assert cask in cask_nvd_map.CASK_NVD_MAP, f"{cask} not in CASK_NVD_MAP"
-    meta = cask_nvd_map.CASK_NVD_MAP[cask]
-    assert meta["keyword"] == expected_keyword
-    assert meta["vendor"] == expected_vendor
+def test_known_cask_mapping(cask, expected_keyword):
+    assert cask in cask_nvd_map.CASK_NVD_KEYWORDS, f"{cask} not in CASK_NVD_KEYWORDS"
+    assert cask_nvd_map.CASK_NVD_KEYWORDS[cask] == expected_keyword
+
+
+def test_dropped_token_docker_is_absent():
+    """`docker` was folded into `docker-desktop` by brew. The old token must
+    not be in the map, or installs of the new token won't be mapped."""
+    assert "docker" not in cask_nvd_map.CASK_NVD_KEYWORDS
+    assert "docker-desktop" in cask_nvd_map.CASK_NVD_KEYWORDS
+
+
+def test_renamed_token_handbrake_uses_new_form():
+    """brew renamed `handbrake` → `handbrake-app`."""
+    assert "handbrake" not in cask_nvd_map.CASK_NVD_KEYWORDS
+    assert "handbrake-app" in cask_nvd_map.CASK_NVD_KEYWORDS
 
 
 # ─── query_nvd integration ──────────────────────────────────────────────────
 
 
 def _fake_nvd_response(cve_id, description):
-    """Build a minimal NVD API response body."""
     return json.dumps(
         {
             "vulnerabilities": [
@@ -86,12 +130,7 @@ def _fake_nvd_response(cve_id, description):
                         "descriptions": [{"lang": "en", "value": description}],
                         "metrics": {
                             "cvssMetricV31": [
-                                {
-                                    "cvssData": {
-                                        "baseSeverity": "HIGH",
-                                        "baseScore": 8.0,
-                                    }
-                                }
+                                {"cvssData": {"baseSeverity": "HIGH", "baseScore": 8.0}}
                             ]
                         },
                         "configurations": [],
@@ -119,47 +158,44 @@ class _FakeResponse:
 def test_mapped_cask_uses_mapped_keyword_in_nvd_url():
     """For a known cask, the NVD URL must contain the mapped keyword,
     URL-encoded, NOT the raw cask slug."""
-    captured_urls = []
+    captured = []
 
     def fake_urlopen(req, timeout=15):
-        captured_urls.append(req.full_url)
-        return _FakeResponse(_fake_nvd_response("CVE-2099-0001", "Some unrelated text."))
+        captured.append(req.full_url)
+        return _FakeResponse(_fake_nvd_response("CVE-2099-0001", "Unrelated text."))
 
     with patch.object(dsc, "_urlopen", side_effect=fake_urlopen):
         dsc.query_nvd("brave-browser", "brew", version=None)
 
-    assert len(captured_urls) == 1
-    url = captured_urls[0]
-    # Mapped keyword "Brave Browser" → URL-encoded as "Brave%20Browser"
-    assert "Brave%20Browser" in url, f"expected mapped keyword in URL, got: {url}"
-    assert "brave-browser" not in url, f"raw cask slug must NOT appear in URL: {url}"
+    assert len(captured) == 1
+    # "Brave" — short, URL-safe, no encoding needed beyond the keyword
+    assert "Brave" in captured[0], f"expected mapped keyword in URL: {captured[0]}"
+    assert "brave-browser" not in captured[0], f"raw slug must not appear: {captured[0]}"
 
 
 def test_unmapped_brew_package_uses_raw_name():
-    """Formulae (not in the cask map) must use the raw package_name —
-    behavior unchanged for non-cask packages."""
-    captured_urls = []
+    """Formulae (not in the cask map) use the raw package_name."""
+    captured = []
 
     def fake_urlopen(req, timeout=15):
-        captured_urls.append(req.full_url)
+        captured.append(req.full_url)
         return _FakeResponse(_fake_nvd_response("CVE-2099-0002", "openssl is vulnerable."))
 
     with patch.object(dsc, "_urlopen", side_effect=fake_urlopen):
         dsc.query_nvd("openssl", "brew", version=None)
 
-    assert "openssl" in captured_urls[0]
+    assert "openssl" in captured[0]
 
 
 def test_mapped_cask_description_match_accepts_mapped_keyword():
-    """A CVE whose description starts with the mapped keyword must pass
-    the description filter — even though the raw cask slug isn't there."""
+    """A CVE description that mentions the mapped keyword (not the raw slug)
+    must still pass the filter."""
 
     def fake_urlopen(req, timeout=15):
         return _FakeResponse(
             _fake_nvd_response(
                 "CVE-2099-0003",
-                # Description uses "Brave Browser", not "brave-browser"
-                "Brave Browser before version 1.50.0 allows remote code execution.",
+                "Brave before version 1.50.0 allows remote code execution.",
             )
         )
 
@@ -170,17 +206,30 @@ def test_mapped_cask_description_match_accepts_mapped_keyword():
     assert findings[0]["id"] == "CVE-2099-0003"
 
 
-def test_mapped_cask_rejects_unrelated_cve():
-    """If a CVE description doesn't mention the mapped keyword at all,
-    it must be rejected (no noise from NVD keyword search false positives)."""
+def test_mapped_cask_description_match_accepts_raw_slug_fallback():
+    """If a CVE description happens to use the raw slug form, that's also
+    accepted (match_terms includes both forms)."""
 
     def fake_urlopen(req, timeout=15):
         return _FakeResponse(
             _fake_nvd_response(
                 "CVE-2099-0004",
-                "Some other product allows arbitrary file read.",
+                "brave-browser is vulnerable to remote code execution.",
             )
         )
+
+    with patch.object(dsc, "_urlopen", side_effect=fake_urlopen):
+        findings = dsc.query_nvd("brave-browser", "brew", version=None)
+
+    assert len(findings) == 1
+    assert findings[0]["id"] == "CVE-2099-0004"
+
+
+def test_mapped_cask_rejects_unrelated_cve():
+    """Description that mentions neither form is rejected (no noise)."""
+
+    def fake_urlopen(req, timeout=15):
+        return _FakeResponse(_fake_nvd_response("CVE-2099-0005", "Some other product has issues."))
 
     with patch.object(dsc, "_urlopen", side_effect=fake_urlopen):
         findings = dsc.query_nvd("brave-browser", "brew", version=None)
@@ -189,36 +238,32 @@ def test_mapped_cask_rejects_unrelated_cve():
 
 
 def test_non_brew_ecosystem_unaffected_by_cask_map():
-    """A pip package named exactly like a cask in the map (extremely
-    unlikely) must NOT trigger the substitution — only ecosystem=brew does."""
-    captured_urls = []
+    """ecosystem != 'brew' must skip the cask-map substitution."""
+    captured = []
 
     def fake_urlopen(req, timeout=15):
-        captured_urls.append(req.full_url)
-        return _FakeResponse(_fake_nvd_response("CVE-2099-0005", "irrelevant"))
+        captured.append(req.full_url)
+        return _FakeResponse(_fake_nvd_response("CVE-2099-0006", "irrelevant"))
 
     with patch.object(dsc, "_urlopen", side_effect=fake_urlopen):
         dsc.query_nvd("chromium", "pip", version=None)
 
-    # Should use raw "chromium", not the mapped "Chromium" keyword
-    # (Same string here, but the substitution code path is gated on ecosystem)
-    assert "chromium" in captured_urls[0]
+    # No substitution for pip ecosystem, even if the name happens to match a cask
+    assert "chromium" in captured[0]
 
 
-def test_short_unmapped_cask_skips_query():
-    """Names under 4 chars short-circuit (NVD too noisy). Must still apply
-    after potential mapping — e.g. cask `obs` (3 chars) maps to 'OBS Studio'
-    (>4 chars) and should now be queryable."""
-    captured_urls = []
+def test_short_cask_token_with_long_mapped_keyword():
+    """Cask `obs` (3 chars) maps to 'OBS Studio' (10 chars). Without the
+    substitution the scanner's len<4 guard would skip the query; with it,
+    the query should fire."""
+    captured = []
 
     def fake_urlopen(req, timeout=15):
-        captured_urls.append(req.full_url)
-        return _FakeResponse(_fake_nvd_response("CVE-2099-0006", "OBS Studio version X..."))
+        captured.append(req.full_url)
+        return _FakeResponse(_fake_nvd_response("CVE-2099-0007", "OBS Studio version X..."))
 
     with patch.object(dsc, "_urlopen", side_effect=fake_urlopen):
         dsc.query_nvd("obs", "brew", version=None)
 
-    # 'obs' alone would be skipped (len < 4), but the mapped keyword
-    # "OBS Studio" is long enough → query should fire.
-    assert len(captured_urls) == 1
-    assert "OBS%20Studio" in captured_urls[0]
+    assert len(captured) == 1
+    assert "OBS%20Studio" in captured[0]

@@ -34,14 +34,14 @@ except ImportError:
 
 USER_AGENT = "homebrew-safe-upgrade/1.0"
 
-# Cask → NVD search-keyword + CPE map.
+# Cask token → NVD search keyword.
 # Imported as a module so the curated list lives in cask_nvd_map.py and
 # can be reviewed/diffed independently of scanner logic. Empty fallback
-# keeps the scanner working even if the map file is missing or corrupt.
+# keeps the scanner working if the map file is absent at runtime.
 try:
-    from cask_nvd_map import CASK_NVD_MAP
+    from cask_nvd_map import CASK_NVD_KEYWORDS
 except ImportError:
-    CASK_NVD_MAP = {}
+    CASK_NVD_KEYWORDS = {}
 
 
 def _urlopen(req, timeout=15):
@@ -289,9 +289,9 @@ def query_nvd(package_name, ecosystem, version=None):
 
     For known macOS casks (vendor-shipped GUI apps), the raw cask slug rarely
     matches NVD descriptions verbatim (e.g. cask `brave-browser` will never
-    hit "Brave Browser version 1.x"). CASK_NVD_MAP translates the slug into
-    the canonical search keyword used by the vendor in CVE descriptions, and
-    the description-matching filter accepts that keyword too.
+    hit "Brave version 1.x"). CASK_NVD_KEYWORDS maps the slug to brew's
+    canonical product name; the description-matching filter accepts that
+    keyword too.
     """
     findings = []
 
@@ -301,10 +301,10 @@ def query_nvd(package_name, ecosystem, version=None):
     # actually about this package. Original `package_name` stays for logging.
     search_name = package_name
     match_terms = [package_name.lower()]
-    if ecosystem == "brew" and package_name in CASK_NVD_MAP:
-        mapped = CASK_NVD_MAP[package_name]
-        search_name = mapped["keyword"]
-        match_terms = [mapped["keyword"].lower(), package_name.lower()]
+    if ecosystem == "brew" and package_name in CASK_NVD_KEYWORDS:
+        mapped_keyword = CASK_NVD_KEYWORDS[package_name]
+        search_name = mapped_keyword
+        match_terms = [mapped_keyword.lower(), package_name.lower()]
 
     # NVD keyword search is too noisy for short/ambiguous names
     if len(search_name) < 4:

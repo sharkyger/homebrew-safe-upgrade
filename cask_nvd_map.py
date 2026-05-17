@@ -1,195 +1,132 @@
-"""Cask-name → NVD search metadata map.
+"""Cask token → NVD search keyword.
 
 The vulnerability scanner queries NVD via `keywordSearch&keywordExactMatch`.
-Cask names rarely match NVD descriptions verbatim — e.g. cask `brave-browser`
-will never hit a CVE whose description says "Brave Browser version 1.x".
-This map translates cask names into the canonical search keyword NVD expects,
-plus the vendor:product pair for any future CPE-based version filtering.
+Cask tokens (e.g. `brave-browser`) rarely match NVD descriptions verbatim —
+a CVE for Brave Browser will say "Brave" or "Brave Browser", not the brew
+slug. This map translates the slug into the canonical product name brew
+already publishes per cask.
 
-REVIEW NOTES for sharkyger:
-- Each entry curated by hand. Verify any you're uncertain about against
-  https://nvd.nist.gov/vuln/search before merging.
-- "keyword" is what's sent to NVD's keywordSearch (case-insensitive on their
-  side, but capitalized here to match how vendors actually phrase product
-  names in CVE descriptions).
-- "vendor" / "product" are NVD CPE 2.3 vendor and product strings. Verify by
-  searching nvd.nist.gov for a known CVE in the product and checking the
-  CPE configurations.
-- AMBIGUOUS / SKIPPED casks listed at the bottom — they have collisions or
-  unclear NVD mapping and need more care before adding.
+DATA SOURCE
+-----------
+Keywords are derived from Homebrew's cask API:
+
+  https://formulae.brew.sh/api/cask/<token>.json   →  .name[0]
+  https://formulae.brew.sh/api/cask.json           (full catalog, ~14 MB)
+
+For each cask token, the value is brew's canonical `name[0]` field unless
+listed in `OVERRIDES` below. Overrides exist only where brew's name is
+demonstrably bad for NVD search (verbose vendor prefixes, edition suffixes,
+or entries shorter than the scanner's 4-character minimum).
+
+To extend the map: pick the cask token (visible at formulae.brew.sh/cask/),
+look up its `name[0]` via the API, and add the entry. The validator at the
+bottom enforces a 4-char minimum so the scanner doesn't silently skip the
+NVD query.
+
+CPE-BASED FILTERING (not implemented)
+-------------------------------------
+This map intentionally does NOT include CPE `vendor:product` strings.
+The scanner currently relies on NVD keyword search only; CPE-based version
+filtering is a future improvement that would also need its own data source
+(NVD's CPE dictionary). Shipping speculative CPE strings here would just
+create dead code with maintenance burden.
 """
 
-CASK_NVD_MAP = {
-    # ─── Browsers ──────────────────────────────────────────────────────────
-    "google-chrome": {"keyword": "Google Chrome", "vendor": "google", "product": "chrome"},
-    "chromium": {
-        "keyword": "Chromium",
-        "vendor": "chromium",
-        "product": "chromium",
-    },  # Own CPE namespace; engine CVEs also appear under google:chrome, keyword search catches both
-    "firefox": {"keyword": "Mozilla Firefox", "vendor": "mozilla", "product": "firefox"},
-    "brave-browser": {"keyword": "Brave Browser", "vendor": "brave", "product": "brave"},
-    "microsoft-edge": {
-        "keyword": "Microsoft Edge",
-        "vendor": "microsoft",
-        "product": "edge_chromium",
-    },
-    "opera": {"keyword": "Opera Browser", "vendor": "opera", "product": "opera"},
-    "vivaldi": {"keyword": "Vivaldi Browser", "vendor": "vivaldi", "product": "vivaldi"},
-    "tor-browser": {"keyword": "Tor Browser", "vendor": "torproject", "product": "tor"},
-    "thunderbird": {
-        "keyword": "Mozilla Thunderbird",
-        "vendor": "mozilla",
-        "product": "thunderbird",
-    },
-    # ─── Communication ─────────────────────────────────────────────────────
-    "slack": {"keyword": "Slack Desktop", "vendor": "slack", "product": "slack"},
-    "zoom": {"keyword": "Zoom Client", "vendor": "zoom", "product": "meetings"},
-    "discord": {"keyword": "Discord Desktop", "vendor": "discord", "product": "discord"},
-    "microsoft-teams": {"keyword": "Microsoft Teams", "vendor": "microsoft", "product": "teams"},
-    "telegram": {
-        "keyword": "Telegram Desktop",
-        "vendor": "telegram",
-        "product": "telegram_desktop",
-    },
-    "signal": {"keyword": "Signal Desktop", "vendor": "signal", "product": "signal_desktop"},
-    "whatsapp": {"keyword": "WhatsApp Desktop", "vendor": "whatsapp", "product": "whatsapp"},
-    # ─── Dev tools / IDEs ──────────────────────────────────────────────────
-    "visual-studio-code": {
-        "keyword": "Visual Studio Code",
-        "vendor": "microsoft",
-        "product": "visual_studio_code",
-    },
-    "vscodium": {  # VSCodium is built from MS VS Code source — same CVE exposure in core editor
-        "keyword": "Visual Studio Code",
-        "vendor": "microsoft",
-        "product": "visual_studio_code",
-    },
-    "claude-code": {  # Anthropic CLI; minimal CVE history as of 2026 — entry is forward-looking
-        "keyword": "Claude Code",
-        "vendor": "anthropic",
-        "product": "claude_code",
-    },
-    "iterm2": {"keyword": "iTerm2", "vendor": "iterm2", "product": "iterm2"},
-    "intellij-idea": {
-        "keyword": "IntelliJ IDEA",
-        "vendor": "jetbrains",
-        "product": "intellij_idea",
-    },
-    "intellij-idea-ce": {
-        "keyword": "IntelliJ IDEA",
-        "vendor": "jetbrains",
-        "product": "intellij_idea",
-    },
-    "pycharm": {"keyword": "PyCharm", "vendor": "jetbrains", "product": "pycharm"},
-    "pycharm-ce": {"keyword": "PyCharm", "vendor": "jetbrains", "product": "pycharm"},
-    "webstorm": {"keyword": "WebStorm", "vendor": "jetbrains", "product": "webstorm"},
-    "phpstorm": {"keyword": "PhpStorm", "vendor": "jetbrains", "product": "phpstorm"},
-    "goland": {"keyword": "GoLand", "vendor": "jetbrains", "product": "goland"},
-    "rubymine": {"keyword": "RubyMine", "vendor": "jetbrains", "product": "rubymine"},
-    "clion": {"keyword": "CLion", "vendor": "jetbrains", "product": "clion"},
-    "sublime-text": {"keyword": "Sublime Text", "vendor": "sublimehq", "product": "sublime_text"},
-    "postman": {"keyword": "Postman", "vendor": "postman", "product": "postman"},
-    "insomnia": {"keyword": "Insomnia REST", "vendor": "insomnia", "product": "insomnia"},
-    "docker": {"keyword": "Docker Desktop", "vendor": "docker", "product": "desktop"},
-    "docker-desktop": {"keyword": "Docker Desktop", "vendor": "docker", "product": "desktop"},
-    "github": {"keyword": "GitHub Desktop", "vendor": "github", "product": "desktop"},
-    "sourcetree": {"keyword": "Sourcetree", "vendor": "atlassian", "product": "sourcetree"},
-    # ─── Productivity ──────────────────────────────────────────────────────
-    "notion": {"keyword": "Notion Desktop", "vendor": "notion", "product": "notion"},
-    "obsidian": {"keyword": "Obsidian", "vendor": "obsidian", "product": "obsidian"},
-    "1password": {"keyword": "1Password", "vendor": "1password", "product": "1password"},
-    "bitwarden": {
-        "keyword": "Bitwarden Desktop",
-        "vendor": "bitwarden",
-        "product": "bitwarden_desktop",
-    },
-    "keepassxc": {"keyword": "KeePassXC", "vendor": "keepassxc", "product": "keepassxc"},
-    "raycast": {"keyword": "Raycast", "vendor": "raycast", "product": "raycast"},
-    # ─── Media ─────────────────────────────────────────────────────────────
-    "spotify": {"keyword": "Spotify Desktop", "vendor": "spotify", "product": "spotify"},
-    "vlc": {"keyword": "VLC media player", "vendor": "videolan", "product": "vlc_media_player"},
-    "handbrake": {"keyword": "HandBrake", "vendor": "handbrake", "product": "handbrake"},
-    "obs": {"keyword": "OBS Studio", "vendor": "obsproject", "product": "obs_studio"},
-    # ─── Design ────────────────────────────────────────────────────────────
-    "figma": {"keyword": "Figma Desktop", "vendor": "figma", "product": "desktop"},
-    "sketch": {"keyword": "Sketch", "vendor": "sketch", "product": "sketch"},
-    # ─── Cloud / sync ──────────────────────────────────────────────────────
-    "dropbox": {"keyword": "Dropbox Desktop", "vendor": "dropbox", "product": "dropbox"},
-    "google-drive": {"keyword": "Google Drive", "vendor": "google", "product": "drive"},
-    "onedrive": {"keyword": "Microsoft OneDrive", "vendor": "microsoft", "product": "onedrive"},
-    # ─── Virtualization ────────────────────────────────────────────────────
-    "vmware-fusion": {"keyword": "VMware Fusion", "vendor": "vmware", "product": "fusion"},
-    "parallels": {"keyword": "Parallels Desktop", "vendor": "parallels", "product": "desktop"},
-    "virtualbox": {"keyword": "VirtualBox", "vendor": "oracle", "product": "vm_virtualbox"},
-    # ─── Runtimes ──────────────────────────────────────────────────────────
-    "temurin": {  # Eclipse Temurin (rebranded AdoptOpenJDK); some JDK CVEs also attributed to oracle:openjdk
-        "keyword": "Eclipse Temurin",
-        "vendor": "eclipse",
-        "product": "temurin",
-    },
+# Overrides where brew's name[0] is demonstrably worse than a manual choice
+# for NVD search. Each entry has a one-line rationale.
+OVERRIDES = {
+    "temurin": "Eclipse Temurin",  # brew "Eclipse Temurin Java Development Kit" — too verbose for NVD
+    "obs": "OBS Studio",  # brew "OBS" — 3 chars, fails scanner's len<4 guard
+    "phpstorm": "PhpStorm",  # brew "JetBrains PhpStorm" — vendor prefix unused in NVD descriptions
+    "pycharm-ce": "PyCharm",  # brew "Jetbrains PyCharm Community Edition" — strip prefix + edition
+    "sourcetree": "Sourcetree",  # brew "Atlassian SourceTree" — strip vendor prefix
+    "visual-studio-code": "Visual Studio Code",  # brew "Microsoft Visual Studio Code" — strip vendor
+    "virtualbox": "VirtualBox",  # brew "Oracle VirtualBox" — strip vendor; NVD uses both forms
+    "intellij-idea": "IntelliJ IDEA",  # brew "IntelliJ IDEA Ultimate" — strip edition
+    "intellij-idea-ce": "IntelliJ IDEA",  # brew "IntelliJ IDEA Community Edition" — strip edition
+    "vscodium": "Visual Studio Code",  # VSCodium built from MS VS Code source; CVE attribution is to MS
+    "telegram": "Telegram Desktop",  # brew "Telegram for macOS" — NVD descriptions use "Telegram Desktop"
+    "onedrive": "Microsoft OneDrive",  # brew "OneDrive" — NVD descriptions consistently use full form
 }
 
-# ─── DELIBERATELY SKIPPED — ambiguous, need careful research before adding ──
-#
-# arc            — "Arc" alone matches dozens of unrelated CVEs (Arc Welder,
-#                  Arc Touch, Arc Compact, ARC firmware...). Needs "The Browser
-#                  Company Arc" as keyword but NVD doesn't index it that way yet.
-# tower          — "Tower" matches everything from Cisco Tower to Apache Tower
-# spark          — Apache Spark vs Readdle Spark mail client collision
-# caffeine       — too generic; macOS utility vs many code-named projects
-# utm            — UTM (Unified Threat Management) firewall product collision
-# alfred         — alfred-app collisions with industrial control system Alfred
-# cursor         — Cursor (AI editor) vs cursor library / generic CVE descriptions
-# warp           — Warp Terminal vs Cloudflare Warp vs other "warp" CVEs
-# the-unarchiver — works with NVD but rarely has CVEs, low signal
-# balenaetcher   — Balena ecosystem has split CVE attribution (etcher vs balena)
-# transmission   — common word, very high noise floor
-#
-# Strategy for these: skip keyword search entirely (current behavior — no hits),
-# OR build proper CPE-based queries in a future PR.
-
-
-# ─── Self-check: no vendor:product duplicates that point at different casks ──
-# (Allowed: two casks → same CPE, e.g. intellij-idea + intellij-idea-ce.)
-# (Not allowed: same CPE for two unrelated casks.)
-# Documented shared-source aliases: distinct cask names that legitimately
-# share a CPE because they're built from the same upstream source. The
-# validator allows these without flagging a collision.
-SHARED_SOURCE_ALIASES = {
-    # VSCodium is built from MS VS Code source — strips telemetry/branding,
-    # but core-editor CVEs apply equally to both binaries.
-    frozenset({"vscodium", "visual-studio-code"}),
+CASK_NVD_KEYWORDS = {
+    "1password": "1Password",
+    "bitwarden": "Bitwarden",
+    "brave-browser": "Brave",
+    "chromium": "Chromium",
+    "claude-code": "Claude Code",
+    "clion": "CLion",
+    "discord": "Discord",
+    "docker-desktop": "Docker Desktop",
+    "dropbox": "Dropbox",
+    "figma": "Figma",
+    "firefox": "Mozilla Firefox",
+    "github": "GitHub Desktop",
+    "goland": "Goland",
+    "google-chrome": "Google Chrome",
+    "google-drive": "Google Drive",
+    "handbrake-app": "HandBrake",
+    "insomnia": "Insomnia",
+    "intellij-idea": "IntelliJ IDEA",
+    "intellij-idea-ce": "IntelliJ IDEA",
+    "iterm2": "iTerm2",
+    "keepassxc": "KeePassXC",
+    "microsoft-edge": "Microsoft Edge",
+    "microsoft-teams": "Microsoft Teams",
+    "notion": "Notion",
+    "obs": "OBS Studio",
+    "obsidian": "Obsidian",
+    "onedrive": "Microsoft OneDrive",
+    "opera": "Opera",
+    "parallels": "Parallels Desktop",
+    "phpstorm": "PhpStorm",
+    "postman": "Postman",
+    "pycharm": "PyCharm",
+    "pycharm-ce": "PyCharm",
+    "raycast": "Raycast",
+    "rubymine": "RubyMine",
+    "signal": "Signal",
+    "sketch": "Sketch",
+    "slack": "Slack",
+    "sourcetree": "Sourcetree",
+    "spotify": "Spotify",
+    "sublime-text": "Sublime Text",
+    "telegram": "Telegram Desktop",
+    "temurin": "Eclipse Temurin",
+    "thunderbird": "Mozilla Thunderbird",
+    "tor-browser": "Tor Browser",
+    "virtualbox": "VirtualBox",
+    "visual-studio-code": "Visual Studio Code",
+    "vivaldi": "Vivaldi",
+    "vlc": "VLC media player",
+    "vmware-fusion": "VMware Fusion",
+    "vscodium": "Visual Studio Code",
+    "webstorm": "WebStorm",
+    "whatsapp": "WhatsApp",
+    "zoom": "Zoom",
 }
 
+# Minimum keyword length matches the scanner's NVD-noise guard
+# (`len(search_name) < 4` short-circuits the query). Keywords shorter
+# than 4 chars silently skip the query, which would mean false-clean
+# results for the affected cask.
+MIN_KEYWORD_LEN = 4
 
-def _validate_no_unintended_collisions():
-    """Check map for unintended vendor:product collisions across distinct cask families.
 
-    Allowed collisions:
-      - Same product packaged under different cask names (e.g. intellij-idea
-        + intellij-idea-ce, docker + docker-desktop) — detected via suffix stripping.
-      - Documented shared-source aliases (see SHARED_SOURCE_ALIASES above).
-    """
-    seen = {}
-    suffix_tokens = ("-ce", "-community", "-desktop")
-    for cask, meta in CASK_NVD_MAP.items():
-        key = (meta["vendor"], meta["product"])
-        cask_family = cask
-        for suffix in suffix_tokens:
-            if cask_family.endswith(suffix):
-                cask_family = cask_family[: -len(suffix)]
-        if key in seen and seen[key] != cask_family:
-            pair = frozenset({cask, seen[key]})
-            if any(pair == alias for alias in SHARED_SOURCE_ALIASES):
-                continue  # documented intentional alias
+def _validate():
+    """Enforce schema rules: keyword strings, no empties, length ≥ 4."""
+    for token, keyword in CASK_NVD_KEYWORDS.items():
+        if not isinstance(keyword, str):
+            raise TypeError(f"{token}: keyword must be str, got {type(keyword).__name__}")
+        if not keyword:
+            raise ValueError(f"{token}: empty keyword")
+        if len(keyword) < MIN_KEYWORD_LEN:
             raise ValueError(
-                f"CPE collision: {cask} and {seen[key]} both map to "
-                f"{key[0]}:{key[1]} but appear to be different products"
+                f"{token}: keyword {keyword!r} is shorter than {MIN_KEYWORD_LEN} chars — "
+                f"scanner would silently skip the NVD query. Use a longer canonical name."
             )
-        seen[key] = cask_family
 
 
 if __name__ == "__main__":
-    _validate_no_unintended_collisions()
-    print(f"Cask map: {len(CASK_NVD_MAP)} entries, no unintended CPE collisions.")
+    _validate()
+    print(f"Cask map: {len(CASK_NVD_KEYWORDS)} entries, validation OK.")
