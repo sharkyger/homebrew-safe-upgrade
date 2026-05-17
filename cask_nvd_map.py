@@ -33,20 +33,31 @@ create dead code with maintenance burden.
 """
 
 # Overrides where brew's name[0] is demonstrably worse than a manual choice
-# for NVD search. Each entry has a one-line rationale.
+# for NVD search. Rationale per entry:
+#   temurin            — brew "Eclipse Temurin Java Development Kit" is too verbose for NVD
+#   obs                — brew "OBS" is 3 chars, fails the scanner's len<4 guard
+#   phpstorm           — brew "JetBrains PhpStorm" prefix not used in NVD descriptions
+#   pycharm-ce         — brew "Jetbrains PyCharm Community Edition" — strip prefix + edition
+#   sourcetree         — brew "Atlassian SourceTree" — strip vendor prefix
+#   visual-studio-code — brew "Microsoft Visual Studio Code" — strip vendor
+#   virtualbox         — brew "Oracle VirtualBox" — strip vendor; NVD uses both forms
+#   intellij-idea[-ce] — brew "IntelliJ IDEA Ultimate" / "...Community Edition" — strip edition
+#   vscodium           — built from MS VS Code source; CVE attribution is to MS
+#   telegram           — brew "Telegram for macOS"; NVD descriptions use "Telegram Desktop"
+#   onedrive           — brew "OneDrive"; NVD descriptions consistently use the full form
 OVERRIDES = {
-    "temurin": "Eclipse Temurin",  # brew "Eclipse Temurin Java Development Kit" — too verbose for NVD
-    "obs": "OBS Studio",  # brew "OBS" — 3 chars, fails scanner's len<4 guard
-    "phpstorm": "PhpStorm",  # brew "JetBrains PhpStorm" — vendor prefix unused in NVD descriptions
-    "pycharm-ce": "PyCharm",  # brew "Jetbrains PyCharm Community Edition" — strip prefix + edition
-    "sourcetree": "Sourcetree",  # brew "Atlassian SourceTree" — strip vendor prefix
-    "visual-studio-code": "Visual Studio Code",  # brew "Microsoft Visual Studio Code" — strip vendor
-    "virtualbox": "VirtualBox",  # brew "Oracle VirtualBox" — strip vendor; NVD uses both forms
-    "intellij-idea": "IntelliJ IDEA",  # brew "IntelliJ IDEA Ultimate" — strip edition
-    "intellij-idea-ce": "IntelliJ IDEA",  # brew "IntelliJ IDEA Community Edition" — strip edition
-    "vscodium": "Visual Studio Code",  # VSCodium built from MS VS Code source; CVE attribution is to MS
-    "telegram": "Telegram Desktop",  # brew "Telegram for macOS" — NVD descriptions use "Telegram Desktop"
-    "onedrive": "Microsoft OneDrive",  # brew "OneDrive" — NVD descriptions consistently use full form
+    "temurin": "Eclipse Temurin",
+    "obs": "OBS Studio",
+    "phpstorm": "PhpStorm",
+    "pycharm-ce": "PyCharm",
+    "sourcetree": "Sourcetree",
+    "visual-studio-code": "Visual Studio Code",
+    "virtualbox": "VirtualBox",
+    "intellij-idea": "IntelliJ IDEA",
+    "intellij-idea-ce": "IntelliJ IDEA",
+    "vscodium": "Visual Studio Code",
+    "telegram": "Telegram Desktop",
+    "onedrive": "Microsoft OneDrive",
 }
 
 CASK_NVD_KEYWORDS = {

@@ -381,9 +381,13 @@ def query_nvd(package_name, ecosystem, version=None):
             matched_nodash_re = re.compile(
                 r"(?<![a-z0-9])" + re.escape(matched_nodash) + r"(?![a-z0-9])"
             )
-            if first_chunk != matched_term and first_chunk != matched_nodash:
-                if not matched_re.search(first_chunk) and not matched_nodash_re.search(first_chunk):
-                    continue
+            if (
+                first_chunk != matched_term
+                and first_chunk != matched_nodash
+                and not matched_re.search(first_chunk)
+                and not matched_nodash_re.search(first_chunk)
+            ):
+                continue
 
             severity = "UNKNOWN"
             score = 0.0
