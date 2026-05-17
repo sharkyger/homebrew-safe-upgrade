@@ -8,6 +8,9 @@ The project is pre-1.0; expect minor breaking changes between 0.x releases until
 
 ## [Unreleased]
 
+### Added
+- **Curated cask → NVD search-keyword map** (`cask_nvd_map.py`). Cask slugs like `brave-browser` rarely match NVD descriptions verbatim, so the scanner previously returned no hits for vendor-shipped GUI apps. The map translates ~55 common casks (browsers, IDEs, communication tools, runtimes) into the canonical search keyword vendors actually use in CVE descriptions ("Brave Browser", "Visual Studio Code", "Eclipse Temurin", etc.) plus the CPE `vendor:product` pair for downstream filtering. `query_nvd` looks up the mapped keyword when `ecosystem == "brew"` and the cask slug is in the map; the description-matching filter accepts the mapped keyword in addition to the raw slug. Unmapped casks fall through to the previous naive behavior — open a PR to expand the map. The README now states the cask-coverage limits honestly (integrity ≠ vulnerability; SHA enforcement covers tampering, not vendor-shipped CVEs).
+
 ### Changed
 - **SHA verification is now default-on** for both `brew-safe-install` and `brew-safe-upgrade`. The bottle SHA from `brew info --json=v2` is compared against the canonical SHA published at `formulae.brew.sh`. Five outcomes:
   - **Match** — `[sha] verified <local>=<canonical>`, install/upgrade proceeds.
