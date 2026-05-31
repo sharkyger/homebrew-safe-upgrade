@@ -3,3 +3,8 @@ __pycache__/
 .pytest_cache/
 *.egg-info/
 dist/
+
+# Local code-review artifacts (Mistral Vibe / CodeRabbit / subagent) — never commit
+.codereview/
+# Local-only working notes / security handoffs — never commit
+*.local.md
