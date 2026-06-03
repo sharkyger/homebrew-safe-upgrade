@@ -330,7 +330,7 @@ This places all files in your Homebrew bin directory (`/opt/homebrew/bin/` on Ap
 ```bash
 git clone https://github.com/sharkyger/homebrew-safe-upgrade.git
 cd homebrew-safe-upgrade
-cp brew-safe-upgrade brew-safe-install brew-safe-update dependency_security_check.py /opt/homebrew/bin/
+cp brew-safe-upgrade brew-safe-install brew-safe-update dependency_security_check.py bottle_resolver.py cask_nvd_map.py /opt/homebrew/bin/
 chmod +x /opt/homebrew/bin/brew-safe-upgrade /opt/homebrew/bin/brew-safe-install /opt/homebrew/bin/brew-safe-update
 ```
 

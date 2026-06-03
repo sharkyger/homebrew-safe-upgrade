@@ -8,6 +8,8 @@ The project is pre-1.0; expect minor breaking changes between 0.x releases until
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-06-03
+
 ### Fixed
 - **`brew safe-update` is now self-healing — single-run convergence (fixes the second Intel-Mac error).** While verifying the bottle-SHA fix on a real Intel (x86_64) Mac, two distinct errors surfaced in sequence:
   1. `[BLOCKED] SHA mismatch` on **every** bottle — the architecture bug (see the arch-aware entry below). This is the one the bottle-SHA fix addresses.
@@ -111,4 +113,6 @@ pre-tag history by theme rather than by release. Full detail is in `git log`.
 - CodeQL, gitleaks, and dependabot wired up.
 - Community health files: issue templates (bug, false-positive, feature), discussion link from README on the open `--min-age` default question.
 
-[Unreleased]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.1.1...v0.2.0
+[0.1.1]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.1.0...v0.1.1
