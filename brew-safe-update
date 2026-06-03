@@ -1,6 +1,8 @@
 #!/bin/bash
-# brew-safe-update — updates brew-safe-upgrade, brew-safe-install, and
-# dependency_security_check.py to the latest version from GitHub.
+# brew-safe-update — updates the homebrew-safe-upgrade tools (scripts plus the
+# Python modules they depend on at runtime) to the latest version from GitHub.
+# The file list MUST stay in sync with install.sh — a missing runtime module
+# (e.g. bottle_resolver.py) makes brew-safe-upgrade fail closed at startup.
 #
 # Usage: brew safe-update
 
@@ -21,7 +23,7 @@ fi
 
 FAILED=0
 
-for file in brew-safe-upgrade brew-safe-install brew-safe-update dependency_security_check.py; do
+for file in brew-safe-upgrade brew-safe-install brew-safe-update dependency_security_check.py bottle_resolver.py cask_nvd_map.py; do
     if curl -fsSL -H "Cache-Control: no-cache" "$REPO_URL/$file?t=$(date +%s)" -o "$INSTALL_DIR/$file.tmp" 2>/dev/null; then
         mv "$INSTALL_DIR/$file.tmp" "$INSTALL_DIR/$file"
         chmod +x "$INSTALL_DIR/$file"
