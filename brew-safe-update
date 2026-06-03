@@ -1,15 +1,33 @@
 #!/bin/bash
 # brew-safe-update — updates the homebrew-safe-upgrade tools (scripts plus the
 # Python modules they depend on at runtime) to the latest version from GitHub.
-# The file list MUST stay in sync with install.sh — a missing runtime module
-# (e.g. bottle_resolver.py) makes brew-safe-upgrade fail closed at startup.
+#
+# Self-healing: it updates THIS updater first and re-runs the fresh copy, so a
+# single `brew safe-update` converges even when the latest version adds a new
+# file to the list below. (An older installed updater wouldn't know about a
+# newly-added file — that is exactly what once stranded bottle_resolver.py and
+# made brew-safe-upgrade fail closed with "bottle SHA resolver not found".)
 #
 # Usage: brew safe-update
 
 set -uo pipefail
 
-INSTALL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# BREW_SAFE_INSTALL_DIR is set when we re-exec ourselves from a temp copy, so
+# the re-executed process still targets the real install dir (not /tmp).
+INSTALL_DIR="${BREW_SAFE_INSTALL_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 REPO_URL="https://raw.githubusercontent.com/sharkyger/homebrew-safe-upgrade/main"
+SELF="$INSTALL_DIR/brew-safe-update"
+
+# fetch_file <name> <dest> — download a repo file to <dest> (or, for the test
+# suite, copy it from MOCK_UPDATE_SOURCE_DIR). Returns 0 on success.
+fetch_file() {
+    local name="$1" dest="$2"
+    if [ -n "${MOCK_UPDATE_SOURCE_DIR:-}" ]; then
+        [ -f "$MOCK_UPDATE_SOURCE_DIR/$name" ] && cp "$MOCK_UPDATE_SOURCE_DIR/$name" "$dest"
+        return
+    fi
+    curl -fsSL -H "Cache-Control: no-cache" "$REPO_URL/$name?t=$(date +%s)" -o "$dest" 2>/dev/null
+}
 
 echo "Updating homebrew-safe-upgrade tools..."
 echo ""
@@ -21,15 +39,36 @@ if [ ! -w "$INSTALL_DIR" ]; then
     exit 1
 fi
 
+# Stage 1 — self-update first, then re-exec the fresh copy ONCE. This is what
+# makes a single run converge: the fresh updater carries the current file list,
+# so any file added since the installed version (e.g. bottle_resolver.py) is
+# fetched in the same run instead of only on a second `brew safe-update`.
+# We exec the temp copy (not $SELF) so we never overwrite a running script, and
+# pass INSTALL_DIR through so the re-exec still targets the real directory. The
+# mktemp file is intentionally left for the OS to reap: an EXIT trap won't fire
+# across exec, and rm'ing it from the child would risk the installed script.
+if [ -z "${BREW_SAFE_UPDATE_REEXECED:-}" ]; then
+    FRESH="$(mktemp)"
+    if fetch_file "brew-safe-update" "$FRESH" && [ -s "$FRESH" ] && head -n 1 "$FRESH" | grep -q '^#!'; then
+        if ! cmp -s "$FRESH" "$SELF"; then
+            chmod +x "$FRESH"
+            echo "  [..] updater changed — applying it first, then re-running"
+            BREW_SAFE_UPDATE_REEXECED=1 BREW_SAFE_INSTALL_DIR="$INSTALL_DIR" exec bash "$FRESH" "$@"
+        fi
+    fi
+    rm -f "$FRESH"
+fi
+
 FAILED=0
 
 for file in brew-safe-upgrade brew-safe-install brew-safe-update dependency_security_check.py bottle_resolver.py cask_nvd_map.py; do
-    if curl -fsSL -H "Cache-Control: no-cache" "$REPO_URL/$file?t=$(date +%s)" -o "$INSTALL_DIR/$file.tmp" 2>/dev/null; then
-        mv "$INSTALL_DIR/$file.tmp" "$INSTALL_DIR/$file"
+    TMP="$INSTALL_DIR/$file.tmp"
+    if fetch_file "$file" "$TMP" && [ -s "$TMP" ]; then
+        mv "$TMP" "$INSTALL_DIR/$file"
         chmod +x "$INSTALL_DIR/$file"
         echo "  [ok] $file"
     else
-        rm -f "$INSTALL_DIR/$file.tmp"
+        rm -f "$TMP"
         echo "  [err] $file -- download failed"
         FAILED=$((FAILED + 1))
     fi
