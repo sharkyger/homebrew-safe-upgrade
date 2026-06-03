@@ -118,6 +118,25 @@ def write_canonical_api_error(api_dir: Path, name: str):
     (api_dir / f"{name}.json").write_text("__SIMULATE_API_ERROR__")
 
 
+def write_formula_info_files(brew_dir: Path, name: str, version: str, files: dict):
+    """`brew info` with an explicit, order-controlled multi-arch bottle.files dict."""
+    formula = {
+        "name": name,
+        "full_name": name,
+        "versions": {"stable": version},
+        "installed": [],
+        "bottle": {"stable": {"files": files}},
+    }
+    payload = {"formulae": [formula], "casks": []}
+    (brew_dir / f"info_{name}.json").write_text(json.dumps(payload))
+
+
+def write_canonical_files(api_dir: Path, name: str, files: dict):
+    """Canonical formulae.brew.sh response with an explicit multi-arch files dict."""
+    payload = {"name": name, "bottle": {"stable": {"files": files}}}
+    (api_dir / f"{name}.json").write_text(json.dumps(payload))
+
+
 def outdated_entry(name: str, installed: str, current: str) -> dict:
     return {
         "name": name,
@@ -386,3 +405,114 @@ def test_install_help_documents_no_verify_sha_flag():
 def test_upgrade_help_documents_no_verify_sha_flag():
     text = SAFE_UPGRADE.read_text()
     assert "--no-verify-sha" in text
+
+
+# --------- Arch-aware bottle-SHA selection (Intel x86_64 false-positive) ---------
+#
+# Real multi-arch bottle: arm64 tags carry one SHA, the bare-codename Intel tags
+# carry another. The canonical (formulae.brew.sh) payload lists arm64 first; the
+# local `brew info` on an Intel host lists the Intel tag first. Under the old
+# first-tag-wins logic these resolved to different SHAs -> every bottle falsely
+# "[BLOCKED] SHA mismatch" on Intel. The fix resolves by the host's actual tag.
+# Host is forced via BREW_SAFE_HOST_ARCH / BREW_SAFE_HOST_OS so the test runs on
+# any machine (arm64 dev host, CI Linux) without an Intel Mac.
+
+_ARM_SHA = "1" * 64
+_INTEL_SHA = "3" * 64
+
+
+def _multiarch_canonical():
+    # arm64 tags first, as formulae.brew.sh serves them.
+    return {
+        "arm64_tahoe": {"sha256": _ARM_SHA},
+        "arm64_sonoma": {"sha256": _ARM_SHA},
+        "sonoma": {"sha256": _INTEL_SHA},
+        "ventura": {"sha256": _INTEL_SHA},
+    }
+
+
+def _multiarch_local_intel():
+    # Intel tag first, as `brew info` lists it on an Intel host.
+    return {
+        "sonoma": {"sha256": _INTEL_SHA},
+        "ventura": {"sha256": _INTEL_SHA},
+        "arm64_tahoe": {"sha256": _ARM_SHA},
+        "arm64_sonoma": {"sha256": _ARM_SHA},
+    }
+
+
+def test_install_intel_host_multiarch_bottle_verifies(sha_env):
+    """Intel host: resolve the bare 'sonoma' tag on BOTH sides -> verified, not blocked."""
+    write_formula_info_files(sha_env["brew"], "composer", "2.10.0", _multiarch_local_intel())
+    write_canonical_files(sha_env["api"], "composer", _multiarch_canonical())
+    write_deps(sha_env["brew"], "composer", [])
+
+    result = run_safe(
+        SAFE_INSTALL,
+        ["composer"],
+        env_extra={"BREW_SAFE_HOST_ARCH": "x86_64", "BREW_SAFE_HOST_OS": "sonoma"},
+        input_text="n\n",
+    )
+    assert "[sha] verified" in result.stdout, result.stdout
+    assert "[BLOCKED]" not in result.stdout
+    assert "SHA mismatch" not in result.stdout
+
+
+def test_upgrade_intel_host_multiarch_bottle_verifies(sha_env):
+    """Same Intel fix on the upgrade path."""
+    write_formula_info_files(sha_env["brew"], "composer", "2.10.0", _multiarch_local_intel())
+    write_canonical_files(sha_env["api"], "composer", _multiarch_canonical())
+    write_deps(sha_env["brew"], "composer", [])
+    write_outdated(sha_env["brew"], [outdated_entry("composer", "2.9.0", "2.10.0")])
+
+    result = run_safe(
+        SAFE_UPGRADE,
+        ["--yes"],
+        env_extra={"BREW_SAFE_HOST_ARCH": "x86_64", "BREW_SAFE_HOST_OS": "sonoma"},
+        input_text="",
+    )
+    assert "[sha] verified" in result.stdout, result.stdout
+    assert "[BLOCKED]" not in result.stdout
+
+
+def test_install_arm64_host_multiarch_bottle_verifies(sha_env):
+    """Apple Silicon happy path: resolve 'arm64_tahoe' on both sides -> verified."""
+    write_formula_info_files(sha_env["brew"], "composer", "2.10.0", _multiarch_canonical())
+    write_canonical_files(sha_env["api"], "composer", _multiarch_canonical())
+    write_deps(sha_env["brew"], "composer", [])
+
+    result = run_safe(
+        SAFE_INSTALL,
+        ["composer"],
+        env_extra={"BREW_SAFE_HOST_ARCH": "arm64", "BREW_SAFE_HOST_OS": "tahoe"},
+        input_text="n\n",
+    )
+    assert "[sha] verified" in result.stdout, result.stdout
+    assert "[BLOCKED]" not in result.stdout
+
+
+def test_install_intel_host_no_exact_tag_falls_back_same_arch(sha_env):
+    """Intel host on an OS with no exact bottle tag (e.g. tahoe) falls back to the
+    newest same-arch Intel tag (sonoma), NOT to an arm64 tag -> verified."""
+    canon = {
+        "arm64_tahoe": {"sha256": _ARM_SHA},
+        "sonoma": {"sha256": _INTEL_SHA},
+        "ventura": {"sha256": _INTEL_SHA},
+    }
+    local = {
+        "sonoma": {"sha256": _INTEL_SHA},
+        "arm64_tahoe": {"sha256": _ARM_SHA},
+    }
+    write_formula_info_files(sha_env["brew"], "composer", "2.10.0", local)
+    write_canonical_files(sha_env["api"], "composer", canon)
+    write_deps(sha_env["brew"], "composer", [])
+
+    result = run_safe(
+        SAFE_INSTALL,
+        ["composer"],
+        env_extra={"BREW_SAFE_HOST_ARCH": "x86_64", "BREW_SAFE_HOST_OS": "tahoe"},
+        input_text="n\n",
+    )
+    assert "[sha] verified" in result.stdout, result.stdout
+    assert "[BLOCKED]" not in result.stdout
+    assert "SHA mismatch" not in result.stdout

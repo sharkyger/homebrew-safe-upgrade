@@ -22,10 +22,21 @@ set -uo pipefail
 # to inject a stub; production users should leave it unset).
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT="${DEPENDENCY_SECURITY_CHECK:-$SCRIPT_DIR/dependency_security_check.py}"
+# Host-aware bottle-SHA resolver (picks the tag matching this Mac's arch + OS).
+# BREW_SAFE_BOTTLE_RESOLVER overrides the path for the test suite.
+BOTTLE_RESOLVER="${BREW_SAFE_BOTTLE_RESOLVER:-$SCRIPT_DIR/bottle_resolver.py}"
 
 if [ ! -f "$SCRIPT" ]; then
     echo "Error: Security check script not found at $SCRIPT"
     echo "Make sure dependency_security_check.py is in the same directory."
+    exit 2
+fi
+
+# Fail closed: a missing resolver would make every SHA read empty -> the bottle
+# integrity check would silently no-op. Refuse to run instead.
+if [ ! -f "$BOTTLE_RESOLVER" ]; then
+    echo "Error: bottle SHA resolver not found at $BOTTLE_RESOLVER"
+    echo "Make sure bottle_resolver.py is in the same directory."
     exit 2
 fi
 
@@ -191,21 +202,9 @@ except Exception:
                 SHA_VERDICT="cask"
             else
                 # 1. Extract local SHA from the same `brew info` payload we already fetched.
-                LOCAL_SHA=$(echo "$INFO_JSON" | python3 -c "
-import sys, json
-try:
-    d = json.load(sys.stdin)
-    f = d.get('formulae', [])
-    if f:
-        files = f[0].get('bottle', {}).get('stable', {}).get('files', {})
-        for plat, info in files.items():
-            sha = info.get('sha256', '')
-            if sha:
-                print(sha)
-                break
-except Exception:
-    pass
-" 2>/dev/null)
+                #    Resolved by the host's actual bottle tag (arch + macOS codename),
+                #    not by dict-iteration order — see bottle_resolver.py.
+                LOCAL_SHA=$(echo "$INFO_JSON" | python3 "$BOTTLE_RESOLVER" --source local 2>/dev/null)
 
                 # 2. Fetch canonical from formulae.brew.sh — or from the test mock dir.
                 if [ -n "${MOCK_FORMULAE_API_DIR:-}" ]; then
@@ -241,24 +240,7 @@ except Exception:
                 case "$SHA_HTTP_CODE" in
                     SKIP) : ;;
                     200)
-                        CANON_SHA=$(echo "$CANON_JSON" | python3 -c "
-import sys, json
-try:
-    d = json.load(sys.stdin)
-    files = d.get('bottle', {}).get('stable', {}).get('files', {})
-    if not files:
-        print('NO_BOTTLE')
-    else:
-        for plat, info in files.items():
-            sha = info.get('sha256', '')
-            if sha:
-                print(sha)
-                break
-        else:
-            print('NO_BOTTLE')
-except Exception:
-    print('PARSE_ERROR')
-" 2>/dev/null)
+                        CANON_SHA=$(echo "$CANON_JSON" | python3 "$BOTTLE_RESOLVER" --source canonical 2>/dev/null)
                         if [ "$CANON_SHA" = "NO_BOTTLE" ]; then
                             echo "    [sha] no bottle — built from source"
                             SHA_VERDICT="no_bottle"
