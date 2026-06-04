@@ -8,8 +8,15 @@ The project is pre-1.0; expect minor breaking changes between 0.x releases until
 
 ## [Unreleased]
 
+### Security
+- **Pre-release-aware version comparison — fixes a HIGH scanner bypass.** The CVE range matcher's `parse_version` used a tuple regex that silently dropped pre-release suffixes (`1.0-beta` → `(1, 0)`, equal to `1.0`), so a vulnerable pre-release sorted *equal to* its release and was judged **not affected** against a "fixed in X" advisory range — letting an install/upgrade proceed on a vulnerable pre-release. A second bug made a bare `= X` constraint always read "not affected": an unparenthesized `or op == "="` that, with Python's `and`-binds-tighter-than-`or`, ignored the version entirely. Both are fixed — a small, well-tested stdlib pre-release-aware comparator (`dev < alpha < beta < rc < final`, with trailing-zero equivalence) replaces the tuple parser, and the operator check is parenthesized as `((op == "=" or op == "==") and v != ref)`. Every comparison site is None-safe and unparseable versions/constraints now **fail closed** (treated as affected). The tool stays dependency-free — no `packaging` runtime dependency (Homebrew's Python is externally-managed and lacks it, which would fail-close the whole tool). Locked down by `tests/test_version_validation.py`.
+
+### Fixed
+- The `test_installed_old_version_is_treated_as_incoming` test no longer reads the live Homebrew openssl@3 release date (it now runs with `--min-age 0`), so it stops failing for ~3 days after every openssl@3 bump.
+
 ### Added
 - **Homebrew tap install** — `brew install sharkyger/tap/safe-upgrade` now works (formula lives in [`sharkyger/homebrew-tap`](https://github.com/sharkyger/homebrew-tap)). It installs all three commands plus the runtime modules (`bottle_resolver.py`, `cask_nvd_map.py`) and pulls in `python@3.12`. Tap installs update through brew — `brew update && brew upgrade safe-upgrade` — **not** the bundled `brew safe-update`, which only refreshes a script install in your Homebrew `bin`. README install docs updated to lead with the tap path and document this distinction.
+- Product requirements doc (`docs/PRD.md`).
 
 ## [0.2.0] — 2026-06-03
 

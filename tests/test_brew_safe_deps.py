@@ -193,7 +193,13 @@ def test_already_installed_same_version_dep_is_skipped(mock_env):
 
 
 def test_installed_old_version_is_treated_as_incoming(mock_env, tmp_path):
-    """A dep installed at an older version than the latest must be checked."""
+    """A dep installed at an older version than the latest must be checked.
+
+    Uses --min-age 0 to disable the freshness hold: this test is about
+    incoming-version *detection*, not the age gate, and the default 3-day hold
+    would otherwise fetch openssl@3 3.5.0's real homebrew-core release date over
+    the network — making the test fail for ~3 days after every openssl@3 bump.
+    """
     write_formula_info(mock_env, "wget", "1.25.0")
     write_formula_info(mock_env, "openssl@3", "3.5.0")
     write_deps(mock_env, "wget", ["openssl@3"])
@@ -203,7 +209,7 @@ def test_installed_old_version_is_treated_as_incoming(mock_env, tmp_path):
     stub = make_cve_stub(tmp_path)  # all packages clean
 
     result = run_safe_install(
-        ["wget"],
+        ["wget", "--min-age", "0"],
         env_extra={"DEPENDENCY_SECURITY_CHECK": str(stub)},
         input_text="n\n",
     )
