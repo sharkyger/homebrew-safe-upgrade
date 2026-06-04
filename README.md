@@ -262,7 +262,7 @@ Packages that are already installed are detected and skipped.
 
 ## brew safe-update
 
-Updates all tools to the latest version from GitHub.
+Updates all tools to the latest version from GitHub. This is for the **script / manual** install — it refreshes the copies in your Homebrew `bin`.
 
 ```
 brew safe-update
@@ -273,6 +273,8 @@ No need to re-run the install script. If you get a permission error:
 ```
 sudo brew safe-update
 ```
+
+> **Installed via the tap?** Don't use `brew safe-update` — update through brew instead: `brew update && brew upgrade safe-upgrade`. `brew safe-update` only refreshes a script install in `bin`; it doesn't touch the formula in the Homebrew cellar.
 
 ## Standalone security checker
 
@@ -311,7 +313,23 @@ JSON output on stdout for programmatic use:
 
 ## Install
 
-### Quick install (Homebrew prefix)
+### Homebrew tap (recommended)
+
+```bash
+brew install sharkyger/tap/safe-upgrade
+```
+
+This taps `sharkyger/tap` automatically and installs `brew safe-upgrade`, `brew safe-install`, and `brew safe-update`, along with the Python modules they need (`depends_on python@3.12`).
+
+**Updating a tap install:** update through brew like any other formula —
+
+```bash
+brew update && brew upgrade safe-upgrade
+```
+
+Don't use `brew safe-update` for a tap install — that refreshes the script-install copy in your Homebrew `bin`, not the formula in the cellar.
+
+### Script install (no tap)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/sharkyger/homebrew-safe-upgrade/main/install.sh | bash
