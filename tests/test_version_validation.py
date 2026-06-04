@@ -153,3 +153,25 @@ def test_prerelease_below_fix_in_compound_range_is_affected():
     assert dsc.version_in_range("1.2.5rc1", ">= 1.0, < 1.2.5") is True
     # The final 1.2.5 is the fix → not affected.
     assert dsc.version_in_range("1.2.5", ">= 1.0, < 1.2.5") is False
+
+
+# ----------------------- unrecognized suffix: fail closed, don't coerce to final ----------
+
+
+def test_unrecognized_alpha_suffix_fails_closed_not_coerced_to_final():
+    # An unmodelled pre-release spelling must NOT sort as the final release (that
+    # would let "1.0-SNAPSHOT" bypass a "< 1.0" range). It fails closed instead.
+    assert dsc.parse_version("1.0-SNAPSHOT") is None
+    assert dsc.parse_version("1.0foo") is None
+    assert dsc.parse_version("1.0.post1") is None
+    assert dsc.parse_version("1.0.") is None
+    # The bypass is closed: 1.0-SNAPSHOT is treated as affected by "< 1.0".
+    assert dsc.version_in_range("1.0-SNAPSHOT", "< 1.0") is True
+
+
+def test_homebrew_numeric_patch_suffix_keeps_base_release():
+    # Real Homebrew/upstream versions like imagemagick "7.1.2-19" are a build of
+    # the release, not a pre-release — keep the base ranking (must NOT fail closed).
+    assert dsc.parse_version("7.1.2-19") == dsc.parse_version("7.1.2")
+    assert dsc.version_in_range("7.1.2-19", "< 7.1.3") is True  # below the fix
+    assert dsc.version_in_range("7.1.2-19", "< 7.1.2") is False  # at/above the base

@@ -171,13 +171,24 @@ def parse_version(v):
     while len(release) > 1 and release[-1] == 0:
         release = release[:-1]
     pre = None
-    pm = re.match(
-        r"[-_.]?(dev|alpha|beta|preview|pre|rc|a|b|c)[-_.]?(\d*)",
-        m.group(2),
-        re.IGNORECASE,
-    )
-    if pm:
-        pre = (_PRE_RANK[pm.group(1).lower()], int(pm.group(2)) if pm.group(2) else 0)
+    tail = m.group(2)
+    if tail:
+        pm = re.match(
+            r"[-_.]?(dev|alpha|beta|preview|pre|rc|a|b|c)[-_.]?(\d*)",
+            tail,
+            re.IGNORECASE,
+        )
+        if pm:
+            pre = (_PRE_RANK[pm.group(1).lower()], int(pm.group(2)) if pm.group(2) else 0)
+        elif not re.match(r"^[-_.]?\d", tail):
+            # A non-numeric, unrecognized suffix (e.g. "-SNAPSHOT", "-milestone",
+            # "1.0foo", "1.0.post1", a trailing "1.0.") may be a pre-release
+            # spelling we don't model. Fail closed (return None -> treated as
+            # affected) rather than coerce it to a FINAL release and risk
+            # *under*-flagging a vulnerable pre-release. A trailing NUMERIC patch
+            # (Homebrew upstream versions like "7.1.2-19") keeps the base-release
+            # ranking, since it is a build of — not a pre-release of — the release.
+            return None
     return _Version(release, pre)
 
 
