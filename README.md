@@ -319,7 +319,7 @@ JSON output on stdout for programmatic use:
 brew install sharkyger/tap/safe-upgrade
 ```
 
-This taps `sharkyger/tap` automatically and installs `brew safe-upgrade`, `brew safe-install`, and `brew safe-update`, along with the Python modules they need (`depends_on python@3.12`).
+This taps `sharkyger/tap` automatically and installs `brew safe-upgrade`, `brew safe-install`, and `brew safe-update`. The tools need Python 3.11+ (stdlib only); Homebrew pulls in a managed Python as a dependency (currently `python@3.12`).
 
 **Updating a tap install:** update through brew like any other formula —
 
