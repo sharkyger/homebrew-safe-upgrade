@@ -94,20 +94,115 @@ def resolve_latest_version(package_name, ecosystem):
     return None
 
 
+# Pre-release-aware version comparison (a focused PEP 440 subset, stdlib only).
+# This tool ships as bash + stdlib Python with no pip-installed dependencies and
+# no virtualenv, so we carry just enough version logic to compare correctly for
+# CVE range matching rather than take a runtime dependency on `packaging`
+# (Homebrew's python is externally-managed and lacks it, which would fail-close
+# the whole tool). Behaviour is pinned by tests/test_version_validation.py.
+#
+# Handles: dotted numeric releases with trailing-zero equivalence (1.0 == 1.0.0),
+# and pre-release suffixes that sort BELOW their release and among themselves
+# (dev < alpha < beta < rc < final), e.g. 1.0-beta < 1.0, 1.0a1 < 1.0b1 < 1.0rc1.
+# Homebrew revisions (3.5.0_1) and build metadata (+meta) are ignored for order.
+# This replaces an earlier tuple parser that DROPPED pre-release suffixes, so a
+# vulnerable pre-release sorted == its release and was wrongly judged
+# not-affected against a "fixed in X" range (HIGH bypass).
+_PRE_RANK = {
+    "dev": 0,
+    "alpha": 1,
+    "a": 1,
+    "beta": 2,
+    "b": 2,
+    "pre": 3,
+    "preview": 3,
+    "rc": 3,
+    "c": 3,
+}
+_FINAL_RANK = 99  # a final release outranks every pre-release of the same number
+
+
+class _Version:
+    """A comparable version key. Build only via parse_version() (which returns
+    None on unparseable input — callers fail closed on None)."""
+
+    __slots__ = ("_key",)
+
+    def __init__(self, release, pre):
+        # pre is (rank, num) for a pre-release, or None for a final release.
+        self._key = (release, pre if pre is not None else (_FINAL_RANK, 0))
+
+    def __eq__(self, other):
+        return isinstance(other, _Version) and self._key == other._key
+
+    def __lt__(self, other):
+        return self._key < other._key
+
+    def __le__(self, other):
+        return self._key <= other._key
+
+    def __gt__(self, other):
+        return self._key > other._key
+
+    def __ge__(self, other):
+        return self._key >= other._key
+
+    def __hash__(self):
+        return hash(self._key)
+
+
 def parse_version(v):
-    """Parse a version string into a tuple for comparison."""
+    """Parse a version string into a comparable _Version, or None if unparseable.
+
+    Pre-release-aware (1.0-beta < 1.0); returns None on empty/garbage so callers
+    can fail closed. Use the _ver_lt / _ver_le / _ver_gt / _ver_ge helpers for
+    None-safe relational comparisons (a bare `_Version < None` would raise).
+    """
     if not v:
-        return ()
-    # Strip leading 'v' or '=' prefixes
-    v = re.sub(r"^[v=]+", "", v.strip())
-    parts = []
-    for p in v.split("."):
-        m = re.match(r"(\d+)", p)
-        if m:
-            parts.append(int(m.group(1)))
-        else:
-            parts.append(0)
-    return tuple(parts)
+        return None
+    s = re.sub(r"^[v=]+", "", str(v).strip())
+    # Drop Homebrew revision (_N) and build metadata (+meta) before parsing.
+    s = s.split("+", 1)[0].split("_", 1)[0]
+    m = re.match(r"^(\d+(?:\.\d+)*)(.*)$", s)
+    if not m:
+        return None
+    release = tuple(int(x) for x in m.group(1).split("."))
+    # Trailing-zero equivalence: 1.0 == 1.0.0 == 1.
+    while len(release) > 1 and release[-1] == 0:
+        release = release[:-1]
+    pre = None
+    pm = re.match(
+        r"[-_.]?(dev|alpha|beta|preview|pre|rc|a|b|c)[-_.]?(\d*)",
+        m.group(2),
+        re.IGNORECASE,
+    )
+    if pm:
+        pre = (_PRE_RANK[pm.group(1).lower()], int(pm.group(2)) if pm.group(2) else 0)
+    return _Version(release, pre)
+
+
+def _ver_lt(a, b):
+    """parse_version(a) < parse_version(b); False (fail-closed) if either is unparseable."""
+    va, vb = parse_version(a), parse_version(b)
+    return va is not None and vb is not None and va < vb
+
+
+def _ver_le(a, b):
+    """parse_version(a) <= parse_version(b); False if either is unparseable."""
+    va, vb = parse_version(a), parse_version(b)
+    return va is not None and vb is not None and va <= vb
+
+
+def _ver_gt(a, b):
+    """parse_version(a) > parse_version(b); False if either is unparseable."""
+    va, vb = parse_version(a), parse_version(b)
+    return va is not None and vb is not None and va > vb
+
+
+def _ver_ge(a, b):
+    """parse_version(a) >= parse_version(b); False if either is unparseable."""
+    va, vb = parse_version(a), parse_version(b)
+    return va is not None and vb is not None and va >= vb
 
 
 def version_in_range(version, range_str):
@@ -130,7 +225,10 @@ def version_in_range(version, range_str):
         if not cond:
             continue
 
-        m = re.match(r"([<>=!]+)\s*([\d][\d.]*\w*)", cond)
+        # Ref may carry a pre-release suffix (incl. hyphenated, e.g. "1.0-beta"):
+        # capture word chars, dots, plus and hyphen so parse_version sees the
+        # full pre-release — otherwise "= 1.0-beta" would truncate to "1.0".
+        m = re.match(r"([<>=!]+)\s*([\d][\w.+-]*)", cond)
         if not m:
             if parse_version(cond) == v:
                 return True
@@ -138,21 +236,18 @@ def version_in_range(version, range_str):
 
         op, ref_str = m.group(1), m.group(2)
         ref = parse_version(ref_str)
+        # Fail-closed: an unparseable constraint reference means we can't
+        # disprove vulnerability, so treat the version as affected.
+        if ref is None:
+            return True
 
         if (
-            op == "<"
-            and not (v < ref)
-            or op == "<="
-            and not (v <= ref)
-            or op == ">"
-            and not (v > ref)
-            or op == ">="
-            and not (v >= ref)
-            or op == "="
-            or op == "=="
-            and v != ref
-            or op == "!="
-            and v == ref
+            (op == "<" and not (v < ref))
+            or (op == "<=" and not (v <= ref))
+            or (op == ">" and not (v > ref))
+            or (op == ">=" and not (v >= ref))
+            or ((op == "=" or op == "==") and v != ref)
+            or (op == "!=" and v == ref)
         ):
             return False
 
@@ -251,7 +346,7 @@ def query_github(package_name, ecosystem, version=None):
                     else:
                         patched_ver = None
 
-                    if patched_ver and parse_version(version) >= parse_version(patched_ver):
+                    if patched_ver and _ver_ge(version, patched_ver):
                         not_affected = True
                         break
 
@@ -443,21 +538,13 @@ def query_nvd(package_name, ecosystem, version=None):
                             if ver_end_exc or ver_end_inc or ver_start_inc or ver_start_exc:
                                 # Range-based CPE — check if our version falls within
                                 in_range = True
-                                if ver_start_inc and parse_version(version) < parse_version(
-                                    ver_start_inc
-                                ):
+                                if ver_start_inc and _ver_lt(version, ver_start_inc):
                                     in_range = False
-                                if ver_start_exc and parse_version(version) <= parse_version(
-                                    ver_start_exc
-                                ):
+                                if ver_start_exc and _ver_le(version, ver_start_exc):
                                     in_range = False
-                                if ver_end_exc and parse_version(version) >= parse_version(
-                                    ver_end_exc
-                                ):
+                                if ver_end_exc and _ver_ge(version, ver_end_exc):
                                     in_range = False
-                                if ver_end_inc and parse_version(version) > parse_version(
-                                    ver_end_inc
-                                ):
+                                if ver_end_inc and _ver_gt(version, ver_end_inc):
                                     in_range = False
                                 if in_range:
                                     affected = True
@@ -494,17 +581,13 @@ def query_nvd(package_name, ecosystem, version=None):
                         desc,
                         re.IGNORECASE,
                     )
-                    if end_exc:
-                        upper = parse_version(end_exc.group(1))
-                        if upper and parse_version(version) >= upper:
-                            continue  # version is at or above the fix — not affected
+                    if end_exc and _ver_ge(version, end_exc.group(1)):
+                        continue  # version is at or above the fix — not affected
 
                     # Inclusive upper bound: last affected version
                     end_inc = re.search(rf"\bthrough\s+{v_re}", desc, re.IGNORECASE)
-                    if end_inc:
-                        upper = parse_version(end_inc.group(1))
-                        if upper and parse_version(version) > upper:
-                            continue
+                    if end_inc and _ver_gt(version, end_inc.group(1)):
+                        continue
 
                     # Lower bound: affected starts at this version
                     start_inc = re.search(
@@ -512,10 +595,8 @@ def query_nvd(package_name, ecosystem, version=None):
                         desc,
                         re.IGNORECASE,
                     )
-                    if start_inc:
-                        lower = parse_version(start_inc.group(1))
-                        if lower and parse_version(version) < lower:
-                            continue
+                    if start_inc and _ver_lt(version, start_inc.group(1)):
+                        continue
 
             findings.append(
                 {
