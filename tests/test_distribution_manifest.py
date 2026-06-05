@@ -23,6 +23,7 @@ REQUIRED_RUNTIME_FILES = {
     "dependency_security_check.py",
     "bottle_resolver.py",  # hard dependency — brew-safe-* fail closed without it
     "cask_nvd_map.py",  # imported by dependency_security_check.py
+    "VERSION",  # read at runtime by --version self-diagnosis (single-source version)
 }
 
 

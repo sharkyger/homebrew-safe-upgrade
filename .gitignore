@@ -8,3 +8,5 @@ dist/
 .codereview/
 # Local-only working notes / security handoffs — never commit
 *.local.md
+# Internal fleet rules / handoff context (contains non-public security notes) — never commit
+/CLAUDE.md

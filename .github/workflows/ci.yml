@@ -43,3 +43,42 @@ jobs:
           cache: pip
       - run: pip install -r requirements-dev.txt
       - run: pytest
+
+  macos-install-smoke:
+    # Real script-route install-and-run on BOTH macOS architectures. The earlier
+    # formula self-test overrode the resolver path (BREW_SAFE_BOTTLE_RESOLVER=
+    # /nonexistent) and masked a helper-strand bug on the script route; this job
+    # exercises the real path, no override. macos-14 = arm64, macos-13 = x86_64.
+    name: macOS script-install smoke (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, macos-13]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: "3.13"
+      - run: pip install -r requirements-dev.txt
+      # Real-arch coverage of resolution / strand / fail-closed / symlink / --version.
+      - name: pytest on real macOS arch
+        run: pytest
+      - name: Script-install layout, then run the real command (no override)
+        run: |
+          set -euo pipefail
+          BIN="$RUNNER_TEMP/safebin"
+          mkdir -p "$BIN"
+          cp brew-safe-upgrade brew-safe-install brew-safe-update \
+             dependency_security_check.py bottle_resolver.py cask_nvd_map.py VERSION "$BIN/"
+          chmod +x "$BIN"/brew-safe-upgrade "$BIN"/brew-safe-install "$BIN"/brew-safe-update
+          echo "--- brew-safe-upgrade --version (resolves real helpers on this arch) ---"
+          out="$("$BIN/brew-safe-upgrade" --version)"
+          echo "$out"
+          echo "$out" | grep -qF "$(cat VERSION)"           # single-source version printed
+          echo "$out" | grep -q "helpers: all present"      # the masked-bug point: helpers resolve
+          echo "$out" | grep -q "install route: script"
+          echo "--- must NOT fail closed on a present install ---"
+          if echo "$out" | grep -q "bottle SHA resolver not found"; then
+            echo "REGRESSION: script-route install stranded its helpers"; exit 1
+          fi

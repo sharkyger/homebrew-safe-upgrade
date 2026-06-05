@@ -8,6 +8,16 @@ The project is pre-1.0; expect minor breaking changes between 0.x releases until
 
 ## [Unreleased]
 
+## [0.2.2] — 2026-06-06
+
+### Fixed
+- **Self-updater no longer strands helper files (single-run, atomic, fail-closed).** A `brew safe-update` run from an older updater could fetch only some files and still print "All tools updated", leaving `bottle_resolver.py` / `cask_nvd_map.py` missing — so the next `brew safe-upgrade` failed closed with `bottle SHA resolver not found`. The updater now (1) re-execs the freshly-fetched updater **before** the download loop, so the file list that runs is always current, and (2) fetches every declared file into a staging area and **swaps them in only if all arrive intact** — a partial or truncated download leaves the existing install untouched and never reports success. Regression-tested in `tests/test_install_hardening.py` and `tests/test_brew_safe_update.py`.
+- **Scripts resolve their own directory through symlinks.** `brew-safe-upgrade` / `-install` / `-update` previously located their Python helpers with a bare `dirname "${BASH_SOURCE[0]}"`, which broke for a symlinked or relocated install. They now walk the symlink chain with a portable resolver (no macOS-hostile `readlink -f`), so the helpers resolve for script, Homebrew-formula, and symlinked layouts on both architectures.
+- **Actionable fail-closed message.** A missing helper now prints how to fix it (`run 'brew safe-update'`) instead of the bare "make sure it's in the same directory".
+
+### Added
+- **`--version` with self-diagnosis** on all three commands (and listed in `--help`). Prints a single-source version (from the new `VERSION` file, bumped per release), the detected install route (Homebrew formula vs script), whether every helper file is present, and a warning if both install routes are on `PATH`. Turns a stranded install into a self-evident report.
+
 ## [0.2.1] — 2026-06-05
 
 ### Fixed
@@ -123,7 +133,8 @@ pre-tag history by theme rather than by release. Full detail is in `git log`.
 - CodeQL, gitleaks, and dependabot wired up.
 - Community health files: issue templates (bug, false-positive, feature), discussion link from README on the open `--min-age` default question.
 
-[Unreleased]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.1.0...v0.1.1
