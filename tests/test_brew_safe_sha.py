@@ -449,7 +449,10 @@ def test_install_intel_host_multiarch_bottle_verifies(sha_env):
 
     result = run_safe(
         SAFE_INSTALL,
-        ["composer"],
+        # --min-age 0: these assert SHA verification, not the freshness hold.
+        # 'composer' is a real formula, so the default 3-day hold would block a
+        # freshly-released version before SHA-verify runs (flaky-date class).
+        ["--min-age", "0", "composer"],
         env_extra={"BREW_SAFE_HOST_ARCH": "x86_64", "BREW_SAFE_HOST_OS": "sonoma"},
         input_text="n\n",
     )
@@ -467,7 +470,8 @@ def test_upgrade_intel_host_multiarch_bottle_verifies(sha_env):
 
     result = run_safe(
         SAFE_UPGRADE,
-        ["--yes"],
+        # --min-age 0: assert SHA verification, not the freshness hold (see above).
+        ["--yes", "--min-age", "0"],
         env_extra={"BREW_SAFE_HOST_ARCH": "x86_64", "BREW_SAFE_HOST_OS": "sonoma"},
         input_text="",
     )
@@ -483,7 +487,8 @@ def test_install_arm64_host_multiarch_bottle_verifies(sha_env):
 
     result = run_safe(
         SAFE_INSTALL,
-        ["composer"],
+        # --min-age 0: assert SHA verification, not the freshness hold (see above).
+        ["--min-age", "0", "composer"],
         env_extra={"BREW_SAFE_HOST_ARCH": "arm64", "BREW_SAFE_HOST_OS": "tahoe"},
         input_text="n\n",
     )
@@ -509,7 +514,8 @@ def test_install_intel_host_no_exact_tag_falls_back_same_arch(sha_env):
 
     result = run_safe(
         SAFE_INSTALL,
-        ["composer"],
+        # --min-age 0: assert SHA verification, not the freshness hold (see above).
+        ["--min-age", "0", "composer"],
         env_extra={"BREW_SAFE_HOST_ARCH": "x86_64", "BREW_SAFE_HOST_OS": "tahoe"},
         input_text="n\n",
     )
