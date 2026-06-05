@@ -8,10 +8,10 @@ The project is pre-1.0; expect minor breaking changes between 0.x releases until
 
 ## [Unreleased]
 
-### Security
-- **Pre-release-aware version comparison — fixes a HIGH scanner bypass.** The CVE range matcher's `parse_version` used a tuple regex that silently dropped pre-release suffixes (`1.0-beta` → `(1, 0)`, equal to `1.0`), so a vulnerable pre-release sorted *equal to* its release and was judged **not affected** against a "fixed in X" advisory range — letting an install/upgrade proceed on a vulnerable pre-release. A second bug made a bare `= X` constraint always read "not affected": an unparenthesized `or op == "="` that, with Python's `and`-binds-tighter-than-`or`, ignored the version entirely. Both are fixed — a small, well-tested stdlib pre-release-aware comparator (`dev < alpha < beta < rc < final`, with trailing-zero equivalence) replaces the tuple parser, and the operator check is parenthesized as `((op == "=" or op == "==") and v != ref)`. Every comparison site is None-safe and unparseable versions/constraints now **fail closed** (treated as affected). The tool stays dependency-free — no `packaging` runtime dependency (Homebrew's Python is externally-managed and lacks it, which would fail-close the whole tool). Locked down by `tests/test_version_validation.py`.
+## [0.2.1] — 2026-06-05
 
 ### Fixed
+- **PEP 440-correct pre-release version comparison.** The CVE range matcher now uses a small, dependency-free pre-release-aware comparator (`dev < alpha < beta < rc < final`, with trailing-zero equivalence) in place of the previous tuple parser, so pre-release versions such as `1.0-beta` sort correctly relative to their final release when evaluated against advisory ranges. Constraint parsing is tightened, and every comparison site is None-safe — unparseable versions or constraints **fail closed** (treated as affected). The tool stays dependency-free: no `packaging` runtime dependency (Homebrew's Python is externally-managed and lacks it, which would fail-close the whole tool). Covered by `tests/test_version_validation.py`.
 - The `test_installed_old_version_is_treated_as_incoming` test no longer reads the live Homebrew openssl@3 release date (it now runs with `--min-age 0`), so it stops failing for ~3 days after every openssl@3 bump.
 
 ### Added
@@ -123,6 +123,7 @@ pre-tag history by theme rather than by release. Full detail is in `git log`.
 - CodeQL, gitleaks, and dependabot wired up.
 - Community health files: issue templates (bug, false-positive, feature), discussion link from README on the open `--min-age` default question.
 
-[Unreleased]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.1.0...v0.1.1
