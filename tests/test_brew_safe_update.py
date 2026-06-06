@@ -27,6 +27,7 @@ ALL_FILES = [
     "dependency_security_check.py",
     "bottle_resolver.py",
     "cask_nvd_map.py",
+    "VERSION",
 ]
 
 

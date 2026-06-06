@@ -2,19 +2,42 @@
 # brew-safe-update — updates the homebrew-safe-upgrade tools (scripts plus the
 # Python modules they depend on at runtime) to the latest version from GitHub.
 #
-# Self-healing: it updates THIS updater first and re-runs the fresh copy, so a
-# single `brew safe-update` converges even when the latest version adds a new
-# file to the list below. (An older installed updater wouldn't know about a
-# newly-added file — that is exactly what once stranded bottle_resolver.py and
-# made brew-safe-upgrade fail closed with "bottle SHA resolver not found".)
+# Two hardening guarantees (v0.2.2, after a helper-file strand recurred — see
+# LESSONS.md):
+#   1. Self-heal FIRST: update THIS updater and re-exec the fresh copy BEFORE the
+#      download loop, so the file list that actually runs is always the latest.
+#      An older installed updater therefore can't strand a newly-added file for a
+#      whole run (that once stranded bottle_resolver.py twice).
+#   2. Atomic + fail-closed: every declared file is fetched to a temp staging dir
+#      and validated; the install is swapped in only if ALL of them arrive intact.
+#      A partial or truncated fetch leaves the existing install UNTOUCHED and never
+#      prints "All tools updated" — so brew-safe-upgrade can't fail closed on a
+#      half-applied update.
 #
-# Usage: brew safe-update
+# Usage: brew safe-update [--version]
+#        --version  Print version, install route, and helper-file status (self-diagnosis)
 
 set -uo pipefail
 
-# BREW_SAFE_INSTALL_DIR is set when we re-exec ourselves from a temp copy, so
-# the re-executed process still targets the real install dir (not /tmp).
-INSTALL_DIR="${BREW_SAFE_INSTALL_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+# Resolve THIS script's real directory, following symlinks. Portable: macOS has
+# no `readlink -f`, so we walk the chain by hand — a symlinked updater still
+# targets the real install dir, on either architecture.
+resolve_script_dir() {
+    local src="${BASH_SOURCE[0]}" dir
+    while [ -h "$src" ]; do
+        dir="$(cd -P "$(dirname "$src")" >/dev/null 2>&1 && pwd)"
+        src="$(readlink "$src")"
+        case "$src" in
+            /*) ;;
+            *) src="$dir/$src" ;;
+        esac
+    done
+    cd -P "$(dirname "$src")" >/dev/null 2>&1 && pwd
+}
+
+# BREW_SAFE_INSTALL_DIR is set when we re-exec ourselves from a temp copy, so the
+# re-executed process still targets the real install dir (not /tmp).
+INSTALL_DIR="${BREW_SAFE_INSTALL_DIR:-$(resolve_script_dir)}"
 REPO_URL="https://raw.githubusercontent.com/sharkyger/homebrew-safe-upgrade/main"
 SELF="$INSTALL_DIR/brew-safe-update"
 
@@ -29,6 +52,43 @@ fetch_file() {
     curl -fsSL -H "Cache-Control: no-cache" "$REPO_URL/$name?t=$(date +%s)" -o "$dest" 2>/dev/null
 }
 
+# validate_file <path> — reject empty or obvious error-page content. `curl -f`
+# already fails the HTTP error itself (404 etc); this guards a 200 that returned
+# an HTML error or a "404: Not Found" body, so we never stage garbage over a good
+# file. (Deliberately lenient on the body shape: scripts and data modules differ,
+# and the self-update tests inject shebang-less stub payloads.)
+validate_file() {
+    local f="$1" first
+    [ -s "$f" ] || return 1
+    first="$(head -c 1 "$f" 2>/dev/null)"
+    [ "$first" = "<" ] && return 1                  # HTML error page
+    head -n 1 "$f" | grep -qi '^404:' && return 1   # raw.githubusercontent 404 body
+    return 0
+}
+
+# --version / self-diagnosis. Handled before any update work so it always answers,
+# even mid-strand. Single-source VERSION file shipped alongside the scripts.
+SAFE_UPGRADE_VERSION="$(cat "$INSTALL_DIR/VERSION" 2>/dev/null || echo "unknown")"
+print_version() {
+    echo "brew-safe-update $SAFE_UPGRADE_VERSION"
+    case "$INSTALL_DIR" in
+        */libexec|*/libexec/*|*/Cellar/*) echo "install route: Homebrew formula ($INSTALL_DIR)" ;;
+        *)                                echo "install route: script ($INSTALL_DIR)" ;;
+    esac
+    local missing=""
+    for h in dependency_security_check.py bottle_resolver.py cask_nvd_map.py; do
+        [ -f "$INSTALL_DIR/$h" ] || missing="$missing $h"
+    done
+    if [ -n "$missing" ]; then
+        echo "helpers: MISSING -$missing (run 'brew safe-update' to repair)"
+    else
+        echo "helpers: all present"
+    fi
+}
+case " $* " in
+    *" --version "*) print_version; exit 0 ;;
+esac
+
 echo "Updating homebrew-safe-upgrade tools..."
 echo ""
 
@@ -39,14 +99,12 @@ if [ ! -w "$INSTALL_DIR" ]; then
     exit 1
 fi
 
-# Stage 1 — self-update first, then re-exec the fresh copy ONCE. This is what
-# makes a single run converge: the fresh updater carries the current file list,
-# so any file added since the installed version (e.g. bottle_resolver.py) is
-# fetched in the same run instead of only on a second `brew safe-update`.
-# We exec the temp copy (not $SELF) so we never overwrite a running script, and
-# pass INSTALL_DIR through so the re-exec still targets the real directory. The
-# mktemp file is intentionally left for the OS to reap: an EXIT trap won't fire
-# across exec, and rm'ing it from the child would risk the installed script.
+# Stage 1 — self-update FIRST, then re-exec the fresh copy ONCE. The fresh updater
+# carries the current file list, so any file added since the installed version
+# (e.g. bottle_resolver.py) is fetched in the SAME run. We exec a temp copy (never
+# overwrite a running script) and pass INSTALL_DIR through so the re-exec still
+# targets the real directory. The mktemp file is left for the OS to reap (an EXIT
+# trap won't fire across exec, and rm'ing it from the child would risk the script).
 if [ -z "${BREW_SAFE_UPDATE_REEXECED:-}" ]; then
     FRESH="$(mktemp)"
     if fetch_file "brew-safe-update" "$FRESH" && [ -s "$FRESH" ] && head -n 1 "$FRESH" | grep -q '^#!'; then
@@ -59,25 +117,39 @@ if [ -z "${BREW_SAFE_UPDATE_REEXECED:-}" ]; then
     rm -f "$FRESH"
 fi
 
-FAILED=0
+# Stage 2 — atomic, fail-closed update. Fetch EVERY declared file into a staging
+# dir and validate it; only if ALL arrive do we swap them into place. Anything
+# missing aborts with the install untouched, so a half-update can never strand a
+# load-bearing helper (bottle_resolver.py / cask_nvd_map.py / the scanner).
+STAGING="$(mktemp -d)"
+trap 'rm -rf "$STAGING"' EXIT
 
-for file in brew-safe-upgrade brew-safe-install brew-safe-update dependency_security_check.py bottle_resolver.py cask_nvd_map.py; do
-    TMP="$INSTALL_DIR/$file.tmp"
-    if fetch_file "$file" "$TMP" && [ -s "$TMP" ]; then
-        mv "$TMP" "$INSTALL_DIR/$file"
-        chmod +x "$INSTALL_DIR/$file"
+FAILED=0
+for file in brew-safe-upgrade brew-safe-install brew-safe-update dependency_security_check.py bottle_resolver.py cask_nvd_map.py VERSION; do
+    if fetch_file "$file" "$STAGING/$file" && validate_file "$STAGING/$file"; then
         echo "  [ok] $file"
     else
-        rm -f "$TMP"
-        echo "  [err] $file -- download failed"
+        echo "  [err] $file — download/validate failed"
         FAILED=$((FAILED + 1))
     fi
 done
 
-echo ""
-if [ $FAILED -eq 0 ]; then
-    echo "All tools updated."
-else
-    echo "$FAILED file(s) failed to update."
+if [ "$FAILED" -ne 0 ]; then
+    echo ""
+    echo "Error: $FAILED file(s) did not arrive intact — install left UNCHANGED (fail-closed)."
+    echo "Nothing was modified. Re-run 'brew safe-update'; if it persists, re-run install.sh."
     exit 1
 fi
+
+# All present & valid — swap in. `mv` within the same filesystem is an atomic
+# rename per file, and the running script keeps its already-open inode, so even
+# overwriting brew-safe-update itself mid-run is safe. We only reach here once
+# every file is staged, so the install can't be left with a missing helper.
+for staged in "$STAGING"/*; do
+    name="$(basename "$staged")"
+    mv "$staged" "$INSTALL_DIR/$name"
+    chmod +x "$INSTALL_DIR/$name"
+done
+
+echo ""
+echo "All tools updated."

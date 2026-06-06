@@ -3,7 +3,8 @@
 # dependencies for known vulnerabilities before upgrading.
 # Queries 3 databases: OSV.dev, GitHub Advisory, NIST NVD.
 #
-# Usage: brew safe-upgrade [--yes|-y] [--min-age N] [--no-verify-sha] [--no-deps]
+# Usage: brew safe-upgrade [--yes|-y] [--min-age N] [--no-verify-sha] [--no-deps] [--version]
+#        --version  Print version, install route, and helper-file status (self-diagnosis)
 #
 # Environment:
 #        BREW_SAFE_NO_DEPS=1     Same as --no-deps (handy for CI / aliases)
@@ -17,17 +18,69 @@ set -uo pipefail
 # Locate the security check script relative to this script.
 # DEPENDENCY_SECURITY_CHECK env var overrides the path (used by the test suite
 # to inject a stub; production users should leave it unset).
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+#
+# Resolve THIS script's real directory, following symlinks. Portable: macOS has
+# no `readlink -f`, so we walk the symlink chain by hand. This makes the helper
+# lookup work whether the script is a real file in bin (script install), a
+# Homebrew symlink into libexec, or a relocated copy — on either architecture.
+resolve_script_dir() {
+    local src="${BASH_SOURCE[0]}" dir
+    while [ -h "$src" ]; do
+        dir="$(cd -P "$(dirname "$src")" >/dev/null 2>&1 && pwd)"
+        src="$(readlink "$src")"
+        case "$src" in
+            /*) ;;
+            *) src="$dir/$src" ;;
+        esac
+    done
+    cd -P "$(dirname "$src")" >/dev/null 2>&1 && pwd
+}
+SCRIPT_DIR="$(resolve_script_dir)"
 SCRIPT="${DEPENDENCY_SECURITY_CHECK:-$SCRIPT_DIR/dependency_security_check.py}"
 # Host-aware bottle-SHA resolver (picks the tag matching this Mac's arch + OS).
 # BREW_SAFE_BOTTLE_RESOLVER overrides the path for the test suite.
 BOTTLE_RESOLVER="${BREW_SAFE_BOTTLE_RESOLVER:-$SCRIPT_DIR/bottle_resolver.py}"
 
+# --version / self-diagnosis. Handled BEFORE the helper guards so it still works
+# (and explains itself) when a helper is missing. Version is read from the single
+# VERSION file shipped alongside the scripts — one source, no per-script drift.
+SAFE_UPGRADE_VERSION="$(cat "$SCRIPT_DIR/VERSION" 2>/dev/null || echo "unknown")"
+print_version() {
+    echo "brew-safe-upgrade $SAFE_UPGRADE_VERSION"
+    case "$SCRIPT_DIR" in
+        */libexec|*/libexec/*|*/Cellar/*) echo "install route: Homebrew formula ($SCRIPT_DIR)" ;;
+        *)                                echo "install route: script ($SCRIPT_DIR)" ;;
+    esac
+    local missing=""
+    for h in dependency_security_check.py bottle_resolver.py cask_nvd_map.py; do
+        [ -f "$SCRIPT_DIR/$h" ] || missing="$missing $h"
+    done
+    if [ -n "$missing" ]; then
+        echo "helpers: MISSING -$missing"
+        echo "  -> run 'brew safe-update' to re-fetch all helpers (or re-run install.sh)"
+    else
+        echo "helpers: all present"
+    fi
+    # Collision: a second brew-safe-upgrade on PATH (script install + formula both
+    # present) can shadow this one and confuse updates. Warn if more than one.
+    local n
+    n="$(type -aP brew-safe-upgrade 2>/dev/null | sort -u | grep -c .)"
+    if [ "${n:-0}" -gt 1 ]; then
+        echo "warning: multiple brew-safe-upgrade on PATH — both install routes may be present:"
+        type -aP brew-safe-upgrade 2>/dev/null | sort -u | sed 's/^/  /'
+        echo "  keep one route (formula OR script); see README 'Install'."
+    fi
+}
+case " $* " in
+    *" --version "*) print_version; exit 0 ;;
+esac
+
 # Fail closed: a missing resolver would make every SHA read empty -> the bottle
 # integrity check would silently no-op. Refuse to run instead.
 if [ ! -f "$BOTTLE_RESOLVER" ]; then
     echo "Error: bottle SHA resolver not found at $BOTTLE_RESOLVER"
-    echo "Make sure bottle_resolver.py is in the same directory."
+    echo "A required helper (bottle_resolver.py) is missing from your install."
+    echo "Fix: run 'brew safe-update' to re-fetch all helpers (or re-run install.sh)."
     exit 2
 fi
 
@@ -334,7 +387,8 @@ except Exception:
         fi
     else
         echo "  Error: Security check script not found at $SCRIPT"
-        echo "  Make sure dependency_security_check.py is in the same directory."
+        echo "  A required helper (dependency_security_check.py) is missing from your install."
+        echo "  Fix: run 'brew safe-update' to re-fetch all helpers (or re-run install.sh)."
         exit 2
     fi
 done <<< "$OUTDATED"

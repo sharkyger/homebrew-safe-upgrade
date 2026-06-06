@@ -313,6 +313,19 @@ JSON output on stdout for programmatic use:
 
 ## Install
 
+There are two install routes, and **both keep updating** — pick one and stick to it:
+
+- **Homebrew tap (recommended, primary).** Brew-managed: every command and helper
+  is installed together and updated atomically with `brew upgrade`. It structurally
+  **cannot** leave a half-updated install, so it's the safest route.
+- **Script / curl (secondary).** Drops the files into your Homebrew `bin` and
+  updates via the hardened self-updater `brew safe-update` (atomic + fail-closed)
+  or by re-running `install.sh`.
+
+Don't run both routes at once — a script copy in `bin` and a formula install can
+shadow each other on `PATH`. `brew safe-upgrade --version` reports which route you're
+on, whether all helper files are present, and warns if both are detected.
+
 ### Homebrew tap (recommended)
 
 ```bash
@@ -349,11 +362,18 @@ This places all files in your Homebrew bin directory (`/opt/homebrew/bin/` on Ap
 git clone https://github.com/sharkyger/homebrew-safe-upgrade.git
 cd homebrew-safe-upgrade
 BIN="$(brew --prefix)/bin"   # /opt/homebrew/bin on Apple Silicon, /usr/local/bin on Intel
-cp brew-safe-upgrade brew-safe-install brew-safe-update dependency_security_check.py bottle_resolver.py cask_nvd_map.py "$BIN/"
+cp brew-safe-upgrade brew-safe-install brew-safe-update dependency_security_check.py bottle_resolver.py cask_nvd_map.py VERSION "$BIN/"
 chmod +x "$BIN"/brew-safe-upgrade "$BIN"/brew-safe-install "$BIN"/brew-safe-update
 ```
 
 ### Verify
+
+```bash
+brew safe-upgrade --version
+```
+
+This reports the version, your install route, and whether every helper file is
+present (a quick way to confirm a healthy install). Then try a real run:
 
 ```bash
 brew safe-upgrade
