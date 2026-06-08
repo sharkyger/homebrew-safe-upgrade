@@ -26,10 +26,8 @@ def commit_json_days_ago(days: int) -> str:
     data[0]['commit']['committer']['date']. Computed relative to now so a small
     `days` reliably reads as "too fresh" regardless of when the suite runs.
     """
-    dt = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days)
-    return json.dumps(
-        [{"commit": {"committer": {"date": dt.strftime("%Y-%m-%dT%H:%M:%SZ")}}}]
-    )
+    dt = datetime.datetime.now(datetime.UTC) - datetime.timedelta(days=days)
+    return json.dumps([{"commit": {"committer": {"date": dt.strftime("%Y-%m-%dT%H:%M:%SZ")}}}])
 
 
 @pytest.fixture
@@ -428,7 +426,8 @@ def test_allow_unknown_age_lets_unverifiable_dep_through(mock_env, tmp_path):
         env_extra={"DEPENDENCY_SECURITY_CHECK": str(stub)},
         input_text="n\n",
     )
-    assert "[age-dep] libfoo — age could not be verified, allowed by --allow-unknown-age" in result.stdout
+    expected = "[age-dep] libfoo — age could not be verified, allowed by --allow-unknown-age"
+    assert expected in result.stdout
     assert "[HOLD-DEP] libfoo" not in result.stdout
     assert "[ok-dep] libfoo 1.2.3" in result.stdout
 
@@ -589,7 +588,11 @@ def test_single_package_matches_tap_basename(mock_env, tmp_path):
     write_outdated(
         mock_env,
         [
-            {"name": "sharkyger/tap/safe-fetch", "installed_versions": ["0.2"], "current_version": "0.3"},
+            {
+                "name": "sharkyger/tap/safe-fetch",
+                "installed_versions": ["0.2"],
+                "current_version": "0.3",
+            },
             {"name": "wget", "installed_versions": ["1.24"], "current_version": "1.25"},
         ],
     )

@@ -33,10 +33,8 @@ SAFE_UPGRADE = REPO / "brew-safe-upgrade"
 
 def commit_json_days_ago(days: int) -> str:
     """A `GET /commits` response (array) whose last commit is `days` days old."""
-    dt = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days)
-    return json.dumps(
-        [{"commit": {"committer": {"date": dt.strftime("%Y-%m-%dT%H:%M:%SZ")}}}]
-    )
+    dt = datetime.datetime.now(datetime.UTC) - datetime.timedelta(days=days)
+    return json.dumps([{"commit": {"committer": {"date": dt.strftime("%Y-%m-%dT%H:%M:%SZ")}}}])
 
 
 @pytest.fixture
@@ -73,9 +71,7 @@ def write_cask_info(brew_dir: Path, token: str, version: str, installed=False):
     cask = {"token": token, "full_token": token, "name": [token], "version": version}
     if installed:
         cask["installed"] = version
-    (brew_dir / f"info_{token}.json").write_text(
-        json.dumps({"formulae": [], "casks": [cask]})
-    )
+    (brew_dir / f"info_{token}.json").write_text(json.dumps({"formulae": [], "casks": [cask]}))
 
 
 def write_formula_info(brew_dir: Path, name: str, stable: str, installed=False):
@@ -110,7 +106,12 @@ def run_upgrade(args, env_extra=None, input_text="n\n"):
         env.update(env_extra)
     return subprocess.run(
         ["bash", str(SAFE_UPGRADE), *args],
-        capture_output=True, text=True, timeout=30, check=False, env=env, input=input_text,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+        env=env,
+        input=input_text,
     )
 
 
@@ -120,7 +121,12 @@ def run_install(args, env_extra=None, input_text="n\n"):
         env.update(env_extra)
     return subprocess.run(
         ["bash", str(SAFE_INSTALL), *args],
-        capture_output=True, text=True, timeout=30, check=False, env=env, input=input_text,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+        env=env,
+        input=input_text,
     )
 
 
@@ -171,7 +177,8 @@ def test_upgrade_allow_unknown_age_lets_cask_through(age_env):
 
     result = run_upgrade(["--no-deps", "--allow-unknown-age"])
 
-    assert "[ok] coderabbit 0.5.4 — age could not be verified, allowed by --allow-unknown-age" in result.stdout
+    expected = "[ok] coderabbit 0.5.4 — age could not be verified, allowed by --allow-unknown-age"
+    assert expected in result.stdout
     assert "[HOLD] coderabbit" not in result.stdout
 
 
@@ -209,7 +216,13 @@ def test_upgrade_tap_formula_is_routed_to_its_tap_repo(age_env):
     """A tap formula's age lookup must hit its own tap repo, not homebrew-core."""
     write_outdated(
         age_env["brew"],
-        formulae=[{"name": "sharkyger/tap/safe-fetch", "installed_versions": ["0.2.1"], "current_version": "0.3.0"}],
+        formulae=[
+            {
+                "name": "sharkyger/tap/safe-fetch",
+                "installed_versions": ["0.2.1"],
+                "current_version": "0.3.0",
+            }
+        ],
     )
     set_commits(age_env["commits"], "sharkyger/tap/safe-fetch", "[]")  # force unknown
     url_log = age_env["tmp"] / "urls.log"

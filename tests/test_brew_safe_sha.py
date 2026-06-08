@@ -41,10 +41,9 @@ SAFE_UPGRADE = REPO / "brew-safe-upgrade"
 
 def commit_json_days_ago(days: int) -> str:
     """A `GET /commits` response (array) whose last commit is `days` days old."""
-    dt = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days)
-    return json.dumps(
-        [{"commit": {"committer": {"date": dt.strftime("%Y-%m-%dT%H:%M:%SZ")}}}]
-    )
+    dt = datetime.datetime.now(datetime.UTC) - datetime.timedelta(days=days)
+    return json.dumps([{"commit": {"committer": {"date": dt.strftime("%Y-%m-%dT%H:%M:%SZ")}}}])
+
 
 CLEAN_SHA = "a" * 64
 TAMPERED_SHA = "b" * 64
