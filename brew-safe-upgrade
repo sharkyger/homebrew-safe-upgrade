@@ -4,7 +4,9 @@
 # Queries 3 databases: OSV.dev, GitHub Advisory, NIST NVD.
 #
 # Usage: brew safe-upgrade [--yes|-y] [--min-age N] [--allow-unknown-age]
-#                          [--no-verify-sha] [--no-deps] [--version]
+#                          [--no-verify-sha] [--no-deps] [--version] [package ...]
+#        [package ...]  Restrict the run to the named outdated package(s) instead
+#                       of every outdated package (matches name or basename).
 #        --allow-unknown-age  Permit packages whose release age cannot be verified
 #                             (default: such packages are HELD — fail closed)
 #        --version  Print version, install route, and helper-file status (self-diagnosis)
@@ -92,6 +94,7 @@ MIN_AGE=3          # 3-day freshness hold; --min-age 0 to disable.
 ALLOW_UNKNOWN_AGE=false  # Fail closed: hold packages whose age can't be verified.
 VERIFY_SHA=true    # Default-on as of v0.2.0 — opt out with --no-verify-sha.
 CHECK_DEPS=true
+TARGET_PKGS=""     # Positional package names (#61): restrict the run to these.
 case "${BREW_SAFE_NO_DEPS:-}" in
     1|true|TRUE|yes|YES) CHECK_DEPS=false ;;
 esac
@@ -104,7 +107,8 @@ while [[ $# -gt 0 ]]; do
         --verify-sha)    shift ;;  # Accepted for back-compat — verification is now on by default.
         --no-verify-sha) VERIFY_SHA=false; shift ;;
         --no-deps)       CHECK_DEPS=false; shift ;;
-        *)               shift ;;
+        -*)              shift ;;  # Unknown flags: ignore (forward-compat).
+        *)               TARGET_PKGS="$TARGET_PKGS $1"; shift ;;
     esac
 done
 
@@ -217,8 +221,37 @@ except Exception:
     pass
 " 2>/dev/null)
 
+# --- Single-package mode (#61) -------------------------------------------------
+# If package name(s) were given as positional args, restrict this run to just
+# those. Matches the full outdated name OR its basename, so
+# `brew safe-upgrade safe-fetch` matches `sharkyger/tap/safe-fetch`.
+TARGET_PKGS=$(echo "$TARGET_PKGS" | xargs)  # trim
+if [ -n "$TARGET_PKGS" ]; then
+    _keep_targeted() {
+        awk -v targets="$TARGET_PKGS" '
+            BEGIN { n = split(targets, t, " "); for (i = 1; i <= n; i++) want[t[i]] = 1 }
+            NF { bn = $1; sub(/.*\//, "", bn); if ($1 in want || bn in want) print }
+        '
+    }
+    OUTDATED_FORMULAE=$(printf '%s\n' "$OUTDATED_FORMULAE" | _keep_targeted)
+    OUTDATED_CASKS=$(printf '%s\n' "$OUTDATED_CASKS" | _keep_targeted)
+
+    # Note any named package that isn't actually outdated, so the user isn't left
+    # wondering why it was a no-op.
+    for _tp in $TARGET_PKGS; do
+        if ! printf '%s\n%s\n' "$OUTDATED_FORMULAE" "$OUTDATED_CASKS" \
+            | awk -v want="$_tp" 'NF { bn = $1; sub(/.*\//, "", bn); if ($1 == want || bn == want) f = 1 } END { exit !f }'; then
+            echo "  $_tp — not outdated (already up to date, or not an installed/known package)"
+        fi
+    done
+fi
+
 if [ -z "$OUTDATED_FORMULAE" ] && [ -z "$OUTDATED_CASKS" ]; then
-    echo "Everything up to date."
+    if [ -n "$TARGET_PKGS" ]; then
+        echo "Nothing to upgrade for: $TARGET_PKGS"
+    else
+        echo "Everything up to date."
+    fi
     exit 0
 fi
 
@@ -623,9 +656,16 @@ except Exception:
         echo "  Found $DEP_COUNT incoming dependency version(s) to check"
         echo ""
 
+        _DEP_IDX=0
         for entry in ${INCOMING_DEPS_ARR[@]+"${INCOMING_DEPS_ARR[@]}"}; do
             DEP=${entry%|*}
             DEP_VER=${entry##*|}
+
+            # Progress (#60): each dep makes network calls (age + 3 CVE DBs), so a
+            # large batch can run for minutes. Announce the dep BEFORE the slow
+            # checks so the step isn't a silent wait.
+            _DEP_IDX=$((_DEP_IDX + 1))
+            echo "  [$_DEP_IDX/$DEP_COUNT] checking $DEP $DEP_VER..."
 
             if [ "$MIN_AGE" -gt 0 ] 2>/dev/null; then
                 # Route by type: a slash means a tap formula (look it up in its own

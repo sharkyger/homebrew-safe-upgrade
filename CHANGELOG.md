@@ -15,6 +15,8 @@ The project is pre-1.0; expect minor breaking changes between 0.x releases until
 
 ### Added
 - **`--allow-unknown-age`** on `brew safe-upgrade` and `brew safe-install` — permit packages whose release age cannot be verified (default: such packages are held).
+- **Single-package `brew safe-upgrade <name> [<name> …]`** ([#61](https://github.com/sharkyger/homebrew-safe-upgrade/issues/61)). Positional package names restrict the run to just those outdated packages instead of everything `brew outdated` reports (matches the full name or its basename, so `safe-upgrade safe-fetch` matches `sharkyger/tap/safe-fetch`). A named package that isn't outdated is reported, not silently ignored.
+- **Per-dependency progress in the transitive-dependency scan** ([#60](https://github.com/sharkyger/homebrew-safe-upgrade/issues/60)). Each incoming dependency is now announced with an `[i/N] checking <dep> <version>…` line before its (network-bound) age and CVE checks, so a large scan shows live progress instead of a multi-minute silent wait. Applies to both `brew safe-upgrade` and `brew safe-install`.
 
 ## [0.2.2] — 2026-06-06
 

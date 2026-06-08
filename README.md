@@ -79,6 +79,17 @@ Upgrade clean packages only? The blocked ones will be skipped.
 Proceed? [y/N]
 ```
 
+### Upgrading specific packages
+
+Pass one or more package names to restrict the run to just those, instead of every outdated package:
+
+```
+brew safe-upgrade gh                 # only gh
+brew safe-upgrade gh imagemagick     # only these two
+```
+
+Names match the full name or its basename, so `brew safe-upgrade safe-fetch` matches a tapped `sharkyger/tap/safe-fetch`. A named package that isn't outdated is reported, not silently ignored.
+
 ### Auto-approve mode
 
 For CI or scripted use:

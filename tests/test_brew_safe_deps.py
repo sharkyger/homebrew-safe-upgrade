@@ -539,6 +539,96 @@ def test_yes_flag_continues_past_vuln_dep_with_stderr_warning(mock_env, tmp_path
     assert "Done." in result.stdout
 
 
+# ----------------------- single-package upgrade (#61) -----------------------
+
+
+def test_single_package_upgrade_restricts_to_named(mock_env, tmp_path):
+    """`brew safe-upgrade wget` must process only wget, not every outdated package."""
+    write_outdated(
+        mock_env,
+        [
+            {"name": "wget", "installed_versions": ["1.24"], "current_version": "1.25"},
+            {"name": "curl", "installed_versions": ["8.0"], "current_version": "8.1"},
+        ],
+    )
+    write_formula_info(mock_env, "wget", "1.25")
+    write_formula_info(mock_env, "curl", "8.1")
+    stub = make_cve_stub(tmp_path)
+
+    result = run_safe_upgrade(
+        ["wget", "--no-deps"],
+        env_extra={"DEPENDENCY_SECURITY_CHECK": str(stub)},
+        input_text="n\n",
+    )
+    assert "Found 1 outdated package(s)" in result.stdout
+    assert "wget" in result.stdout
+    # curl was outdated but not named — it must not appear anywhere in the run.
+    assert "curl" not in result.stdout
+
+
+def test_single_package_not_outdated_is_reported(mock_env, tmp_path):
+    """A named package that isn't outdated is reported clearly, not silently ignored."""
+    write_outdated(
+        mock_env,
+        [{"name": "wget", "installed_versions": ["1.24"], "current_version": "1.25"}],
+    )
+    write_formula_info(mock_env, "wget", "1.25")
+    stub = make_cve_stub(tmp_path)
+
+    result = run_safe_upgrade(
+        ["curl", "--no-deps"],
+        env_extra={"DEPENDENCY_SECURITY_CHECK": str(stub)},
+        input_text="n\n",
+    )
+    assert "curl — not outdated" in result.stdout
+    assert "Nothing to upgrade for: curl" in result.stdout
+
+
+def test_single_package_matches_tap_basename(mock_env, tmp_path):
+    """`brew safe-upgrade safe-fetch` matches the full tap name sharkyger/tap/safe-fetch."""
+    write_outdated(
+        mock_env,
+        [
+            {"name": "sharkyger/tap/safe-fetch", "installed_versions": ["0.2"], "current_version": "0.3"},
+            {"name": "wget", "installed_versions": ["1.24"], "current_version": "1.25"},
+        ],
+    )
+    write_formula_info(mock_env, "sharkyger/tap/safe-fetch", "0.3")
+    write_formula_info(mock_env, "wget", "1.25")
+    stub = make_cve_stub(tmp_path)
+
+    result = run_safe_upgrade(
+        ["safe-fetch", "--no-deps", "--no-verify-sha"],
+        env_extra={"DEPENDENCY_SECURITY_CHECK": str(stub)},
+        input_text="n\n",
+    )
+    assert "Found 1 outdated package(s)" in result.stdout
+    assert "safe-fetch" in result.stdout
+    assert "wget" not in result.stdout
+
+
+# ----------------------- dep-scan progress (#60) -----------------------
+
+
+def test_dep_scan_shows_per_dependency_progress(mock_env, tmp_path):
+    """The transitive-dep scan announces each dep (with an i/N counter) before its
+    slow network checks, so a multi-minute scan isn't a silent wait."""
+    write_formula_info(mock_env, "wget", "1.25.0")
+    write_formula_info(mock_env, "libfoo", "1.0")
+    write_formula_info(mock_env, "libbar", "2.0")
+    write_deps(mock_env, "wget", ["libfoo", "libbar"])
+    stub = make_cve_stub(tmp_path)
+
+    result = run_safe_install(
+        ["wget"],
+        env_extra={"DEPENDENCY_SECURITY_CHECK": str(stub)},
+        input_text="n\n",
+    )
+    assert "Found 2 incoming dependency version(s) to check" in result.stdout
+    assert "[1/2] checking" in result.stdout
+    assert "[2/2] checking" in result.stdout
+
+
 # ----------------------- helpers -----------------------
 
 

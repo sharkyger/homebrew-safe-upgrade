@@ -566,9 +566,16 @@ except Exception:
         echo "  Found $DEP_COUNT incoming dependency version(s) to check"
         echo ""
 
+        _DEP_IDX=0
         for entry in ${INCOMING_DEPS_ARR[@]+"${INCOMING_DEPS_ARR[@]}"}; do
             DEP=${entry%|*}
             DEP_VER=${entry##*|}
+
+            # Progress (#60): each dep makes network calls (age + 3 CVE DBs), so a
+            # large batch can run for minutes. Announce the dep BEFORE the slow
+            # checks so the step isn't a silent wait.
+            _DEP_IDX=$((_DEP_IDX + 1))
+            echo "  [$_DEP_IDX/$DEP_COUNT] checking $DEP $DEP_VER..."
 
             if [ "$MIN_AGE" -gt 0 ] 2>/dev/null; then
                 # Route by type: a slash means a tap formula (look it up in its own
