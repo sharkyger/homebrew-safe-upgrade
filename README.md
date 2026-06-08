@@ -83,7 +83,7 @@ Proceed? [y/N]
 
 Pass one or more package names to restrict the run to just those, instead of every outdated package:
 
-```
+```bash
 brew safe-upgrade gh                 # only gh
 brew safe-upgrade gh imagemagick     # only these two
 ```
@@ -160,12 +160,12 @@ Hold back **formulae, casks, and tap formulae** published less than N days ago. 
 
 The release age is read from each package's home repo — `homebrew-core` for core formulae, `homebrew-cask` for casks, and the tap's own repo for tap formulae.
 
-```
+```bash
 brew safe-upgrade             # uses default --min-age 3
 brew safe-upgrade --min-age 7 # stricter
 ```
 
-```
+```text
 Checking package age (min-age: 3 days)...
 
   [ok]   gh 2.91.0 — released 12 day(s) ago (2026-04-12)
@@ -251,7 +251,7 @@ Install wget imagemagick? [Y/n]
 
 Supports the same `--min-age`, `--allow-unknown-age`, `--no-verify-sha`, and `--no-deps` flags:
 
-```
+```bash
 brew safe-install wget curl               # default --min-age 3, SHA verify on
 brew safe-install --min-age 7 wget curl   # stricter
 brew safe-install --allow-unknown-age foo # permit a pkg whose release age can't be verified

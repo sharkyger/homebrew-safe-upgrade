@@ -45,15 +45,19 @@ jobs:
       - run: pytest
 
   macos-install-smoke:
-    # Real script-route install-and-run on BOTH macOS architectures. The earlier
-    # formula self-test overrode the resolver path (BREW_SAFE_BOTTLE_RESOLVER=
-    # /nonexistent) and masked a helper-strand bug on the script route; this job
-    # exercises the real path, no override. macos-14 = arm64, macos-13 = x86_64.
+    # Real script-route install-and-run on macOS. The earlier formula self-test
+    # overrode the resolver path (BREW_SAFE_BOTTLE_RESOLVER=/nonexistent) and
+    # masked a helper-strand bug on the script route; this job exercises the real
+    # path, no override.
+    #
+    # macos-14 = arm64 only. macos-13 (x86_64) was dropped: GitHub's Intel macOS
+    # runners queue indefinitely and routinely never start, so the job blocked PRs
+    # for no benefit. Intel coverage is done locally on an Intel MacBook instead.
     name: macOS script-install smoke (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-14, macos-13]
+        os: [macos-14]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
