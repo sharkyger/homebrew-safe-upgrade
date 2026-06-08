@@ -3,7 +3,10 @@
 # dependencies for known vulnerabilities before upgrading.
 # Queries 3 databases: OSV.dev, GitHub Advisory, NIST NVD.
 #
-# Usage: brew safe-upgrade [--yes|-y] [--min-age N] [--no-verify-sha] [--no-deps] [--version]
+# Usage: brew safe-upgrade [--yes|-y] [--min-age N] [--allow-unknown-age]
+#                          [--no-verify-sha] [--no-deps] [--version]
+#        --allow-unknown-age  Permit packages whose release age cannot be verified
+#                             (default: such packages are HELD — fail closed)
 #        --version  Print version, install route, and helper-file status (self-diagnosis)
 #
 # Environment:
@@ -85,7 +88,8 @@ if [ ! -f "$BOTTLE_RESOLVER" ]; then
 fi
 
 AUTO_YES=false
-MIN_AGE=3          # 3-day freshness hold for formulae; --min-age 0 to disable.
+MIN_AGE=3          # 3-day freshness hold; --min-age 0 to disable.
+ALLOW_UNKNOWN_AGE=false  # Fail closed: hold packages whose age can't be verified.
 VERIFY_SHA=true    # Default-on as of v0.2.0 — opt out with --no-verify-sha.
 CHECK_DEPS=true
 case "${BREW_SAFE_NO_DEPS:-}" in
@@ -94,14 +98,78 @@ esac
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --yes|-y)        AUTO_YES=true; shift ;;
-        --min-age)       MIN_AGE="${2:-0}"; shift 2 ;;
+        --yes|-y)            AUTO_YES=true; shift ;;
+        --min-age)           MIN_AGE="${2:-0}"; shift 2 ;;
+        --allow-unknown-age) ALLOW_UNKNOWN_AGE=true; shift ;;
         --verify-sha)    shift ;;  # Accepted for back-compat — verification is now on by default.
         --no-verify-sha) VERIFY_SHA=false; shift ;;
         --no-deps)       CHECK_DEPS=false; shift ;;
         *)               shift ;;
     esac
 done
+
+# Resolve the release age (in days) of a package's current formula/cask file by
+# reading the last-commit date from the *correct* Homebrew GitHub repo for its
+# type. Routing this by type is the fix for the fail-open bug: casks live in
+# homebrew-cask and tap formulae in their own tap repo — querying homebrew-core
+# for them returns [] and used to be treated as "age unknown → skip".
+#   $1 = lookup name (core formula name, cask token, or full tap path user/tap/name)
+#   $2 = type: core | cask | tap
+# Echoes "<age_days> <YYYY-MM-DD>"; "-1 unknown" when the age cannot be resolved.
+# Callers MUST treat "-1" as "could not verify" (hold), never as "ok" (fail closed).
+# Test seams: MOCK_COMMITS_API_DIR (canned JSON per name, '/'→'_' in filenames;
+# falls back to _default.json, else []) and MOCK_COMMITS_API_LOG (appends
+# "<type>\t<url>" so tests can assert correct-repo routing).
+fetch_pkg_age() {
+    local name="$1" ptype="$2" url first user tap token json key
+    case "$ptype" in
+        cask)
+            first=$(printf '%s' "$name" | cut -c1)
+            url="https://api.github.com/repos/Homebrew/homebrew-cask/commits?path=Casks/${first}/${name}.rb&per_page=1"
+            ;;
+        tap)
+            # user/tap/name -> repo <user>/homebrew-<tap>, canonical Formula/<name>.rb layout.
+            # Non-standard tap layouts resolve to [] -> unknown -> held (fail closed).
+            user="${name%%/*}"
+            tap="${name#*/}"; tap="${tap%%/*}"
+            token="${name##*/}"
+            url="https://api.github.com/repos/${user}/homebrew-${tap}/commits?path=Formula/${token}.rb&per_page=1"
+            ;;
+        *)
+            first=$(printf '%s' "$name" | cut -c1)
+            url="https://api.github.com/repos/Homebrew/homebrew-core/commits?path=Formula/${first}/${name}.rb&per_page=1"
+            ;;
+    esac
+
+    [ -n "${MOCK_COMMITS_API_LOG:-}" ] && printf '%s\t%s\n' "$ptype" "$url" >> "$MOCK_COMMITS_API_LOG"
+
+    if [ -n "${MOCK_COMMITS_API_DIR:-}" ]; then
+        key=$(printf '%s' "$name" | tr '/' '_')
+        if [ -f "$MOCK_COMMITS_API_DIR/${key}.json" ]; then
+            json=$(cat "$MOCK_COMMITS_API_DIR/${key}.json")
+        elif [ -f "$MOCK_COMMITS_API_DIR/_default.json" ]; then
+            json=$(cat "$MOCK_COMMITS_API_DIR/_default.json")
+        else
+            json="[]"
+        fi
+    else
+        json=$(curl -sf "$url" 2>/dev/null || echo "[]")
+    fi
+
+    printf '%s' "$json" | python3 -c "
+import sys, json, datetime
+try:
+    data = json.load(sys.stdin)
+    if data and len(data) > 0:
+        dt = datetime.datetime.fromisoformat(data[0]['commit']['committer']['date'].replace('Z', '+00:00'))
+        age = (datetime.datetime.now(datetime.timezone.utc) - dt).days
+        print(f'{age} {dt.strftime(\"%Y-%m-%d\")}')
+    else:
+        print('-1 unknown')
+except Exception:
+    print('-1 unknown')
+" 2>/dev/null
+}
 
 echo "Updating Homebrew..."
 brew update --quiet
@@ -194,33 +262,30 @@ if [ "$MIN_AGE" -gt 0 ] 2>/dev/null; then
             continue
         fi
 
-        # Query GitHub API for the formula's last commit date.
-        # Uses the first letter subdirectory convention: Formula/g/gitleaks.rb
-        FIRST_LETTER=$(echo "$name" | cut -c1)
-        COMMIT_JSON=$(curl -sf "https://api.github.com/repos/Homebrew/homebrew-core/commits?path=Formula/${FIRST_LETTER}/${name}.rb&per_page=1" 2>/dev/null || echo "[]")
-        COMMIT_DATE=$(echo "$COMMIT_JSON" | python3 -c "
-import sys, json, datetime
-try:
-    data = json.load(sys.stdin)
-    if data and len(data) > 0:
-        dt = datetime.datetime.fromisoformat(data[0]['commit']['committer']['date'].replace('Z', '+00:00'))
-        age = (datetime.datetime.now(datetime.timezone.utc) - dt).days
-        print(f'{age} {dt.strftime(\"%Y-%m-%d\")}')
-    else:
-        print('-1 unknown')
-except Exception:
-    print('-1 unknown')
-" 2>/dev/null)
+        # Route the age lookup to the right repo: a slash means a tap formula;
+        # membership in the cask list means a cask; otherwise a core formula.
+        # (Casks and taps used to be queried against homebrew-core, always missed,
+        # and were waved through as "age unknown" — the fail-open this fixes.)
+        PKG_TYPE_AGE="core"
+        case "$name" in
+            */*) PKG_TYPE_AGE="tap" ;;
+            *)
+                if printf '%s\n' "$OUTDATED_CASKS" | awk -v n="$name" 'NF && $1==n{f=1} END{exit !f}'; then
+                    PKG_TYPE_AGE="cask"
+                fi
+                ;;
+        esac
 
-        AGE_DAYS=$(echo "$COMMIT_DATE" | awk '{print $1}')
-        PUB_DATE=$(echo "$COMMIT_DATE" | awk '{print $2}')
+        AGE_INFO=$(fetch_pkg_age "$name" "$PKG_TYPE_AGE")
+        AGE_DAYS=$(echo "$AGE_INFO" | awk '{print $1}')
+        PUB_DATE=$(echo "$AGE_INFO" | awk '{print $2}')
 
         if [ "$AGE_DAYS" -ge 0 ] 2>/dev/null && [ "$AGE_DAYS" -lt "$MIN_AGE" ]; then
-            # Check if the INSTALLED version has known CVEs (CVE-aware bypass)
+            # Known and too fresh. CVE-aware bypass: if the INSTALLED version has
+            # known CVEs, this fresh release is likely the fix — let it through.
             _INSTALLED_RESULT=$(python3 "$SCRIPT" brew "$name" "$installed" 2>/dev/null) && INSTALLED_EXIT=0 || INSTALLED_EXIT=$?
 
             if [ "$INSTALLED_EXIT" -eq 1 ]; then
-                # Installed version is vulnerable — this fresh version is likely the fix
                 echo "  [ok] $name $current — released $AGE_DAYS day(s) ago ($PUB_DATE), but installed $installed has CVEs — bypassing age check"
                 FILTERED_OUTDATED="${FILTERED_OUTDATED}${name} ${installed} ${current}"$'\n'
             else
@@ -228,13 +293,22 @@ except Exception:
                 HELD_PKGS="$HELD_PKGS $name"
                 HELD_COUNT=$((HELD_COUNT + 1))
             fi
-        else
-            if [ "$AGE_DAYS" -lt 0 ] 2>/dev/null; then
-                echo "  [ok] $name $current — age unknown, skipping age check"
-            else
-                echo "  [ok] $name $current — released $AGE_DAYS day(s) ago ($PUB_DATE)"
-            fi
+        elif [ "$AGE_DAYS" -ge 0 ] 2>/dev/null; then
+            # Known and old enough — clear the freshness hold.
+            echo "  [ok] $name $current — released $AGE_DAYS day(s) ago ($PUB_DATE)"
             FILTERED_OUTDATED="${FILTERED_OUTDATED}${name} ${installed} ${current}"$'\n'
+        else
+            # Age could not be verified. FAIL CLOSED: hold unless explicitly
+            # overridden. (Was: "[ok] … age unknown, skipping age check" — a
+            # fail-open that allowed 0-day casks/taps straight through.)
+            if [ "$ALLOW_UNKNOWN_AGE" = true ]; then
+                echo "  [ok] $name $current — age could not be verified, allowed by --allow-unknown-age"
+                FILTERED_OUTDATED="${FILTERED_OUTDATED}${name} ${installed} ${current}"$'\n'
+            else
+                echo "  [HOLD] $name $current — age could not be verified (min-age: $MIN_AGE days); re-run with --allow-unknown-age to override"
+                HELD_PKGS="$HELD_PKGS $name"
+                HELD_COUNT=$((HELD_COUNT + 1))
+            fi
         fi
     done <<< "$OUTDATED"
 
@@ -547,35 +621,38 @@ except Exception:
             DEP_VER=${entry##*|}
 
             if [ "$MIN_AGE" -gt 0 ] 2>/dev/null; then
-                # Tap-namespaced deps (foo/bar/baz) don't live in homebrew-core,
-                # so the GitHub commits API cannot tell us their age. Skip the
-                # age gate explicitly rather than falling through silently.
+                # Route by type: a slash means a tap formula (look it up in its own
+                # tap repo), otherwise homebrew-core. Unknown age fails CLOSED
+                # (HOLD-DEP) unless --allow-unknown-age — same policy as the
+                # top-level check. (Previously tap deps were waved through with
+                # [skip-dep-age], and a core dep whose age lookup came back empty
+                # fell through to [ok-dep]: both fail-open paths now closed.)
                 if [[ "$DEP" == */* ]]; then
-                    echo "    [skip-dep-age] $DEP — tap formula, age unavailable from homebrew-core"
+                    DEP_AGE_TYPE="tap"
                 else
-                    FIRST_LETTER=$(echo "$DEP" | cut -c1)
-                    COMMIT_JSON=$(curl -sf "https://api.github.com/repos/Homebrew/homebrew-core/commits?path=Formula/${FIRST_LETTER}/${DEP}.rb&per_page=1" 2>/dev/null || echo "[]")
-                    AGE_INFO=$(echo "$COMMIT_JSON" | python3 -c "
-import sys, json, datetime
-try:
-    data = json.load(sys.stdin)
-    if data and len(data) > 0:
-        dt = datetime.datetime.fromisoformat(data[0]['commit']['committer']['date'].replace('Z', '+00:00'))
-        age = (datetime.datetime.now(datetime.timezone.utc) - dt).days
-        print(f'{age} {dt.strftime(\"%Y-%m-%d\")}')
-    else:
-        print('-1 unknown')
-except Exception:
-    print('-1 unknown')
-" 2>/dev/null)
+                    DEP_AGE_TYPE="core"
+                fi
+
+                if [[ "$DEP" =~ ^[a-zA-Z0-9@._/-]+$ ]]; then
+                    AGE_INFO=$(fetch_pkg_age "$DEP" "$DEP_AGE_TYPE")
                     AGE_DAYS=$(echo "$AGE_INFO" | awk '{print $1}')
                     PUB_DATE=$(echo "$AGE_INFO" | awk '{print $2}')
-                    if [ "$AGE_DAYS" -ge 0 ] 2>/dev/null && [ "$AGE_DAYS" -lt "$MIN_AGE" ]; then
-                        echo "    [HOLD-DEP] $DEP $DEP_VER -- released $AGE_DAYS day(s) ago ($PUB_DATE), min-age: $MIN_AGE days"
-                        DEP_BLOCKED_HOLD="$DEP_BLOCKED_HOLD $DEP"
-                        DEP_BLOCKED_HOLD_REASONS="${DEP_BLOCKED_HOLD_REASONS}    $DEP $DEP_VER: too fresh ($AGE_DAYS days old, min-age $MIN_AGE)"$'\n'
-                        continue
-                    fi
+                else
+                    AGE_DAYS=-1; PUB_DATE=unknown
+                fi
+
+                if [ "$AGE_DAYS" -ge 0 ] 2>/dev/null && [ "$AGE_DAYS" -lt "$MIN_AGE" ]; then
+                    echo "    [HOLD-DEP] $DEP $DEP_VER -- released $AGE_DAYS day(s) ago ($PUB_DATE), min-age: $MIN_AGE days"
+                    DEP_BLOCKED_HOLD="$DEP_BLOCKED_HOLD $DEP"
+                    DEP_BLOCKED_HOLD_REASONS="${DEP_BLOCKED_HOLD_REASONS}    $DEP $DEP_VER: too fresh ($AGE_DAYS days old, min-age $MIN_AGE)"$'\n'
+                    continue
+                elif [ "$AGE_DAYS" -lt 0 ] 2>/dev/null && [ "$ALLOW_UNKNOWN_AGE" != true ]; then
+                    echo "    [HOLD-DEP] $DEP $DEP_VER -- age could not be verified (min-age: $MIN_AGE days); re-run with --allow-unknown-age to override"
+                    DEP_BLOCKED_HOLD="$DEP_BLOCKED_HOLD $DEP"
+                    DEP_BLOCKED_HOLD_REASONS="${DEP_BLOCKED_HOLD_REASONS}    $DEP $DEP_VER: age could not be verified"$'\n'
+                    continue
+                elif [ "$AGE_DAYS" -lt 0 ] 2>/dev/null; then
+                    echo "    [age-dep] $DEP — age could not be verified, allowed by --allow-unknown-age"
                 fi
             fi
 

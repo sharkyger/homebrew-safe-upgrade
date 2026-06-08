@@ -24,6 +24,7 @@ Test escape hatches the production code must honor:
   (which has no TTY). Production code never sets this; tests do.
 """
 
+import datetime
 import json
 import os
 import re
@@ -36,6 +37,14 @@ REPO = Path(__file__).parent.parent
 MOCK_BREW_BIN = Path(__file__).parent / "fixtures" / "mock_brew"
 SAFE_INSTALL = REPO / "brew-safe-install"
 SAFE_UPGRADE = REPO / "brew-safe-upgrade"
+
+
+def commit_json_days_ago(days: int) -> str:
+    """A `GET /commits` response (array) whose last commit is `days` days old."""
+    dt = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days)
+    return json.dumps(
+        [{"commit": {"committer": {"date": dt.strftime("%Y-%m-%dT%H:%M:%SZ")}}}]
+    )
 
 CLEAN_SHA = "a" * 64
 TAMPERED_SHA = "b" * 64
@@ -56,6 +65,14 @@ def sha_env(tmp_path, monkeypatch):
     monkeypatch.setenv("MOCK_FORMULAE_API_DIR", str(api_dir))
     monkeypatch.setenv("PATH", f"{MOCK_BREW_BIN}:{os.environ['PATH']}")
     monkeypatch.delenv("BREW_SAFE_NO_DEPS", raising=False)
+
+    # Age check is fail-closed (unknown age -> HOLD). SHA tests aren't about
+    # freshness, so make every package resolve as old via the commits-API mock
+    # _default — the age gate is a no-op for these tests.
+    commits_dir = tmp_path / "commits_api"
+    commits_dir.mkdir()
+    (commits_dir / "_default.json").write_text(commit_json_days_ago(3650))
+    monkeypatch.setenv("MOCK_COMMITS_API_DIR", str(commits_dir))
 
     # Stub the CVE checker so SHA-verify tests don't hit real APIs.
     stub = tmp_path / "cve_stub.py"
