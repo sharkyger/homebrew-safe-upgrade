@@ -136,7 +136,14 @@ fetch_pkg_age() {
             url="https://api.github.com/repos/${user}/homebrew-${tap}/commits?path=Formula/${token}.rb&per_page=1"
             ;;
         *)
-            first=$(printf '%s' "$name" | cut -c1)
+            # homebrew-core shards by first letter, EXCEPT formulae whose name
+            # starts with "lib" live under Formula/lib/ (the repo's one multi-char
+            # shard). Using Formula/l/ for them returns [] → "unknown" → the very
+            # fail-open this fixes (see issue #62: libgit2, libheif, libusb, …).
+            case "$name" in
+                lib*) first="lib" ;;
+                *)    first=$(printf '%s' "$name" | cut -c1) ;;
+            esac
             url="https://api.github.com/repos/Homebrew/homebrew-core/commits?path=Formula/${first}/${name}.rb&per_page=1"
             ;;
     esac

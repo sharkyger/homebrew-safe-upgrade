@@ -248,6 +248,19 @@ def test_install_cask_is_routed_to_homebrew_cask_repo(age_env):
     assert "homebrew-core/commits?path=Formula/c/coderabbit.rb" not in log_text
 
 
+def test_install_lib_formula_routed_to_lib_shard(age_env):
+    """Install-side parity for the homebrew-core lib/ shard (issue #62): a lib*
+    formula installed via brew-safe-install must also resolve at Formula/lib/."""
+    write_formula_info(age_env["brew"], "libgit2", "1.9.4")
+    url_log = age_env["tmp"] / "urls.log"
+
+    run_install(["libgit2", "--no-deps"], env_extra={"MOCK_COMMITS_API_LOG": str(url_log)})
+
+    log_text = url_log.read_text()
+    assert "homebrew-core/commits?path=Formula/lib/libgit2.rb" in log_text
+    assert "Formula/l/libgit2.rb" not in log_text
+
+
 def test_install_cask_old_enough_is_checked_not_skipped(age_env):
     """A sufficiently-old cask proceeds to the security check (no silent skip)."""
     write_cask_info(age_env["brew"], "coderabbit", "0.5.4")
@@ -276,6 +289,39 @@ def test_upgrade_core_formula_is_routed_to_homebrew_core(age_env):
     log_text = url_log.read_text()
     assert "Homebrew/homebrew-core/commits?path=Formula/w/wget.rb" in log_text
     assert "homebrew-cask" not in log_text
+
+
+def test_upgrade_lib_formula_routed_to_lib_shard(age_env):
+    """homebrew-core shards lib* formulae under Formula/lib/, not Formula/l/.
+    Regression for issue #62 — libgit2/libheif/libusb/… were looked up at the
+    wrong path, came back empty, and were waved through as 'age unknown'."""
+    write_outdated(
+        age_env["brew"],
+        formulae=[{"name": "libgit2", "installed_versions": ["1.9.3"], "current_version": "1.9.4"}],
+    )
+    url_log = age_env["tmp"] / "urls.log"
+
+    run_upgrade(["--no-deps"], env_extra={"MOCK_COMMITS_API_LOG": str(url_log)})
+
+    log_text = url_log.read_text()
+    assert "homebrew-core/commits?path=Formula/lib/libgit2.rb" in log_text
+    assert "Formula/l/libgit2.rb" not in log_text
+
+
+def test_upgrade_non_lib_l_formula_still_uses_first_letter(age_env):
+    """Guard the lib shard against over-matching: a non-lib 'l' formula (lua) must
+    still route to Formula/l/, never Formula/lib/."""
+    write_outdated(
+        age_env["brew"],
+        formulae=[{"name": "lua", "installed_versions": ["5.4.6"], "current_version": "5.4.7"}],
+    )
+    url_log = age_env["tmp"] / "urls.log"
+
+    run_upgrade(["--no-deps"], env_extra={"MOCK_COMMITS_API_LOG": str(url_log)})
+
+    log_text = url_log.read_text()
+    assert "homebrew-core/commits?path=Formula/l/lua.rb" in log_text
+    assert "Formula/lib/" not in log_text
 
 
 def test_upgrade_too_fresh_but_installed_has_cve_bypasses_hold(age_env, monkeypatch):
