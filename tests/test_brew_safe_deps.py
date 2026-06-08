@@ -5,6 +5,7 @@ Uses a mock `brew` shim on PATH so we don't need a real Homebrew install,
 network access, or vulnerable test packages.
 """
 
+import datetime
 import json
 import os
 import subprocess
@@ -16,6 +17,17 @@ REPO = Path(__file__).parent.parent
 MOCK_BREW_BIN = Path(__file__).parent / "fixtures" / "mock_brew"
 SAFE_INSTALL = REPO / "brew-safe-install"
 SAFE_UPGRADE = REPO / "brew-safe-upgrade"
+
+
+def commit_json_days_ago(days: int) -> str:
+    """A `GET /commits` response (array) whose last commit is `days` days old.
+
+    Mirrors the slice of the GitHub API the age check reads:
+    data[0]['commit']['committer']['date']. Computed relative to now so a small
+    `days` reliably reads as "too fresh" regardless of when the suite runs.
+    """
+    dt = datetime.datetime.now(datetime.UTC) - datetime.timedelta(days=days)
+    return json.dumps([{"commit": {"committer": {"date": dt.strftime("%Y-%m-%dT%H:%M:%SZ")}}}])
 
 
 @pytest.fixture
@@ -40,6 +52,15 @@ def mock_env(tmp_path, monkeypatch):
     api_dir = tmp_path / "formulae_api_empty"
     api_dir.mkdir()
     monkeypatch.setenv("MOCK_FORMULAE_API_DIR", str(api_dir))
+
+    # Age check became fail-closed (unknown age -> HOLD). These tests aren't about
+    # freshness, so point the commits-API mock at a dir whose _default makes every
+    # package resolve as comfortably old -> the age gate is a no-op here. Age tests
+    # drop per-name files (recent date, or [] to force "unknown") to override.
+    commits_dir = tmp_path / "commits_api"
+    commits_dir.mkdir()
+    (commits_dir / "_default.json").write_text(commit_json_days_ago(3650))
+    monkeypatch.setenv("MOCK_COMMITS_API_DIR", str(commits_dir))
 
     return fixture_dir
 
@@ -329,15 +350,52 @@ def test_invalid_dep_name_is_rejected_before_query(mock_env, tmp_path):
     assert "[VULN-DEP] evil" not in result.stdout
 
 
-def test_tap_dep_skips_age_check_with_clear_log_line(mock_env, tmp_path):
+def test_tap_dep_is_routed_to_its_tap_repo_for_age_check(mock_env, tmp_path):
     """
-    A tap-namespaced dep (foo/bar/baz) must skip the age check explicitly
-    with [skip-dep-age], not silently bypass it. (#23)
+    A tap-namespaced dep (foo/bar/baz) must be routed to its OWN tap repo
+    (foo/homebrew-bar) for the age lookup — not skipped, and never queried
+    against homebrew-core. With a verifiable (old) age it clears the hold. (#23)
+
+    Supersedes the old [skip-dep-age] behavior: tap deps used to silently bypass
+    the freshness hold, which is the fail-open this fix closes.
     """
     write_formula_info(mock_env, "wget", "1.25.0")
     write_formula_info(mock_env, "foo/bar/baz", "1.0.0")
     write_deps(mock_env, "wget", ["foo/bar/baz"])
-    # baz not installed → incoming
+    # baz has no per-name commits file → resolves old via _default.
+
+    url_log = tmp_path / "commits_url.log"
+    stub = make_cve_stub(tmp_path)
+
+    result = run_safe_install(
+        ["wget", "--min-age", "30"],
+        env_extra={
+            "DEPENDENCY_SECURITY_CHECK": str(stub),
+            "MOCK_COMMITS_API_LOG": str(url_log),
+        },
+        input_text="n\n",
+    )
+    log_text = url_log.read_text()
+    # Routed to the tap repo, NOT homebrew-core.
+    assert "foo/homebrew-bar/commits?path=Formula/baz.rb" in log_text
+    assert "Formula/f/foo/bar/baz.rb" not in log_text
+    # Age verified (old) → dep clears the hold, CVE check runs, dep is clean.
+    assert "[ok-dep] foo/bar/baz 1.0.0" in result.stdout
+    # The old silent-skip line is gone.
+    assert "[skip-dep-age]" not in result.stdout
+
+
+def test_dep_with_unverifiable_age_is_held_fail_closed(mock_env, tmp_path):
+    """
+    A dependency whose release age cannot be verified must be HELD (fail closed),
+    not waved through as [ok-dep]. This is the deps-loop half of the fail-open fix.
+    """
+    write_formula_info(mock_env, "wget", "1.25.0")
+    write_formula_info(mock_env, "libfoo", "1.2.3")
+    write_deps(mock_env, "wget", ["libfoo"])
+    # Force "unknown" for libfoo: an empty commits array overrides the old _default.
+    commits_dir = Path(os.environ["MOCK_COMMITS_API_DIR"])
+    (commits_dir / "libfoo.json").write_text("[]")
 
     stub = make_cve_stub(tmp_path)
 
@@ -346,9 +404,60 @@ def test_tap_dep_skips_age_check_with_clear_log_line(mock_env, tmp_path):
         env_extra={"DEPENDENCY_SECURITY_CHECK": str(stub)},
         input_text="n\n",
     )
-    assert "[skip-dep-age] foo/bar/baz" in result.stdout
-    # CVE check still runs even though age is skipped
-    assert "[ok-dep] foo/bar/baz 1.0.0" in result.stdout
+    assert "[HOLD-DEP] libfoo 1.2.3 -- age could not be verified" in result.stdout
+    assert "[ok-dep] libfoo" not in result.stdout
+
+
+def test_allow_unknown_age_lets_unverifiable_dep_through(mock_env, tmp_path):
+    """
+    --allow-unknown-age is the explicit escape hatch: an unverifiable-age dep is
+    permitted (and logged as such) rather than held.
+    """
+    write_formula_info(mock_env, "wget", "1.25.0")
+    write_formula_info(mock_env, "libfoo", "1.2.3")
+    write_deps(mock_env, "wget", ["libfoo"])
+    commits_dir = Path(os.environ["MOCK_COMMITS_API_DIR"])
+    (commits_dir / "libfoo.json").write_text("[]")
+
+    stub = make_cve_stub(tmp_path)
+
+    result = run_safe_install(
+        ["wget", "--min-age", "30", "--allow-unknown-age"],
+        env_extra={"DEPENDENCY_SECURITY_CHECK": str(stub)},
+        input_text="n\n",
+    )
+    expected = "[age-dep] libfoo — age could not be verified, allowed by --allow-unknown-age"
+    assert expected in result.stdout
+    assert "[HOLD-DEP] libfoo" not in result.stdout
+    assert "[ok-dep] libfoo 1.2.3" in result.stdout
+
+
+def test_upgrade_dep_with_unverifiable_age_is_held_fail_closed(mock_env, tmp_path):
+    """
+    safe-UPGRADE has its own transitive-deps loop. A core dep whose age cannot be
+    verified must be HELD there too — regression guard for the loop that originally
+    shipped without the fail-closed branch (the parent passes its own age check).
+    """
+    write_outdated(
+        mock_env,
+        [{"name": "wget", "installed_versions": ["1.24.0"], "current_version": "1.25.0"}],
+    )
+    write_formula_info(mock_env, "wget", "1.25.0")
+    write_formula_info(mock_env, "libfoo", "1.2.3")
+    write_deps(mock_env, "wget", ["libfoo"])
+    # wget resolves old via _default; force libfoo "unknown".
+    commits_dir = Path(os.environ["MOCK_COMMITS_API_DIR"])
+    (commits_dir / "libfoo.json").write_text("[]")
+
+    stub = make_cve_stub(tmp_path)
+
+    result = run_safe_upgrade(
+        ["--min-age", "30"],
+        env_extra={"DEPENDENCY_SECURITY_CHECK": str(stub)},
+        input_text="n\n",
+    )
+    assert "[HOLD-DEP] libfoo 1.2.3 -- age could not be verified" in result.stdout
+    assert "[ok-dep] libfoo" not in result.stdout
 
 
 def test_warning_splits_vuln_and_hold_into_separate_sections(mock_env, tmp_path):
@@ -427,6 +536,100 @@ def test_yes_flag_continues_past_vuln_dep_with_stderr_warning(mock_env, tmp_path
 
     # The script reached the final "Done." line — i.e. upgrade was attempted.
     assert "Done." in result.stdout
+
+
+# ----------------------- single-package upgrade (#61) -----------------------
+
+
+def test_single_package_upgrade_restricts_to_named(mock_env, tmp_path):
+    """`brew safe-upgrade wget` must process only wget, not every outdated package."""
+    write_outdated(
+        mock_env,
+        [
+            {"name": "wget", "installed_versions": ["1.24"], "current_version": "1.25"},
+            {"name": "curl", "installed_versions": ["8.0"], "current_version": "8.1"},
+        ],
+    )
+    write_formula_info(mock_env, "wget", "1.25")
+    write_formula_info(mock_env, "curl", "8.1")
+    stub = make_cve_stub(tmp_path)
+
+    result = run_safe_upgrade(
+        ["wget", "--no-deps"],
+        env_extra={"DEPENDENCY_SECURITY_CHECK": str(stub)},
+        input_text="n\n",
+    )
+    assert "Found 1 outdated package(s)" in result.stdout
+    assert "wget" in result.stdout
+    # curl was outdated but not named — it must not appear anywhere in the run.
+    assert "curl" not in result.stdout
+
+
+def test_single_package_not_outdated_is_reported(mock_env, tmp_path):
+    """A named package that isn't outdated is reported clearly, not silently ignored."""
+    write_outdated(
+        mock_env,
+        [{"name": "wget", "installed_versions": ["1.24"], "current_version": "1.25"}],
+    )
+    write_formula_info(mock_env, "wget", "1.25")
+    stub = make_cve_stub(tmp_path)
+
+    result = run_safe_upgrade(
+        ["curl", "--no-deps"],
+        env_extra={"DEPENDENCY_SECURITY_CHECK": str(stub)},
+        input_text="n\n",
+    )
+    assert "curl — not outdated" in result.stdout
+    assert "Nothing to upgrade for: curl" in result.stdout
+
+
+def test_single_package_matches_tap_basename(mock_env, tmp_path):
+    """`brew safe-upgrade safe-fetch` matches the full tap name sharkyger/tap/safe-fetch."""
+    write_outdated(
+        mock_env,
+        [
+            {
+                "name": "sharkyger/tap/safe-fetch",
+                "installed_versions": ["0.2"],
+                "current_version": "0.3",
+            },
+            {"name": "wget", "installed_versions": ["1.24"], "current_version": "1.25"},
+        ],
+    )
+    write_formula_info(mock_env, "sharkyger/tap/safe-fetch", "0.3")
+    write_formula_info(mock_env, "wget", "1.25")
+    stub = make_cve_stub(tmp_path)
+
+    result = run_safe_upgrade(
+        ["safe-fetch", "--no-deps", "--no-verify-sha"],
+        env_extra={"DEPENDENCY_SECURITY_CHECK": str(stub)},
+        input_text="n\n",
+    )
+    assert "Found 1 outdated package(s)" in result.stdout
+    assert "safe-fetch" in result.stdout
+    assert "wget" not in result.stdout
+
+
+# ----------------------- dep-scan progress (#60) -----------------------
+
+
+def test_dep_scan_shows_per_dependency_progress(mock_env, tmp_path):
+    """The transitive-dep scan announces each dep (with an i/N counter) before its
+    slow network checks, so a multi-minute scan isn't a silent wait."""
+    write_formula_info(mock_env, "wget", "1.25.0")
+    write_formula_info(mock_env, "libfoo", "1.0")
+    write_formula_info(mock_env, "libbar", "2.0")
+    write_deps(mock_env, "wget", ["libfoo", "libbar"])
+    stub = make_cve_stub(tmp_path)
+
+    result = run_safe_install(
+        ["wget"],
+        env_extra={"DEPENDENCY_SECURITY_CHECK": str(stub)},
+        input_text="n\n",
+    )
+    assert "Found 2 incoming dependency version(s) to check" in result.stdout
+    assert "[1/2] checking" in result.stdout
+    assert "[2/2] checking" in result.stdout
 
 
 # ----------------------- helpers -----------------------

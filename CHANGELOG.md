@@ -8,6 +8,16 @@ The project is pre-1.0; expect minor breaking changes between 0.x releases until
 
 ## [Unreleased]
 
+## [0.2.3] — 2026-06-08
+
+### Fixed
+- **Freshness hold (`--min-age`) now covers casks, tap formulae, and `lib*` formulae, and fails closed** ([#62](https://github.com/sharkyger/homebrew-safe-upgrade/issues/62)). The age check previously looked every package up at `Homebrew/homebrew-core` `Formula/<first-letter>/<name>.rb`. Three classes of package had no release date to compare against and were reported as "age unknown, skipping age check": **casks** (which live in `homebrew-cask`), **tap formulae** (which live in their own tap repo), and **`lib*` formulae** (which homebrew-core shards under `Formula/lib/`, not `Formula/l/` — e.g. `libgit2`, `libheif`, `libusb`). The lookup is now **routed to the correct repo and path** per package: `homebrew-core` (with the `lib/` shard handled) for core formulae, `homebrew-cask` `Casks/<l>/<token>.rb` for casks, and `<user>/homebrew-<tap>` for tap formulae. When a release age **cannot be verified** (home repo unreachable, rate-limited, or a non-standard tap layout), the package is now **held** rather than allowed — the freshness hold is fail-closed, consistent with the rest of the tool. The same routing + fail-closed policy applies to the transitive-dependency age check in both `brew-safe-upgrade` and `brew-safe-install`. The known-too-fresh CVE-aware bypass (skip the hold when the *installed* version has CVEs) is unchanged. Covered by `tests/test_age_check.py` and additions to `tests/test_brew_safe_deps.py`, with a new deterministic `MOCK_COMMITS_API_DIR` test seam.
+
+### Added
+- **`--allow-unknown-age`** on `brew safe-upgrade` and `brew safe-install` — permit packages whose release age cannot be verified (default: such packages are held).
+- **Single-package `brew safe-upgrade <name> [<name> …]`** ([#61](https://github.com/sharkyger/homebrew-safe-upgrade/issues/61)). Positional package names restrict the run to just those outdated packages instead of everything `brew outdated` reports (matches the full name or its basename, so `safe-upgrade safe-fetch` matches `sharkyger/tap/safe-fetch`). A named package that isn't outdated is reported, not silently ignored.
+- **Per-dependency progress in the transitive-dependency scan** ([#60](https://github.com/sharkyger/homebrew-safe-upgrade/issues/60)). Each incoming dependency is now announced with an `[i/N] checking <dep> <version>…` line before its (network-bound) age and CVE checks, so a large scan shows live progress instead of a multi-minute silent wait. Applies to both `brew safe-upgrade` and `brew safe-install`.
+
 ## [0.2.2] — 2026-06-06
 
 ### Fixed

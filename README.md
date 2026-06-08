@@ -79,6 +79,17 @@ Upgrade clean packages only? The blocked ones will be skipped.
 Proceed? [y/N]
 ```
 
+### Upgrading specific packages
+
+Pass one or more package names to restrict the run to just those, instead of every outdated package:
+
+```bash
+brew safe-upgrade gh                 # only gh
+brew safe-upgrade gh imagemagick     # only these two
+```
+
+Names match the full name or its basename, so `brew safe-upgrade safe-fetch` matches a tapped `sharkyger/tap/safe-fetch`. A named package that isn't outdated is reported, not silently ignored.
+
 ### Auto-approve mode
 
 For CI or scripted use:
@@ -143,28 +154,30 @@ The flag is per-invocation by design — the safe default always returns the nex
 
 > **Note on big upgrade batches.** `brew safe-upgrade` deduplicates incoming deps across the batch, but a large run with many unique deps can still hit NIST NVD's anonymous rate limit (5 requests / 30 seconds). When that happens you'll see `[skip-dep]` lines in the output — those deps were not vetted. Re-run the upgrade later, or pass `--no-deps` if you've vetted upstream another way.
 
-### Minimum-age check (on by default, 3 days)
+### Minimum-age / freshness check (on by default, 3 days)
 
-Hold back formulae published less than N days ago. Protects against supply chain attacks where a compromised version is published minutes after credential theft — before any CVE database knows about it. Worm-class npm compromises (Shai-Hulud, Mini Shai-Hulud) have repeatedly shown live windows of 1–6 hours between malicious publish and registry takedown; a multi-day freshness hold trades a small lag against the entire attack window.
+Hold back **formulae, casks, and tap formulae** published less than N days ago. Protects against supply chain attacks where a compromised version is published minutes after credential theft — before any CVE database knows about it. Worm-class npm compromises (Shai-Hulud, Mini Shai-Hulud) have repeatedly shown live windows of 1–6 hours between malicious publish and registry takedown; a multi-day freshness hold trades a small lag against the entire attack window.
 
-```
-brew safe-upgrade            # uses default --min-age 3
+The release age is read from each package's home repo — `homebrew-core` for core formulae, `homebrew-cask` for casks, and the tap's own repo for tap formulae.
+
+```bash
+brew safe-upgrade             # uses default --min-age 3
 brew safe-upgrade --min-age 7 # stricter
 ```
 
-```
+```text
 Checking package age (min-age: 3 days)...
 
-  [ok] gh 2.91.0 — released 12 day(s) ago (2026-04-12)
-  [ok] imagemagick 7.1.2-21 — released 8 day(s) ago (2026-04-16)
+  [ok]   gh 2.91.0 — released 12 day(s) ago (2026-04-12)
   [HOLD] some-pkg 2.0.0 — released 1 day(s) ago (2026-04-23), min-age: 3 days
+  [HOLD] some-cask 5.0 — age could not be verified (min-age: 3 days); re-run with --allow-unknown-age to override
 ```
 
-**CVE-aware bypass:** If your *installed* version has known CVEs, the age check is skipped — the fresh version is likely the fix, and holding it back would leave you exposed. This means `--min-age` never prevents security patches from reaching you.
+**Fail closed.** If the release age cannot be verified — the home repo is unreachable, GitHub is rate-limiting, or a tap uses a non-standard layout — the package is **held**, never waved through. This is deliberate: a freshness hold that silently no-ops the moment it can't reach the registry would be worthless exactly when an attacker can induce that condition. Pass `--allow-unknown-age` to permit unverifiable-age packages when you accept that risk.
 
-**Casks are not age-gated.** Vendor-shipped binaries change on the vendor's release schedule, and brew enforces the cask-file SHA256 on every install — the *integrity* threat model is already covered there. The freshness hold applies to formulae only.
+**CVE-aware bypass:** If your *installed* version has known CVEs, the freshness hold on a too-fresh upgrade is skipped — the fresh version is likely the fix, and holding it back would leave you exposed. So `--min-age` never prevents security patches from reaching you.
 
-Use `--min-age 0` to disable.
+Use `--min-age 0` to disable the freshness hold entirely.
 
 ### Cask CVE coverage (honest limits)
 
@@ -173,7 +186,7 @@ Casks **are** checked against NVD for known CVEs, but the coverage is uneven and
 - The scanner ships with a curated map (`cask_nvd_map.py`) of ~55 common cask slugs → canonical product names. Keywords are sourced from Homebrew's own cask metadata (`formulae.brew.sh/api/cask/<token>.json` → `name[0]`), with a small set of documented overrides where brew's name is bad for NVD search (verbose vendor prefixes, edition suffixes, or names shorter than the scanner's 4-character minimum).
 - **Mapped casks** get accurate hits — covering the browser/IDE/communication tools most people install.
 - **Unmapped casks** fall back to a naive lookup using the cask slug, which rarely matches NVD descriptions. They will usually show as clean even when CVEs exist.
-- **No min-age, no SHA-tampering check** for casks (see above on the integrity side).
+- **No SHA-tampering check** for casks (brew enforces the cask-file SHA256 itself — see the integrity side above). Casks **are** freshness-gated by `--min-age` as of v0.2.3.
 
 To extend the map for a cask you rely on: pick the cask token, look up its `name[0]` via the brew API, and add one line to `cask_nvd_map.py`. The validator enforces a 4-character minimum so the scanner doesn't silently skip the NVD query.
 
@@ -236,11 +249,12 @@ Install wget imagemagick? [Y/n]
 ```
 
 
-Supports the same `--min-age`, `--no-verify-sha`, and `--no-deps` flags:
+Supports the same `--min-age`, `--allow-unknown-age`, `--no-verify-sha`, and `--no-deps` flags:
 
-```
+```bash
 brew safe-install wget curl               # default --min-age 3, SHA verify on
 brew safe-install --min-age 7 wget curl   # stricter
+brew safe-install --allow-unknown-age foo # permit a pkg whose release age can't be verified
 brew safe-install --no-verify-sha wget    # skip SHA check (e.g. on slow networks)
 brew safe-install --no-deps wget          # skip transitive dep check
 ```
