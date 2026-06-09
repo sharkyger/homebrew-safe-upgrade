@@ -8,6 +8,14 @@ The project is pre-1.0; expect minor breaking changes between 0.x releases until
 
 ## [Unreleased]
 
+## [0.2.4] — 2026-06-09
+
+### Changed
+- **Hardened the script installer (`install.sh`) against supply-chain tampering.** The installer now pulls its files from a **pinned, immutable release tag** instead of the moving `main` branch, so a `curl … | bash` run always gets exactly one published release. It downloads every file into a staging area and **verifies each one against a published `SHA256SUMS` manifest before installing anything** — a truncated download, a tampered/MITM'd file, or a missing file aborts the whole install with no partial state. The file list is now driven by the manifest itself (one source of truth, shared with the `scripts/gen-sha256sums.sh` generator). The Homebrew tap route was already immutable and is unaffected. Covered by a new hermetic end-to-end smoke (`tests/smoke_install.sh`) that runs the real installer over a local server in CI on both Linux (bash 5) and macOS (bash 3.2) — the script-install route is now exercised in CI for the first time.
+
+### Fixed
+- **Single-source version.** `pyproject.toml`'s version had drifted behind the `VERSION` file (the release bump only touched `VERSION`). The two are now realigned and a CI-enforced test keeps them in lockstep, alongside a check that the installer's pinned tag tracks `VERSION`.
+
 ## [0.2.3] — 2026-06-08
 
 ### Fixed

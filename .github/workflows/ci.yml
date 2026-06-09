@@ -22,11 +22,14 @@ jobs:
       - run: pip install -r requirements-dev.txt
       - run: ruff check .
       - run: ruff format --check .
+      - name: SHA256SUMS manifest is in sync
+        run: scripts/gen-sha256sums.sh --check
       - name: ShellCheck
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq shellcheck
-          shellcheck brew-safe-upgrade brew-safe-install brew-safe-update install.sh
+          shellcheck brew-safe-upgrade brew-safe-install brew-safe-update install.sh \
+            scripts/gen-sha256sums.sh tests/smoke_install.sh
 
   test:
     name: Tests (Python ${{ matrix.python-version }})
@@ -43,6 +46,27 @@ jobs:
           cache: pip
       - run: pip install -r requirements-dev.txt
       - run: pytest
+
+  install-smoke:
+    # Exercise the real script installer (install.sh) end-to-end, hermetically:
+    # files are served from a local HTTP server into a throwaway prefix — no brew,
+    # no network. Covers the happy path (all files verify, atomic install) and the
+    # fail-closed path (a tampered file aborts with no partial install). Runs on
+    # ubuntu (bash 5) and macOS (bash 3.2) so both shells are covered — the script
+    # route was previously never exercised in CI, which once masked a shipped bug.
+    name: install.sh smoke (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: "3.13"
+      - name: Hermetic install.sh smoke (happy + fail-closed)
+        run: tests/smoke_install.sh
 
   macos-install-smoke:
     # Real script-route install-and-run on macOS. The earlier formula self-test
