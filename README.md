@@ -370,6 +370,14 @@ curl -fsSL https://raw.githubusercontent.com/sharkyger/homebrew-safe-upgrade/mai
 
 This places all files in your Homebrew bin directory (`/opt/homebrew/bin/` on Apple Silicon, `/usr/local/bin/` on Intel). Homebrew automatically adds external commands prefixed with `brew-` as subcommands.
 
+The installer is supply-chain hardened: it pulls the files from a **pinned, immutable
+release tag** (never a moving branch), downloads them to a staging area, and
+**verifies every file against a published `SHA256SUMS` manifest before installing
+anything**. A truncated download, a tampered file, or a missing file aborts the
+whole install — there is no partial state. (The manifest and files travel the same
+TLS channel, so the checksums are defense-in-depth on top of HTTPS, not a
+replacement for it; the tap route above remains the strongest path.)
+
 ### Manual install
 
 ```bash

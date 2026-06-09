@@ -70,3 +70,41 @@ install-and-run was never verified — exactly where the bug lived.
 **Rule:** before publish, run the actual install-and-run on the actual target
 platforms/routes. Container/Linux checks do not substitute for the macOS routes
 users run.
+
+## 6. The installer was the weakest link — pin + verify the supply chain — v0.2.4
+
+For a tool whose entire job is gating supply-chain risk, the script installer
+itself was the soft spot: `install.sh` fetched every file from the **moving
+`main` branch** with **no integrity check**, so a `curl … | bash` user got
+whatever was on `main` at that instant, and a corrupted/MITM'd/CDN-tampered file
+was installed silently.
+
+**Fix (v0.2.4):** pin downloads to an **immutable release tag**, drive the file
+list from a published **`SHA256SUMS` manifest**, stage every file and **verify all
+before installing any** (atomic + fail-closed, like the updater in lesson 1). And
+— closing the same gap as lessons 3 and 5, now for `install.sh` — a **hermetic
+end-to-end smoke** (`tests/smoke_install.sh`) runs the real installer over a local
+server in CI on Linux *and* macOS (bash 3.2), so the script route is finally
+exercised, not assumed. Guards: `tests/test_install_manifest.py`,
+`tests/test_distribution_manifest.py`.
+
+**Honest trust model:** manifest and files travel the same TLS channel, so the
+checksums are defense-in-depth (transfer integrity + tag immutability) on top of
+HTTPS, not a substitute for it. The brew-formula route remains the strongest path.
+
+**Open follow-up (tracked in `.codereview/`):** the self-updater
+`brew-safe-update` still fetches from `main` with no checksum verification. It
+should adopt the same pin-to-tag + `SHA256SUMS` verification so both curl-fetch
+routes share one hardened path. Deferred from v0.2.4 to keep the load-bearing
+updater untouched right before release.
+
+## 7. Two version sources drift unless something ties them — v0.2.4
+
+`pyproject.toml`'s `version` silently lagged at `0.2.2` while the `VERSION` file
+(the tool's single runtime source) was already `0.2.3`, because the release bump
+only ever touched `VERSION`. Nothing compared them, so the drift was invisible.
+
+**Rule:** if a version must live in two places, a CI test ties them together. The
+release bump now updates both, and `test_install_manifest.py` fails the build if
+`pyproject` ≠ `VERSION`, or if the installer's pinned tag ≠ `VERSION`. A second
+source with no cross-check is a drift waiting to happen.
