@@ -81,19 +81,34 @@ verify_checksums() {
 }
 
 # --- staged, verified download ----------------------------------------------
-STAGING="$(mktemp -d)"
+# Stage ON THE SAME FILESYSTEM as the install dir, so the final swap is an atomic
+# rename per file (no cross-device copy that could half-write on ENOSPC). The
+# install dir was just confirmed writable.
+STAGING="$(mktemp -d "${INSTALL_DIR}/.safe-upgrade-install.XXXXXX")"
 cleanup() { rm -rf "$STAGING"; }
 trap cleanup EXIT
 
 # 1. Pull the manifest first — it is the authoritative list of release files.
 fetch "$REPO_RAW/SHA256SUMS" "$STAGING/SHA256SUMS"
 
-# 2. Download exactly the files the manifest names, into staging.
+# 2. Completeness floor: a truncated/incomplete manifest must NEVER yield a
+#    partial install reported as success (the lesson from the helper-strand
+#    incident). The installer's whole purpose is the brew-safe-* commands, so
+#    require every one of them to be present in the manifest before trusting it.
+for exe in "${EXECUTABLES[@]}"; do
+    if ! grep -q -- " ${exe}\$" "$STAGING/SHA256SUMS"; then
+        echo "Error: release manifest is missing '${exe}' — incomplete/corrupt, aborting." >&2
+        exit 1
+    fi
+done
+
+# 3. Download exactly the files the manifest names, into staging.
 while read -r _ filename; do
     [ -n "$filename" ] || continue
-    # Guard against a tampered manifest smuggling a path — basenames only.
+    # Guard against a tampered manifest smuggling a path or an option-like name —
+    # basenames only, no leading dash.
     case "$filename" in
-        */* | .* | "" )
+        -* | */* | .* | "")
             echo "Error: refusing suspicious filename in manifest: '$filename'" >&2
             exit 1
             ;;
@@ -101,13 +116,13 @@ while read -r _ filename; do
     fetch "$REPO_RAW/$filename" "$STAGING/$filename"
 done < "$STAGING/SHA256SUMS"
 
-# 3. Verify everything BEFORE touching the install dir. Fail-closed.
+# 4. Verify everything BEFORE touching the install dir. Fail-closed.
 if ! ( cd "$STAGING" && verify_checksums ); then
     echo "Error: checksum verification failed — aborting, nothing was installed." >&2
     exit 1
 fi
 
-# 4. All files verified — swap them into place.
+# 5. All files verified — swap them into place (same-filesystem atomic rename).
 while read -r _ filename; do
     [ -n "$filename" ] || continue
     mv "$STAGING/$filename" "$INSTALL_DIR/$filename"
