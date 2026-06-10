@@ -92,11 +92,14 @@ exercised, not assumed. Guards: `tests/test_install_manifest.py`,
 checksums are defense-in-depth (transfer integrity + tag immutability) on top of
 HTTPS, not a substitute for it. The brew-formula route remains the strongest path.
 
-**Open follow-up (tracked in `.codereview/`):** the self-updater
-`brew-safe-update` still fetches from `main` with no checksum verification. It
-should adopt the same pin-to-tag + `SHA256SUMS` verification so both curl-fetch
-routes share one hardened path. Deferred from v0.2.4 to keep the load-bearing
-updater untouched right before release.
+**Follow-up — done (v0.2.5):** the self-updater `brew-safe-update` now uses the
+same hardened path — it resolves the **latest published release tag** (never a
+moving branch), fetches that release's **`SHA256SUMS`**, and **verifies every
+staged file** (including the freshly-fetched updater it re-execs, before handing
+it control) before the atomic, fail-closed swap. Both curl-fetch routes
+(`install.sh` and `brew-safe-update`) now share one pin-and-verify discipline.
+Guard: `tests/test_brew_safe_update.py` (tampered file → abort, install
+untouched; truncated manifest → abort).
 
 ## 7. Two version sources drift unless something ties them — v0.2.4
 

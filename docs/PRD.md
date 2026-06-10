@@ -46,6 +46,7 @@ Security-first wrappers for `brew install` and `brew upgrade`. Every outdated pa
 ## Retirement / self-archive criteria
 
 Retired when Homebrew ships **either**:
+
 1. Native pre-install vulnerability gating that covers the same multi-source query + transitive dep scan + freshness hold, OR
 2. A formal plugin API that lets a community tool register as a true pre-install gate (rather than relying on the wrapper-CLI pattern).
 

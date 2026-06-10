@@ -23,6 +23,7 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+from typing import Any
 
 # Build SSL context — use certifi bundle if available (needed on macOS)
 try:
@@ -267,7 +268,7 @@ def version_in_range(version, range_str):
 
 def query_osv(package_name, ecosystem, version=None):
     """Query OSV.dev — supports native version filtering."""
-    findings = []
+    findings: list[dict[str, Any]] = []
     osv_ecosystem = ECOSYSTEM_MAP["osv"].get(ecosystem)
     if not osv_ecosystem:
         return findings
@@ -320,7 +321,7 @@ def query_osv(package_name, ecosystem, version=None):
 
 def query_github(package_name, ecosystem, version=None):
     """Query GitHub Advisory Database — filter by affected version range."""
-    findings = []
+    findings: list[dict[str, Any]] = []
     gh_ecosystem = ECOSYSTEM_MAP["github"].get(ecosystem)
     if not gh_ecosystem:
         return findings
@@ -399,7 +400,7 @@ def query_nvd(package_name, ecosystem, version=None):
     canonical product name; the description-matching filter accepts that
     keyword too.
     """
-    findings = []
+    findings: list[dict[str, Any]] = []
 
     # Cask-aware search-keyword substitution.
     # `search_name` is what NVD's keyword search sees; `match_terms` is the

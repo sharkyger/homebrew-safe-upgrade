@@ -140,7 +140,8 @@ def write_outdated(fixture_dir: Path, formulae: list[dict]):
 
 
 def test_usage_text_mentions_no_deps_flag():
-    """--no-deps must be advertised in usage output."""
+    """--no-deps must be advertised in usage output. With no package given,
+    brew-safe-install prints help to stderr and exits 2 (usage error)."""
     result = subprocess.run(
         ["bash", str(SAFE_INSTALL)],
         capture_output=True,
@@ -148,8 +149,9 @@ def test_usage_text_mentions_no_deps_flag():
         timeout=10,
         check=False,
     )
-    assert "--no-deps" in result.stdout
-    assert "BREW_SAFE_NO_DEPS" in result.stdout
+    assert result.returncode == 2
+    assert "--no-deps" in result.stderr
+    assert "BREW_SAFE_NO_DEPS" in result.stderr
 
 
 def test_safe_upgrade_help_header_mentions_no_deps():
