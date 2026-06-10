@@ -11,7 +11,11 @@ permissions:
 
 jobs:
   lint:
-    name: Lint (ruff + mypy + shellcheck + shfmt + markdownlint)
+    # NOTE: the job name is the branch-protection required-check context — keep it
+    # exactly "Lint (ruff + shellcheck)" so the required check keeps matching. The
+    # job also runs mypy, shfmt, and markdownlint (added in v0.2.5); renaming it
+    # would orphan the required check and block every PR.
+    name: Lint (ruff + shellcheck)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
