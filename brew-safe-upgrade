@@ -4,12 +4,14 @@
 # Queries 3 databases: OSV.dev, GitHub Advisory, NIST NVD.
 #
 # Usage: brew safe-upgrade [--yes|-y] [--min-age N] [--allow-unknown-age]
-#                          [--no-verify-sha] [--no-deps] [--version] [package ...]
+#                          [--no-verify-sha] [--no-deps] [--version] [-h|--help]
+#                          [package ...]
 #        [package ...]  Restrict the run to the named outdated package(s) instead
 #                       of every outdated package (matches name or basename).
 #        --allow-unknown-age  Permit packages whose release age cannot be verified
 #                             (default: such packages are HELD — fail closed)
 #        --version  Print version, install route, and helper-file status (self-diagnosis)
+#        -h, --help Show usage (flag listing + description) and exit
 #
 # Environment:
 #        BREW_SAFE_NO_DEPS=1     Same as --no-deps (handy for CI / aliases)
@@ -53,8 +55,8 @@ SAFE_UPGRADE_VERSION="$(cat "$SCRIPT_DIR/VERSION" 2>/dev/null || echo "unknown")
 print_version() {
     echo "brew-safe-upgrade $SAFE_UPGRADE_VERSION"
     case "$SCRIPT_DIR" in
-        */libexec|*/libexec/*|*/Cellar/*) echo "install route: Homebrew formula ($SCRIPT_DIR)" ;;
-        *)                                echo "install route: script ($SCRIPT_DIR)" ;;
+        */libexec | */libexec/* | */Cellar/*) echo "install route: Homebrew formula ($SCRIPT_DIR)" ;;
+        *) echo "install route: script ($SCRIPT_DIR)" ;;
     esac
     local missing=""
     for h in dependency_security_check.py bottle_resolver.py cask_nvd_map.py; do
@@ -76,8 +78,50 @@ print_version() {
         echo "  keep one route (formula OR script); see README 'Install'."
     fi
 }
+
+# --help. Handled alongside --version, BEFORE the helper guards, so `--help`
+# answers even when a helper file is missing (issue #66).
+print_help() {
+    cat <<'EOF'
+brew safe-upgrade — security-first `brew upgrade`
+
+Checks every outdated package (and its incoming dependencies) against OSV.dev,
+the GitHub Advisory Database, and NIST NVD before upgrading. Fail-closed.
+
+Usage: brew safe-upgrade [options] [package ...]
+
+  [package ...]          Restrict the run to the named outdated package(s)
+                         instead of every outdated package.
+
+Options:
+  -y, --yes              Auto-approve the upgrade (non-interactive).
+  --min-age N            Hold packages published less than N days ago
+                         (default: 3; --min-age 0 disables the freshness hold).
+  --allow-unknown-age    Permit packages whose release age cannot be verified
+                         (default: such packages are HELD — fail closed).
+  --no-verify-sha        Skip bottle SHA verification (default: ON).
+  --no-deps              Skip transitive dependency checking (default: check).
+  --version              Print version, install route, and helper-file status.
+  -h, --help             Show this help and exit.
+
+Environment:
+  BREW_SAFE_NO_DEPS=1    Same as --no-deps.
+
+Examples:
+  brew safe-upgrade                  # check & upgrade everything outdated
+  brew safe-upgrade openssl@3 curl   # restrict to these packages
+  brew safe-upgrade --yes            # no confirmation prompt
+EOF
+}
 case " $* " in
-    *" --version "*) print_version; exit 0 ;;
+    *" --help "* | *" -h "*)
+        print_help
+        exit 0
+        ;;
+    *" --version "*)
+        print_version
+        exit 0
+        ;;
 esac
 
 # Fail closed: a missing resolver would make every SHA read empty -> the bottle
@@ -90,25 +134,50 @@ if [ ! -f "$BOTTLE_RESOLVER" ]; then
 fi
 
 AUTO_YES=false
-MIN_AGE=3          # 3-day freshness hold; --min-age 0 to disable.
-ALLOW_UNKNOWN_AGE=false  # Fail closed: hold packages whose age can't be verified.
-VERIFY_SHA=true    # Default-on as of v0.2.0 — opt out with --no-verify-sha.
+MIN_AGE=3               # 3-day freshness hold; --min-age 0 to disable.
+ALLOW_UNKNOWN_AGE=false # Fail closed: hold packages whose age can't be verified.
+VERIFY_SHA=true         # Default-on as of v0.2.0 — opt out with --no-verify-sha.
 CHECK_DEPS=true
-TARGET_PKGS=""     # Positional package names (#61): restrict the run to these.
+TARGET_PKGS="" # Positional package names (#61): restrict the run to these.
 case "${BREW_SAFE_NO_DEPS:-}" in
-    1|true|TRUE|yes|YES) CHECK_DEPS=false ;;
+    1 | true | TRUE | yes | YES) CHECK_DEPS=false ;;
 esac
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --yes|-y)            AUTO_YES=true; shift ;;
-        --min-age)           MIN_AGE="${2:-0}"; shift 2 ;;
-        --allow-unknown-age) ALLOW_UNKNOWN_AGE=true; shift ;;
-        --verify-sha)    shift ;;  # Accepted for back-compat — verification is now on by default.
-        --no-verify-sha) VERIFY_SHA=false; shift ;;
-        --no-deps)       CHECK_DEPS=false; shift ;;
-        -*)              shift ;;  # Unknown flags: ignore (forward-compat).
-        *)               TARGET_PKGS="$TARGET_PKGS $1"; shift ;;
+        --yes | -y)
+            AUTO_YES=true
+            shift
+            ;;
+        --min-age)
+            # Require an explicit value: a bare `--min-age` (no arg) would
+            # otherwise `shift 2` past the end, never consume the flag, and loop
+            # forever. Reject a missing or flag-like value up front.
+            if [[ -z "${2:-}" || "$2" == -* ]]; then
+                echo "Error: --min-age requires a numeric argument (days)" >&2
+                exit 2
+            fi
+            MIN_AGE="$2"
+            shift 2
+            ;;
+        --allow-unknown-age)
+            ALLOW_UNKNOWN_AGE=true
+            shift
+            ;;
+        --verify-sha) shift ;; # Accepted for back-compat — verification is now on by default.
+        --no-verify-sha)
+            VERIFY_SHA=false
+            shift
+            ;;
+        --no-deps)
+            CHECK_DEPS=false
+            shift
+            ;;
+        -*) shift ;; # Unknown flags: ignore (forward-compat).
+        *)
+            TARGET_PKGS="$TARGET_PKGS $1"
+            shift
+            ;;
     esac
 done
 
@@ -135,7 +204,8 @@ fetch_pkg_age() {
             # user/tap/name -> repo <user>/homebrew-<tap>, canonical Formula/<name>.rb layout.
             # Non-standard tap layouts resolve to [] -> unknown -> held (fail closed).
             user="${name%%/*}"
-            tap="${name#*/}"; tap="${tap%%/*}"
+            tap="${name#*/}"
+            tap="${tap%%/*}"
             token="${name##*/}"
             url="https://api.github.com/repos/${user}/homebrew-${tap}/commits?path=Formula/${token}.rb&per_page=1"
             ;;
@@ -146,13 +216,13 @@ fetch_pkg_age() {
             # fail-open this fixes (see issue #62: libgit2, libheif, libusb, …).
             case "$name" in
                 lib*) first="lib" ;;
-                *)    first=$(printf '%s' "$name" | cut -c1) ;;
+                *) first=$(printf '%s' "$name" | cut -c1) ;;
             esac
             url="https://api.github.com/repos/Homebrew/homebrew-core/commits?path=Formula/${first}/${name}.rb&per_page=1"
             ;;
     esac
 
-    [ -n "${MOCK_COMMITS_API_LOG:-}" ] && printf '%s\t%s\n' "$ptype" "$url" >> "$MOCK_COMMITS_API_LOG"
+    [ -n "${MOCK_COMMITS_API_LOG:-}" ] && printf '%s\t%s\n' "$ptype" "$url" >>"$MOCK_COMMITS_API_LOG"
 
     if [ -n "${MOCK_COMMITS_API_DIR:-}" ]; then
         key=$(printf '%s' "$name" | tr '/' '_')
@@ -182,8 +252,29 @@ except Exception:
 " 2>/dev/null
 }
 
+# `brew update` intermittently dumps a harmless Ruby backtrace from its own
+# description cache (DescriptionCacheStore) on stderr. It self-heals (a later
+# `brew update-reset` clears it) and does NOT affect the update — but dumping
+# brew internals mid-run looks alarming. filter_brew_update_noise drops exactly
+# those lines and passes everything else (real warnings/errors) straight through.
+# Pure (reads stdin, writes stdout) so it is unit-testable without invoking brew.
+filter_brew_update_noise() {
+    grep -viE 'DescriptionCacheStore|description_cache_store|[Cc]annot load (the )?descriptions? cache|\.rb:[0-9]+:in |^[[:space:]]*from .*\.rb:[0-9]+' || true
+}
+
+run_brew_update() {
+    local err rc
+    err="$(mktemp)"
+    brew update --quiet 2>"$err"
+    rc=$?
+    # Re-emit stderr minus the known-harmless description-cache backtrace.
+    filter_brew_update_noise <"$err" >&2
+    rm -f "$err"
+    return "$rc"
+}
+
 echo "Updating Homebrew..."
-brew update --quiet
+run_brew_update || true
 
 echo "Checking for outdated packages..."
 OUTDATED_JSON=$(brew outdated --json=v2 2>/dev/null || echo '{"formulae":[],"casks":[]}')
@@ -225,7 +316,7 @@ except Exception:
 # If package name(s) were given as positional args, restrict this run to just
 # those. Matches the full outdated name OR its basename, so
 # `brew safe-upgrade safe-fetch` matches `sharkyger/tap/safe-fetch`.
-TARGET_PKGS=$(echo "$TARGET_PKGS" | xargs)  # trim
+TARGET_PKGS=$(echo "$TARGET_PKGS" | xargs) # trim
 if [ -n "$TARGET_PKGS" ]; then
     _keep_targeted() {
         awk -v targets="$TARGET_PKGS" '
@@ -239,8 +330,8 @@ if [ -n "$TARGET_PKGS" ]; then
     # Note any named package that isn't actually outdated, so the user isn't left
     # wondering why it was a no-op.
     for _tp in $TARGET_PKGS; do
-        if ! printf '%s\n%s\n' "$OUTDATED_FORMULAE" "$OUTDATED_CASKS" \
-            | awk -v want="$_tp" 'NF { bn = $1; sub(/.*\//, "", bn); if ($1 == want || bn == want) f = 1 } END { exit !f }'; then
+        if ! printf '%s\n%s\n' "$OUTDATED_FORMULAE" "$OUTDATED_CASKS" |
+            awk -v want="$_tp" 'NF { bn = $1; sub(/.*\//, "", bn); if ($1 == want || bn == want) f = 1 } END { exit !f }'; then
             echo "  $_tp — not outdated (already up to date, or not an installed/known package)"
         fi
     done
@@ -350,7 +441,7 @@ if [ "$MIN_AGE" -gt 0 ] 2>/dev/null; then
                 HELD_COUNT=$((HELD_COUNT + 1))
             fi
         fi
-    done <<< "$OUTDATED"
+    done <<<"$OUTDATED"
 
     # Replace OUTDATED with filtered list (remove trailing newline)
     OUTDATED=$(echo "$FILTERED_OUTDATED" | sed '/^$/d')
@@ -505,7 +596,7 @@ except Exception:
         echo "  Fix: run 'brew safe-update' to re-fetch all helpers (or re-run install.sh)."
         exit 2
     fi
-done <<< "$OUTDATED"
+done <<<"$OUTDATED"
 
 # Build separate clean lists for formulae and casks. TAMPERED_PKGS is excluded
 # alongside BLOCKED_PKGS so brew never sees a tampered formula on its cmdline.
@@ -518,7 +609,7 @@ if [ -n "$OUTDATED_FORMULAE" ]; then
         if ! echo "$EXCLUDE_PKGS" | grep -qw "$name"; then
             CLEAN_PKGS_FORMULAE="$CLEAN_PKGS_FORMULAE $name"
         fi
-    done <<< "$OUTDATED_FORMULAE"
+    done <<<"$OUTDATED_FORMULAE"
 fi
 
 if [ -n "$OUTDATED_CASKS" ]; then
@@ -526,7 +617,7 @@ if [ -n "$OUTDATED_CASKS" ]; then
         if ! echo "$EXCLUDE_PKGS" | grep -qw "$name"; then
             CLEAN_PKGS_CASKS="$CLEAN_PKGS_CASKS $name"
         fi
-    done <<< "$OUTDATED_CASKS"
+    done <<<"$OUTDATED_CASKS"
 fi
 
 CLEAN_PKGS="${CLEAN_PKGS_FORMULAE}${CLEAN_PKGS_CASKS}"
@@ -685,7 +776,8 @@ except Exception:
                     AGE_DAYS=$(echo "$AGE_INFO" | awk '{print $1}')
                     PUB_DATE=$(echo "$AGE_INFO" | awk '{print $2}')
                 else
-                    AGE_DAYS=-1; PUB_DATE=unknown
+                    AGE_DAYS=-1
+                    PUB_DATE=unknown
                 fi
 
                 if [ "$AGE_DAYS" -ge 0 ] 2>/dev/null && [ "$AGE_DAYS" -lt "$MIN_AGE" ]; then

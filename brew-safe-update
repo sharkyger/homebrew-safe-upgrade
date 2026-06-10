@@ -2,20 +2,25 @@
 # brew-safe-update — updates the homebrew-safe-upgrade tools (scripts plus the
 # Python modules they depend on at runtime) to the latest version from GitHub.
 #
-# Two hardening guarantees (v0.2.2, after a helper-file strand recurred — see
-# LESSONS.md):
-#   1. Self-heal FIRST: update THIS updater and re-exec the fresh copy BEFORE the
-#      download loop, so the file list that actually runs is always the latest.
-#      An older installed updater therefore can't strand a newly-added file for a
-#      whole run (that once stranded bottle_resolver.py twice).
-#   2. Atomic + fail-closed: every declared file is fetched to a temp staging dir
-#      and validated; the install is swapped in only if ALL of them arrive intact.
-#      A partial or truncated fetch leaves the existing install UNTOUCHED and never
-#      prints "All tools updated" — so brew-safe-upgrade can't fail closed on a
-#      half-applied update.
+# Hardening guarantees:
+#   1. Self-heal FIRST (v0.2.2): update THIS updater and re-exec the fresh copy
+#      BEFORE the download loop, so the file list that actually runs is always the
+#      latest. An older installed updater therefore can't strand a newly-added
+#      file for a whole run (that once stranded bottle_resolver.py twice).
+#   2. Pinned + checksum-verified (v0.2.5): fetch from the latest published
+#      RELEASE tag — never a moving branch — and verify every file against that
+#      release's signed SHA256SUMS manifest before installing. This brings the
+#      self-updater to parity with install.sh's supply-chain hardening (the two
+#      curl-fetch routes are now consistent).
+#   3. Atomic + fail-closed: every declared file is fetched to a staging dir and
+#      verified; the install is swapped in only if ALL of them arrive AND match
+#      their checksums. A partial, truncated, or tampered fetch leaves the
+#      existing install UNTOUCHED and never prints "All tools updated" — so
+#      brew-safe-upgrade can't fail closed on a half-applied update.
 #
-# Usage: brew safe-update [--version]
+# Usage: brew safe-update [--version] [-h|--help]
 #        --version  Print version, install route, and helper-file status (self-diagnosis)
+#        -h, --help Show usage (flag listing + description) and exit
 
 set -uo pipefail
 
@@ -38,10 +43,39 @@ resolve_script_dir() {
 # BREW_SAFE_INSTALL_DIR is set when we re-exec ourselves from a temp copy, so the
 # re-executed process still targets the real install dir (not /tmp).
 INSTALL_DIR="${BREW_SAFE_INSTALL_DIR:-$(resolve_script_dir)}"
-REPO_URL="https://raw.githubusercontent.com/sharkyger/homebrew-safe-upgrade/main"
 SELF="$INSTALL_DIR/brew-safe-update"
 
-# fetch_file <name> <dest> — download a repo file to <dest> (or, for the test
+# --- release pinning ---------------------------------------------------------
+# The updater moves the install forward to the LATEST published *release* and
+# verifies every file against that release's signed SHA256SUMS — never a bare
+# branch fetch. SAFE_UPGRADE_REF pins an explicit ref (tests / manual pinning);
+# SAFE_UPGRADE_BASE_URL relocates the download origin for a hermetic test.
+# Production runs set neither. The MOCK_UPDATE_SOURCE_DIR seam bypasses the
+# network entirely (copies from a local dir) and so needs no ref.
+REPO_SLUG="sharkyger/homebrew-safe-upgrade"
+BASE_URL="${SAFE_UPGRADE_BASE_URL:-https://raw.githubusercontent.com/${REPO_SLUG}}"
+REF=""
+REPO_RAW=""
+
+# resolve_ref — set REF (a concrete tag) and REPO_RAW. Fail closed: if the latest
+# release tag cannot be resolved we do NOT fall back to a moving branch.
+resolve_ref() {
+    if [ -n "${SAFE_UPGRADE_REF:-}" ]; then
+        REF="$SAFE_UPGRADE_REF"
+    else
+        REF="$(curl -fsSL --max-time 10 "https://api.github.com/repos/${REPO_SLUG}/releases/latest" 2>/dev/null |
+            sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)"
+    fi
+    [ -n "$REF" ] || return 1
+    # Defense-in-depth: only let a sane ref into the download URL, whether it came
+    # from the API or a SAFE_UPGRADE_REF override (tag/branch chars only).
+    case "$REF" in
+        *[!A-Za-z0-9._/-]*) return 1 ;;
+    esac
+    REPO_RAW="${BASE_URL}/${REF}"
+}
+
+# fetch_file <name> <dest> — download a release file to <dest> (or, for the test
 # suite, copy it from MOCK_UPDATE_SOURCE_DIR). Returns 0 on success.
 fetch_file() {
     local name="$1" dest="$2"
@@ -49,21 +83,50 @@ fetch_file() {
         [ -f "$MOCK_UPDATE_SOURCE_DIR/$name" ] && cp "$MOCK_UPDATE_SOURCE_DIR/$name" "$dest"
         return
     fi
-    curl -fsSL -H "Cache-Control: no-cache" "$REPO_URL/$name?t=$(date +%s)" -o "$dest" 2>/dev/null
+    curl -fsSL --max-time 30 "$REPO_RAW/$name" -o "$dest" 2>/dev/null
 }
 
-# validate_file <path> — reject empty or obvious error-page content. `curl -f`
-# already fails the HTTP error itself (404 etc); this guards a 200 that returned
-# an HTML error or a "404: Not Found" body, so we never stage garbage over a good
-# file. (Deliberately lenient on the body shape: scripts and data modules differ,
-# and the self-update tests inject shebang-less stub payloads.)
+# validate_file <path> — cheap pre-check for a clearly bad download (empty / HTML
+# error page / raw 404 body) so we can give a friendly message before the
+# authoritative sha256 check. Lenient on body shape (scripts vs data modules).
 validate_file() {
     local f="$1" first
     [ -s "$f" ] || return 1
     first="$(head -c 1 "$f" 2>/dev/null)"
-    [ "$first" = "<" ] && return 1                  # HTML error page
-    head -n 1 "$f" | grep -qi '^404:' && return 1   # raw.githubusercontent 404 body
+    [ "$first" = "<" ] && return 1                # HTML error page
+    head -n 1 "$f" | grep -qi '^404:' && return 1 # raw.githubusercontent 404 body
     return 0
+}
+
+# sha256_of <path> — print the sha256 hex of a file (sha256sum or shasum).
+sha256_of() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    else
+        shasum -a 256 "$1" | awk '{print $1}'
+    fi
+}
+
+# verify_one <path> <name> <sumsfile> — verify a single staged file against its
+# line in the manifest. Non-zero if the name is absent or the hash mismatches.
+verify_one() {
+    local path="$1" name="$2" sums="$3" expected
+    expected="$(awk -v n="$name" '$2 == n {print $1}' "$sums")"
+    [ -n "$expected" ] || return 1
+    [ "$(sha256_of "$path")" = "$expected" ]
+}
+
+# verify_checksums — verify EVERY file listed in ./SHA256SUMS (cwd must be the
+# staging dir). Non-zero if any file is missing or its hash does not match.
+verify_checksums() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum -c SHA256SUMS
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 -c SHA256SUMS
+    else
+        echo "Error: no sha256sum/shasum available to verify the download" >&2
+        return 1
+    fi
 }
 
 # --version / self-diagnosis. Handled before any update work so it always answers,
@@ -72,8 +135,8 @@ SAFE_UPGRADE_VERSION="$(cat "$INSTALL_DIR/VERSION" 2>/dev/null || echo "unknown"
 print_version() {
     echo "brew-safe-update $SAFE_UPGRADE_VERSION"
     case "$INSTALL_DIR" in
-        */libexec|*/libexec/*|*/Cellar/*) echo "install route: Homebrew formula ($INSTALL_DIR)" ;;
-        *)                                echo "install route: script ($INSTALL_DIR)" ;;
+        */libexec | */libexec/* | */Cellar/*) echo "install route: Homebrew formula ($INSTALL_DIR)" ;;
+        *) echo "install route: script ($INSTALL_DIR)" ;;
     esac
     local missing=""
     for h in dependency_security_check.py bottle_resolver.py cask_nvd_map.py; do
@@ -85,8 +148,35 @@ print_version() {
         echo "helpers: all present"
     fi
 }
+
+# --help. Handled before any update work so it always answers (issue #66).
+print_help() {
+    cat <<'EOF'
+brew safe-update — update the homebrew-safe-upgrade tools (script-install route)
+
+Re-fetches the brew-safe-* commands and their helper modules from the latest
+published release, verifies every file against its signed SHA256SUMS manifest,
+and swaps them in atomically (all-or-nothing, fail-closed). The Homebrew formula
+route updates via `brew update && brew upgrade safe-upgrade` instead.
+
+Usage: brew safe-update [options]
+
+Options:
+  --version    Print version, install route, and helper-file status.
+  -h, --help   Show this help and exit.
+
+Run with sudo if your Homebrew bin is not writable by your user.
+EOF
+}
 case " $* " in
-    *" --version "*) print_version; exit 0 ;;
+    *" --help "* | *" -h "*)
+        print_help
+        exit 0
+        ;;
+    *" --version "*)
+        print_version
+        exit 0
+        ;;
 esac
 
 echo "Updating homebrew-safe-upgrade tools..."
@@ -99,56 +189,110 @@ if [ ! -w "$INSTALL_DIR" ]; then
     exit 1
 fi
 
-# Stage 1 — self-update FIRST, then re-exec the fresh copy ONCE. The fresh updater
-# carries the current file list, so any file added since the installed version
-# (e.g. bottle_resolver.py) is fetched in the SAME run. We exec a temp copy (never
-# overwrite a running script) and pass INSTALL_DIR through so the re-exec still
-# targets the real directory. The mktemp file is left for the OS to reap (an EXIT
-# trap won't fire across exec, and rm'ing it from the child would risk the script).
-if [ -z "${BREW_SAFE_UPDATE_REEXECED:-}" ]; then
-    FRESH="$(mktemp)"
-    if fetch_file "brew-safe-update" "$FRESH" && [ -s "$FRESH" ] && head -n 1 "$FRESH" | grep -q '^#!'; then
-        if ! cmp -s "$FRESH" "$SELF"; then
-            chmod +x "$FRESH"
-            echo "  [..] updater changed — applying it first, then re-running"
-            BREW_SAFE_UPDATE_REEXECED=1 BREW_SAFE_INSTALL_DIR="$INSTALL_DIR" exec bash "$FRESH" "$@"
-        fi
+# Resolve the pinned release ref up front (skipped in the local-copy test seam).
+if [ -z "${MOCK_UPDATE_SOURCE_DIR:-}" ]; then
+    if ! resolve_ref; then
+        echo "Error: could not resolve the latest release tag — aborting (fail-closed)."
+        echo "Nothing was modified. Check your network and retry 'brew safe-update'."
+        exit 1
     fi
-    rm -f "$FRESH"
+    echo "  updating to release ${REF}"
 fi
 
-# Stage 2 — atomic, fail-closed update. Fetch EVERY declared file into a staging
-# dir and validate it; only if ALL arrive do we swap them into place. Anything
-# missing aborts with the install untouched, so a half-update can never strand a
-# load-bearing helper (bottle_resolver.py / cask_nvd_map.py / the scanner).
-STAGING="$(mktemp -d)"
+# Stage 1 — self-update FIRST, then re-exec the fresh copy ONCE. The fresh updater
+# carries the current file list/logic, so any file added since the installed
+# version (e.g. bottle_resolver.py) is fetched in the SAME run. The fetched
+# updater is checksum-verified against the release manifest BEFORE we re-exec it
+# — we never hand control to an unverified script. We exec a temp copy (never
+# overwrite a running script) and pass INSTALL_DIR + the resolved REF through so
+# the re-exec targets the real dir and pins to the SAME release. The mktemp files
+# are left for the OS to reap (an EXIT trap won't fire across exec, and rm'ing
+# from the child would risk the running script).
+if [ -z "${BREW_SAFE_UPDATE_REEXECED:-}" ]; then
+    SUMS_TMP="$(mktemp)"
+    FRESH="$(mktemp)"
+    if fetch_file "SHA256SUMS" "$SUMS_TMP" && validate_file "$SUMS_TMP" &&
+        fetch_file "brew-safe-update" "$FRESH" &&
+        head -n 1 "$FRESH" | grep -q '^#!' &&
+        verify_one "$FRESH" "brew-safe-update" "$SUMS_TMP"; then
+        if ! cmp -s "$FRESH" "$SELF"; then
+            chmod +x "$FRESH"
+            echo "  [..] updater changed — applying the verified copy first, then re-running"
+            BREW_SAFE_UPDATE_REEXECED=1 BREW_SAFE_INSTALL_DIR="$INSTALL_DIR" \
+                SAFE_UPGRADE_REF="$REF" exec bash "$FRESH" "$@"
+        fi
+    fi
+    rm -f "$SUMS_TMP" "$FRESH"
+fi
+
+# Stage 2 — atomic, checksum-verified, fail-closed update. Fetch the manifest,
+# then EXACTLY the files it names into a staging dir, verify every hash, and only
+# then swap them into place. A truncated/tampered/missing file aborts with the
+# install UNTOUCHED, so a half-update can never strand a load-bearing helper
+# (bottle_resolver.py / cask_nvd_map.py / the scanner). Stage inside INSTALL_DIR
+# so the final swap is a same-filesystem atomic rename per file.
+STAGING="$(mktemp -d "${INSTALL_DIR}/.safe-update.XXXXXX")"
 trap 'rm -rf "$STAGING"' EXIT
 
-FAILED=0
-for file in brew-safe-upgrade brew-safe-install brew-safe-update dependency_security_check.py bottle_resolver.py cask_nvd_map.py VERSION; do
-    if fetch_file "$file" "$STAGING/$file" && validate_file "$STAGING/$file"; then
-        echo "  [ok] $file"
-    else
-        echo "  [err] $file — download/validate failed"
-        FAILED=$((FAILED + 1))
+if ! fetch_file "SHA256SUMS" "$STAGING/SHA256SUMS" || ! validate_file "$STAGING/SHA256SUMS"; then
+    echo "Error: could not fetch the release manifest (SHA256SUMS) — aborting (fail-closed)."
+    exit 1
+fi
+
+# Completeness floor: a truncated manifest must never yield a partial install
+# reported as success. Require the user-facing commands present before trusting
+# it (mirrors install.sh).
+for exe in brew-safe-upgrade brew-safe-install brew-safe-update; do
+    if ! grep -q -- " ${exe}\$" "$STAGING/SHA256SUMS"; then
+        echo "Error: release manifest is missing '${exe}' — incomplete/corrupt, aborting."
+        exit 1
     fi
 done
 
+FAILED=0
+while read -r _ filename; do
+    [ -n "$filename" ] || continue
+    # Guard a tampered manifest smuggling a path or option-like name.
+    case "$filename" in
+        -* | */* | .* | "")
+            echo "Error: refusing suspicious filename in manifest: '$filename'"
+            exit 1
+            ;;
+    esac
+    if fetch_file "$filename" "$STAGING/$filename" && validate_file "$STAGING/$filename"; then
+        echo "  [ok] $filename"
+    else
+        echo "  [err] $filename — download failed"
+        FAILED=$((FAILED + 1))
+    fi
+done <"$STAGING/SHA256SUMS"
+
 if [ "$FAILED" -ne 0 ]; then
     echo ""
-    echo "Error: $FAILED file(s) did not arrive intact — install left UNCHANGED (fail-closed)."
+    echo "Error: $FAILED file(s) did not arrive — install left UNCHANGED (fail-closed)."
     echo "Nothing was modified. Re-run 'brew safe-update'; if it persists, re-run install.sh."
     exit 1
 fi
 
-# All present & valid — swap in. `mv` within the same filesystem is an atomic
+# Authoritative integrity gate: every staged file must match the manifest.
+if ! (cd "$STAGING" && verify_checksums >/dev/null 2>&1); then
+    echo ""
+    echo "Error: checksum verification failed — install left UNCHANGED (fail-closed)."
+    echo "Nothing was modified. Re-run 'brew safe-update'; if it persists, re-run install.sh."
+    exit 1
+fi
+
+# All present & verified — swap in. `mv` within the same filesystem is an atomic
 # rename per file, and the running script keeps its already-open inode, so even
 # overwriting brew-safe-update itself mid-run is safe. We only reach here once
-# every file is staged, so the install can't be left with a missing helper.
-for staged in "$STAGING"/*; do
-    name="$(basename "$staged")"
-    mv "$staged" "$INSTALL_DIR/$name"
-    chmod +x "$INSTALL_DIR/$name"
+# every file is staged AND verified, so the install can't be left inconsistent.
+while read -r _ filename; do
+    [ -n "$filename" ] || continue
+    mv "$STAGING/$filename" "$INSTALL_DIR/$filename"
+done <"$STAGING/SHA256SUMS"
+
+for exe in brew-safe-upgrade brew-safe-install brew-safe-update; do
+    [ -f "$INSTALL_DIR/$exe" ] && chmod +x "$INSTALL_DIR/$exe"
 done
 
 echo ""

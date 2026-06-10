@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   lint:
-    name: Lint (ruff + shellcheck)
+    name: Lint (ruff + mypy + shellcheck + shfmt + markdownlint)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
@@ -22,6 +22,8 @@ jobs:
       - run: pip install -r requirements-dev.txt
       - run: ruff check .
       - run: ruff format --check .
+      - name: mypy (scanner + helpers)
+        run: mypy
       - name: SHA256SUMS manifest is in sync
         run: scripts/gen-sha256sums.sh --check
       - name: ShellCheck
@@ -29,7 +31,16 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq shellcheck
           shellcheck brew-safe-upgrade brew-safe-install brew-safe-update install.sh \
-            scripts/gen-sha256sums.sh tests/smoke_install.sh
+            scripts/gen-sha256sums.sh tests/smoke_install.sh tests/fixtures/mock_brew/brew
+      - name: shfmt (shell formatting)
+        uses: docker://mvdan/shfmt@sha256:f22f3936140be1ba02d493b5d2b91d0e8b4af93fd903e7f46c477822bca4a3be  # v3.13.1
+        with:
+          args: >-
+            -i 4 -ci -d
+            brew-safe-upgrade brew-safe-install brew-safe-update install.sh
+            scripts/gen-sha256sums.sh tests/smoke_install.sh tests/fixtures/mock_brew/brew
+      - name: markdownlint
+        run: npx --yes markdownlint-cli '**/*.md' --ignore-path .markdownlintignore
 
   test:
     name: Tests (Python ${{ matrix.python-version }})

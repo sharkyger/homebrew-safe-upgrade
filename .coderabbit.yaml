@@ -1,0 +1,33 @@
+# CodeRabbit configuration
+# Docs: https://docs.coderabbit.ai/guides/configure-coderabbit
+language: en-US
+early_access: false
+reviews:
+  profile: assertive
+  request_changes_workflow: false
+  high_level_summary: true
+  poem: false
+  review_status: true
+  collapse_walkthrough: false
+  auto_review:
+    enabled: true
+    drafts: true
+  path_filters:
+    - "!**/__pycache__/**"
+    - "!**/.pytest_cache/**"
+    - "!**/.ruff_cache/**"
+    - "!**/*.local.md" # gitignored local triage notes (security-repo discipline)
+  pre_merge_checks:
+    docstrings:
+      # Retired deliberately. CodeRabbit's docstring-coverage check counts EVERY
+      # changed function — pytest test functions and small shell helpers included
+      # — and offers no path scoping (only mode + threshold). This repo's standard
+      # is intentional, minimal comments (a docstring/comment where the WHY is
+      # non-obvious; tests self-document via descriptive names + scenario
+      # comments), so a blanket coverage gate fires false positives on every
+      # test-heavy PR. Quality is enforced deterministically in CI instead:
+      # ruff (incl. the Bandit `S` ruleset), mypy, shellcheck, shfmt,
+      # markdownlint, and pytest.
+      mode: "off"
+chat:
+  auto_reply: true

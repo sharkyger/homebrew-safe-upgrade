@@ -10,6 +10,7 @@
 #        --no-verify-sha  Skip bottle SHA verification against formulae.brew.sh (default: ON)
 #        --no-deps        Skip transitive dependency checking (default: check)
 #        --version        Print version, install route, and helper-file status (self-diagnosis)
+#        -h, --help       Show usage (flag listing + description) and exit
 #
 # Environment:
 #        BREW_SAFE_NO_DEPS=1     Same as --no-deps (handy for CI / aliases)
@@ -52,8 +53,8 @@ SAFE_UPGRADE_VERSION="$(cat "$SCRIPT_DIR/VERSION" 2>/dev/null || echo "unknown")
 print_version() {
     echo "brew-safe-install $SAFE_UPGRADE_VERSION"
     case "$SCRIPT_DIR" in
-        */libexec|*/libexec/*|*/Cellar/*) echo "install route: Homebrew formula ($SCRIPT_DIR)" ;;
-        *)                                echo "install route: script ($SCRIPT_DIR)" ;;
+        */libexec | */libexec/* | */Cellar/*) echo "install route: Homebrew formula ($SCRIPT_DIR)" ;;
+        *) echo "install route: script ($SCRIPT_DIR)" ;;
     esac
     local missing=""
     for h in dependency_security_check.py bottle_resolver.py cask_nvd_map.py; do
@@ -73,8 +74,48 @@ print_version() {
         echo "  keep one route (formula OR script); see README 'Install'."
     fi
 }
+
+# --help. Handled alongside --version, BEFORE the helper guards, so `--help`
+# answers even when a helper file is missing (issue #66). Also reused for the
+# no-package usage error below (printed to stderr there).
+print_help() {
+    cat <<'EOF'
+brew safe-install — security-first `brew install`
+
+Resolves and CVE-checks each requested package (and its dependencies) against
+OSV.dev, the GitHub Advisory Database, and NIST NVD before installing. Fail-closed.
+
+Usage: brew safe-install [options] package [package ...]
+
+Options:
+  --min-age N          Hold packages published less than N days ago
+                       (default: 3; --min-age 0 disables the freshness hold).
+  --allow-unknown-age  Permit packages whose release age cannot be verified
+                       (default: held — fail closed).
+  --no-verify-sha      Skip bottle SHA verification (default: ON).
+  --no-deps            Skip transitive dependency checking (default: check).
+  --version            Print version, install route, and helper-file status.
+  -h, --help           Show this help and exit.
+  All other flags are passed through to `brew install`.
+
+Environment:
+  BREW_SAFE_NO_DEPS=1  Same as --no-deps.
+
+Examples:
+  brew safe-install wget
+  brew safe-install --cask vscodium
+  brew safe-install sharkyger/tap/safe-fetch
+EOF
+}
 case " $* " in
-    *" --version "*) print_version; exit 0 ;;
+    *" --help "* | *" -h "*)
+        print_help
+        exit 0
+        ;;
+    *" --version "*)
+        print_version
+        exit 0
+        ;;
 esac
 
 if [ ! -f "$SCRIPT" ]; then
@@ -96,39 +137,57 @@ fi
 # Separate our flags, brew flags, and package names
 BREW_FLAGS=""
 PACKAGES=""
-MIN_AGE=3          # 3-day freshness hold; --min-age 0 to disable.
-ALLOW_UNKNOWN_AGE=false  # Fail closed: hold packages whose age can't be verified.
-VERIFY_SHA=true    # Default-on as of v0.2.0 — opt out with --no-verify-sha.
+MIN_AGE=3               # 3-day freshness hold; --min-age 0 to disable.
+ALLOW_UNKNOWN_AGE=false # Fail closed: hold packages whose age can't be verified.
+VERIFY_SHA=true         # Default-on as of v0.2.0 — opt out with --no-verify-sha.
 CHECK_DEPS=true
 case "${BREW_SAFE_NO_DEPS:-}" in
-    1|true|TRUE|yes|YES) CHECK_DEPS=false ;;
+    1 | true | TRUE | yes | YES) CHECK_DEPS=false ;;
 esac
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --min-age)           MIN_AGE="${2:-0}"; shift 2 ;;
-        --allow-unknown-age) ALLOW_UNKNOWN_AGE=true; shift ;;
-        --verify-sha)    shift ;;  # Accepted for back-compat — verification is now on by default.
-        --no-verify-sha) VERIFY_SHA=false; shift ;;
-        --no-deps)       CHECK_DEPS=false; shift ;;
-        -*)              BREW_FLAGS="$BREW_FLAGS $1"; shift ;;
-        *)               PACKAGES="$PACKAGES $1"; shift ;;
+        --min-age)
+            # Require an explicit value: a bare `--min-age` (no arg) would
+            # otherwise `shift 2` past the end, never consume the flag, and loop
+            # forever. Reject a missing or flag-like value up front.
+            if [[ -z "${2:-}" || "$2" == -* ]]; then
+                echo "Error: --min-age requires a numeric argument (days)" >&2
+                exit 2
+            fi
+            MIN_AGE="$2"
+            shift 2
+            ;;
+        --allow-unknown-age)
+            ALLOW_UNKNOWN_AGE=true
+            shift
+            ;;
+        --verify-sha) shift ;; # Accepted for back-compat — verification is now on by default.
+        --no-verify-sha)
+            VERIFY_SHA=false
+            shift
+            ;;
+        --no-deps)
+            CHECK_DEPS=false
+            shift
+            ;;
+        -*)
+            BREW_FLAGS="$BREW_FLAGS $1"
+            shift
+            ;;
+        *)
+            PACKAGES="$PACKAGES $1"
+            shift
+            ;;
     esac
 done
 
-PACKAGES=$(echo "$PACKAGES" | xargs)  # trim whitespace
+PACKAGES=$(echo "$PACKAGES" | xargs) # trim whitespace
 
 if [ -z "$PACKAGES" ]; then
-    echo "Usage: brew safe-install [flags] package1 [package2 ...]"
-    echo ""
-    echo "Options:"
-    echo "  --min-age N          Hold packages published less than N days ago (default: 3; --min-age 0 to disable)"
-    echo "  --allow-unknown-age  Permit packages whose release age cannot be verified (default: held)"
-    echo "  --no-verify-sha  Skip bottle SHA verification against formulae.brew.sh (default: ON)"
-    echo "  --no-deps        Skip transitive dependency checking (default: check)"
-    echo "                   Or set BREW_SAFE_NO_DEPS=1 in your environment."
-    echo "  --version        Print version, install route, and helper-file status"
-    echo "  All other flags are passed through to brew install."
+    echo "Error: no package(s) given." >&2
+    echo "" >&2
+    print_help >&2
     exit 2
 fi
 
@@ -155,7 +214,8 @@ fetch_pkg_age() {
             # user/tap/name -> repo <user>/homebrew-<tap>, canonical Formula/<name>.rb layout.
             # Non-standard tap layouts resolve to [] -> unknown -> held (fail closed).
             user="${name%%/*}"
-            tap="${name#*/}"; tap="${tap%%/*}"
+            tap="${name#*/}"
+            tap="${tap%%/*}"
             token="${name##*/}"
             url="https://api.github.com/repos/${user}/homebrew-${tap}/commits?path=Formula/${token}.rb&per_page=1"
             ;;
@@ -166,13 +226,13 @@ fetch_pkg_age() {
             # fail-open this fixes (see issue #62: libgit2, libheif, libusb, …).
             case "$name" in
                 lib*) first="lib" ;;
-                *)    first=$(printf '%s' "$name" | cut -c1) ;;
+                *) first=$(printf '%s' "$name" | cut -c1) ;;
             esac
             url="https://api.github.com/repos/Homebrew/homebrew-core/commits?path=Formula/${first}/${name}.rb&per_page=1"
             ;;
     esac
 
-    [ -n "${MOCK_COMMITS_API_LOG:-}" ] && printf '%s\t%s\n' "$ptype" "$url" >> "$MOCK_COMMITS_API_LOG"
+    [ -n "${MOCK_COMMITS_API_LOG:-}" ] && printf '%s\t%s\n' "$ptype" "$url" >>"$MOCK_COMMITS_API_LOG"
 
     if [ -n "${MOCK_COMMITS_API_DIR:-}" ]; then
         key=$(printf '%s' "$name" | tr '/' '_')
@@ -280,11 +340,14 @@ except Exception:
         # the gate was `[ "$PKG_TYPE" = "formula" ]`, so a 0-day cask sailed past
         # the freshness hold. That fail-open is what this routing fixes.
         if [ "$PKG_TYPE" = "cask" ]; then
-            AGE_LOOKUP="$BARE_NAME"; AGE_TYPE="cask"
+            AGE_LOOKUP="$BARE_NAME"
+            AGE_TYPE="cask"
         elif [ "$BARE_NAME" != "$FULL_NAME" ] && [[ "$FULL_NAME" == */* ]]; then
-            AGE_LOOKUP="$FULL_NAME"; AGE_TYPE="tap"
+            AGE_LOOKUP="$FULL_NAME"
+            AGE_TYPE="tap"
         else
-            AGE_LOOKUP="$BARE_NAME"; AGE_TYPE="core"
+            AGE_LOOKUP="$BARE_NAME"
+            AGE_TYPE="core"
         fi
 
         # Defense in depth: only allow Homebrew-shaped names through the URL we
@@ -295,7 +358,8 @@ except Exception:
             AGE_DAYS=$(echo "$AGE_INFO" | awk '{print $1}')
             PUB_DATE=$(echo "$AGE_INFO" | awk '{print $2}')
         else
-            AGE_DAYS=-1; PUB_DATE=unknown
+            AGE_DAYS=-1
+            PUB_DATE=unknown
         fi
 
         if [ "$AGE_DAYS" -ge 0 ] 2>/dev/null && [ "$AGE_DAYS" -lt "$MIN_AGE" ]; then
@@ -478,7 +542,7 @@ if [ -z "$CLEAN_PKGS" ]; then
     exit 1
 fi
 
-CLEAN_PKGS=$(echo "$CLEAN_PKGS" | xargs)  # trim
+CLEAN_PKGS=$(echo "$CLEAN_PKGS" | xargs) # trim
 
 # --- Transitive dependency check (default on; --no-deps to skip) ---
 #
@@ -595,7 +659,8 @@ except Exception:
                     AGE_DAYS=$(echo "$AGE_INFO" | awk '{print $1}')
                     PUB_DATE=$(echo "$AGE_INFO" | awk '{print $2}')
                 else
-                    AGE_DAYS=-1; PUB_DATE=unknown
+                    AGE_DAYS=-1
+                    PUB_DATE=unknown
                 fi
 
                 if [ "$AGE_DAYS" -ge 0 ] 2>/dev/null && [ "$AGE_DAYS" -lt "$MIN_AGE" ]; then

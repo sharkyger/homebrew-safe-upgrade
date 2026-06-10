@@ -79,6 +79,19 @@ Upgrade clean packages only? The blocked ones will be skipped.
 Proceed? [y/N]
 ```
 
+### Getting help
+
+Every command answers `--help` (or `-h`) with a synopsis, a flag listing, and
+examples, and `--version` with the version plus install-route / helper-file
+self-diagnosis:
+
+```bash
+brew safe-upgrade --help
+brew safe-install --help
+brew safe-update  --help
+brew safe-upgrade --version
+```
+
 ### Upgrading specific packages
 
 Pass one or more package names to restrict the run to just those, instead of every outdated package:
@@ -248,7 +261,6 @@ Results: 2 clean out of 2 package(s)
 Install wget imagemagick? [Y/n]
 ```
 
-
 Supports the same `--min-age`, `--allow-unknown-age`, `--no-verify-sha`, and `--no-deps` flags:
 
 ```bash
@@ -309,6 +321,7 @@ python3 dependency_security_check.py npm lodash
 ```
 
 Exit codes:
+
 - `0` — no known vulnerabilities
 - `1` — vulnerabilities found (details on stderr, JSON on stdout)
 - `2` — error (invalid input, network failure)
@@ -347,6 +360,13 @@ brew install sharkyger/tap/safe-upgrade
 ```
 
 This taps `sharkyger/tap` automatically and installs `brew safe-upgrade`, `brew safe-install`, and `brew safe-update`. The tools need Python 3.11+ (stdlib only); Homebrew pulls in a managed Python as a dependency (currently `python@3.12`).
+
+Equivalently, tap once and then refer to the formula by its short name — handy if you install more than one tool from the tap:
+
+```bash
+brew tap sharkyger/tap
+brew install safe-upgrade
+```
 
 **Updating a tap install:** update through brew like any other formula —
 

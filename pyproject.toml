@@ -1,6 +1,6 @@
 [project]
 name = "homebrew-safe-upgrade"
-version = "0.2.4"
+version = "0.2.5"
 description = "Security-first brew upgrade — checks packages against NIST NVD, OSV.dev, and GitHub Advisory before upgrading"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -29,6 +29,18 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["S101", "S603", "S607"]
+
+[tool.mypy]
+python_version = "3.11"
+check_untyped_defs = true
+warn_unreachable = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+no_implicit_optional = true
+strict_equality = true
+# The scanner core + helpers ship to users; keep them type-clean. Tests are
+# exercised by pytest, not the type gate.
+files = ["dependency_security_check.py", "bottle_resolver.py", "cask_nvd_map.py"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

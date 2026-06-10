@@ -26,7 +26,7 @@ set -euo pipefail
 # Bumped on every release (kept in lockstep with the VERSION file). The tag
 # v<PINNED_REF without leading v> must exist before curl|bash users are pointed
 # at the matching install.sh.
-PINNED_REF="v0.2.4"
+PINNED_REF="v0.2.5"
 REF="${SAFE_UPGRADE_REF:-$PINNED_REF}"
 
 # Download base. Defaults to GitHub raw; SAFE_UPGRADE_BASE_URL lets a hermetic
@@ -114,10 +114,10 @@ while read -r _ filename; do
             ;;
     esac
     fetch "$REPO_RAW/$filename" "$STAGING/$filename"
-done < "$STAGING/SHA256SUMS"
+done <"$STAGING/SHA256SUMS"
 
 # 4. Verify everything BEFORE touching the install dir. Fail-closed.
-if ! ( cd "$STAGING" && verify_checksums ); then
+if ! (cd "$STAGING" && verify_checksums); then
     echo "Error: checksum verification failed — aborting, nothing was installed." >&2
     exit 1
 fi
@@ -126,7 +126,7 @@ fi
 while read -r _ filename; do
     [ -n "$filename" ] || continue
     mv "$STAGING/$filename" "$INSTALL_DIR/$filename"
-done < "$STAGING/SHA256SUMS"
+done <"$STAGING/SHA256SUMS"
 
 for exe in "${EXECUTABLES[@]}"; do
     chmod +x "$INSTALL_DIR/$exe"

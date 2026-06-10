@@ -48,7 +48,22 @@ case "$1" in
             echo '{"formulae":[],"casks":[]}'
         fi
         ;;
-    install|update|upgrade|pin|unpin)
+    update)
+        # Optionally emit Homebrew's harmless description-cache backtrace on stderr
+        # (MOCK_BREW_UPDATE_NOISE=1) and/or an unrelated real warning
+        # (MOCK_BREW_UPDATE_REALERR=1), so a test can assert noise is filtered while
+        # genuine stderr passes through. `brew update` exits 0 in both cases.
+        if [ -n "${MOCK_BREW_UPDATE_NOISE:-}" ]; then
+            echo "Error: Cannot load descriptions cache." >&2
+            echo "/opt/homebrew/Library/Homebrew/description_cache_store.rb:50:in \`each'" >&2
+            echo "	from /opt/homebrew/Library/Homebrew/cmd/update.rb:120:in \`block'" >&2
+        fi
+        if [ -n "${MOCK_BREW_UPDATE_REALERR:-}" ]; then
+            echo "Warning: a genuine update warning you should still see" >&2
+        fi
+        exit 0
+        ;;
+    install | upgrade | pin | unpin)
         exit 0
         ;;
     *)

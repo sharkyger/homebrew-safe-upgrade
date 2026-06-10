@@ -1,0 +1,60 @@
+# Pre-commit hooks — mirror the CI lint gate so issues surface before push.
+#   pre-commit install          # enable on every commit
+#   pre-commit run --all-files  # run on demand
+#
+# These are `system` hooks: they invoke tools already on your machine (the same
+# ones CI runs), so there are no per-hook binary downloads to fail on. You need
+# locally: ruff + mypy (from requirements-dev.txt), shellcheck, docker (for
+# shfmt), and node/npx (for markdownlint). Versions are pinned in
+# requirements-dev.txt / ci.yml; keep them in lockstep.
+repos:
+  - repo: local
+    hooks:
+      - id: ruff
+        name: ruff check
+        entry: ruff check --force-exclude
+        language: system
+        types_or: [python, pyi]
+        require_serial: true
+
+      - id: ruff-format
+        name: ruff format (check)
+        entry: ruff format --check --force-exclude
+        language: system
+        types_or: [python, pyi]
+        require_serial: true
+
+      - id: mypy
+        name: mypy (scanner + helpers)
+        entry: mypy
+        language: system
+        pass_filenames: false
+        files: \.py$
+
+      - id: shellcheck
+        name: shellcheck
+        entry: shellcheck
+        language: system
+        files: ^(brew-safe-upgrade|brew-safe-install|brew-safe-update|install\.sh|scripts/gen-sha256sums\.sh|tests/smoke_install\.sh|tests/fixtures/mock_brew/brew)$
+
+      - id: shfmt
+        name: shfmt (shell formatting)
+        # mvdan/shfmt via docker, pinned by digest (= v3.13.1) so there is nothing
+        # to install; the working tree is mounted read-only at /w.
+        entry: bash -c 'docker run --rm -v "$PWD":/w:ro -w /w mvdan/shfmt@sha256:f22f3936140be1ba02d493b5d2b91d0e8b4af93fd903e7f46c477822bca4a3be -i 4 -ci -d "$@"' --
+        language: system
+        files: ^(brew-safe-upgrade|brew-safe-install|brew-safe-update|install\.sh|scripts/gen-sha256sums\.sh|tests/smoke_install\.sh|tests/fixtures/mock_brew/brew)$
+
+      - id: markdownlint
+        name: markdownlint
+        entry: npx --yes markdownlint-cli --ignore-path .markdownlintignore
+        language: system
+        types: [markdown]
+        exclude: ^(CLAUDE\.md|\.codereview/)
+
+      - id: sha256sums-sync
+        name: SHA256SUMS manifest is in sync
+        entry: scripts/gen-sha256sums.sh --check
+        language: system
+        pass_filenames: false
+        files: ^(VERSION|bottle_resolver\.py|cask_nvd_map\.py|dependency_security_check\.py|brew-safe-(upgrade|install|update)|SHA256SUMS)$

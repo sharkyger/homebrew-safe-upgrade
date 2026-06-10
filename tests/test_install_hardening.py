@@ -14,6 +14,7 @@ actually reached a user across releases:
     presence even mid-strand, so a broken install explains itself.
 """
 
+import hashlib
 import os
 import shutil
 import subprocess
@@ -105,6 +106,20 @@ def _make_full_source(src: Path):
     ):
         (src / name).write_text(f"# latest {name}\n")
     (src / "VERSION").write_text("9.9.9\n")
+    # Release manifest over all shipped files (the updater downloads exactly these
+    # and verifies them). Generated last, so a file removed afterwards is still
+    # listed — exactly the "manifest names it but the fetch comes up short" case.
+    names = [
+        "VERSION",
+        "bottle_resolver.py",
+        "brew-safe-install",
+        "brew-safe-update",
+        "brew-safe-upgrade",
+        "cask_nvd_map.py",
+        "dependency_security_check.py",
+    ]
+    lines = [f"{hashlib.sha256((src / n).read_bytes()).hexdigest()}  {n}\n" for n in names]
+    (src / "SHA256SUMS").write_text("".join(lines))
 
 
 def test_update_fails_closed_on_partial_source_and_leaves_install_untouched(tmp_path):
@@ -113,7 +128,8 @@ def test_update_fails_closed_on_partial_source_and_leaves_install_untouched(tmp_
     src = tmp_path / "src"
     src.mkdir()
     _make_full_source(src)
-    # Simulate a partial/short fetch: one required file is unavailable upstream.
+    # Simulate a partial/short fetch: one manifest-listed file is unavailable
+    # upstream (removed AFTER the manifest was written, so it is still named).
     (src / "cask_nvd_map.py").unlink()
 
     # Install the CURRENT updater so the run goes straight to the atomic stage

@@ -48,6 +48,6 @@ if [ "${1:-}" = "--check" ]; then
     fi
     echo "SHA256SUMS is up to date."
 else
-    generate > SHA256SUMS
+    generate >SHA256SUMS
     echo "Wrote SHA256SUMS (${#FILES[@]} files)."
 fi

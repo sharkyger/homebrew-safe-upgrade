@@ -8,20 +8,43 @@ The project is pre-1.0; expect minor breaking changes between 0.x releases until
 
 ## [Unreleased]
 
+## [0.2.5] — 2026-06-10
+
+### Added
+
+- **`--help` / `-h` on `brew safe-upgrade`, `brew safe-install`, and `brew safe-update`** ([#66](https://github.com/sharkyger/homebrew-safe-upgrade/issues/66)). Each command now prints a usage block — a one-line description, a synopsis, a flag listing, and examples — and exits cleanly. Help is handled before the helper-file guards, so it answers even on a partially-installed tree. (`--version` self-diagnosis was added in 0.2.2; the two now sit side by side.)
+
+### Changed
+
+- **The self-updater (`brew-safe-update`) now uses the same supply-chain-hardened fetch path as `install.sh`.** It updates to the latest published **release tag** (never a moving branch) and **verifies every file against that release's `SHA256SUMS` manifest** before the atomic, fail-closed swap — including the freshly-fetched updater it re-execs, which is verified before it is handed control. A tampered, truncated, or missing file leaves the existing install untouched. Both curl-fetch routes now share one pin-and-verify discipline. Covered by additions to `tests/test_brew_safe_update.py`.
+- **Quieter `brew update` step.** `brew safe-upgrade` now filters Homebrew's own harmless description-cache backtrace (`DescriptionCacheStore`, which self-heals on `brew update-reset`) from its output, while passing any genuine warnings or errors straight through.
+
+### Tooling
+
+- Added a static-analysis + formatting floor: **mypy** (typed scanner + helpers), **shfmt** (shell formatting), **markdownlint**, an **assertive `.coderabbit.yaml`** profile, and a **`.pre-commit-config.yaml`** wrapping them alongside ruff and shellcheck. All wired into CI.
+
+### Documentation
+
+- README install section now leads with the Homebrew **tap** one-liner (`brew install sharkyger/tap/safe-upgrade`) as the recommended route, with the `curl | bash` script installer documented as the secondary route. USAGE still precedes INSTALL.
+
 ## [0.2.4] — 2026-06-09
 
 ### Changed
+
 - **Hardened the script installer (`install.sh`) against supply-chain tampering.** The installer now pulls its files from a **pinned, immutable release tag** instead of the moving `main` branch, so a `curl … | bash` run always gets exactly one published release. It downloads every file into a staging area and **verifies each one against a published `SHA256SUMS` manifest before installing anything** — a truncated download, a tampered/MITM'd file, or a missing file aborts the whole install with no partial state. The file list is now driven by the manifest itself (one source of truth, shared with the `scripts/gen-sha256sums.sh` generator). The Homebrew tap route was already immutable and is unaffected. Covered by a new hermetic end-to-end smoke (`tests/smoke_install.sh`) that runs the real installer over a local server in CI on both Linux (bash 5) and macOS (bash 3.2) — the script-install route is now exercised in CI for the first time.
 
 ### Fixed
+
 - **Single-source version.** `pyproject.toml`'s version had drifted behind the `VERSION` file (the release bump only touched `VERSION`). The two are now realigned and a CI-enforced test keeps them in lockstep, alongside a check that the installer's pinned tag tracks `VERSION`.
 
 ## [0.2.3] — 2026-06-08
 
 ### Fixed
+
 - **Freshness hold (`--min-age`) now covers casks, tap formulae, and `lib*` formulae, and fails closed** ([#62](https://github.com/sharkyger/homebrew-safe-upgrade/issues/62)). The age check previously looked every package up at `Homebrew/homebrew-core` `Formula/<first-letter>/<name>.rb`. Three classes of package had no release date to compare against and were reported as "age unknown, skipping age check": **casks** (which live in `homebrew-cask`), **tap formulae** (which live in their own tap repo), and **`lib*` formulae** (which homebrew-core shards under `Formula/lib/`, not `Formula/l/` — e.g. `libgit2`, `libheif`, `libusb`). The lookup is now **routed to the correct repo and path** per package: `homebrew-core` (with the `lib/` shard handled) for core formulae, `homebrew-cask` `Casks/<l>/<token>.rb` for casks, and `<user>/homebrew-<tap>` for tap formulae. When a release age **cannot be verified** (home repo unreachable, rate-limited, or a non-standard tap layout), the package is now **held** rather than allowed — the freshness hold is fail-closed, consistent with the rest of the tool. The same routing + fail-closed policy applies to the transitive-dependency age check in both `brew-safe-upgrade` and `brew-safe-install`. The known-too-fresh CVE-aware bypass (skip the hold when the *installed* version has CVEs) is unchanged. Covered by `tests/test_age_check.py` and additions to `tests/test_brew_safe_deps.py`, with a new deterministic `MOCK_COMMITS_API_DIR` test seam.
 
 ### Added
+
 - **`--allow-unknown-age`** on `brew safe-upgrade` and `brew safe-install` — permit packages whose release age cannot be verified (default: such packages are held).
 - **Single-package `brew safe-upgrade <name> [<name> …]`** ([#61](https://github.com/sharkyger/homebrew-safe-upgrade/issues/61)). Positional package names restrict the run to just those outdated packages instead of everything `brew outdated` reports (matches the full name or its basename, so `safe-upgrade safe-fetch` matches `sharkyger/tap/safe-fetch`). A named package that isn't outdated is reported, not silently ignored.
 - **Per-dependency progress in the transitive-dependency scan** ([#60](https://github.com/sharkyger/homebrew-safe-upgrade/issues/60)). Each incoming dependency is now announced with an `[i/N] checking <dep> <version>…` line before its (network-bound) age and CVE checks, so a large scan shows live progress instead of a multi-minute silent wait. Applies to both `brew safe-upgrade` and `brew safe-install`.
@@ -29,26 +52,31 @@ The project is pre-1.0; expect minor breaking changes between 0.x releases until
 ## [0.2.2] — 2026-06-06
 
 ### Fixed
+
 - **Self-updater no longer strands helper files (single-run, atomic, fail-closed).** A `brew safe-update` run from an older updater could fetch only some files and still print "All tools updated", leaving `bottle_resolver.py` / `cask_nvd_map.py` missing — so the next `brew safe-upgrade` failed closed with `bottle SHA resolver not found`. The updater now (1) re-execs the freshly-fetched updater **before** the download loop, so the file list that runs is always current, and (2) fetches every declared file into a staging area and **swaps them in only if all arrive intact** — a partial or truncated download leaves the existing install untouched and never reports success. Regression-tested in `tests/test_install_hardening.py` and `tests/test_brew_safe_update.py`.
 - **Scripts resolve their own directory through symlinks.** `brew-safe-upgrade` / `-install` / `-update` previously located their Python helpers with a bare `dirname "${BASH_SOURCE[0]}"`, which broke for a symlinked or relocated install. They now walk the symlink chain with a portable resolver (no macOS-hostile `readlink -f`), so the helpers resolve for script, Homebrew-formula, and symlinked layouts on both architectures.
 - **Actionable fail-closed message.** A missing helper now prints how to fix it (`run 'brew safe-update'`) instead of the bare "make sure it's in the same directory".
 
 ### Added
+
 - **`--version` with self-diagnosis** on all three commands (and listed in `--help`). Prints a single-source version (from the new `VERSION` file, bumped per release), the detected install route (Homebrew formula vs script), whether every helper file is present, and a warning if both install routes are on `PATH`. Turns a stranded install into a self-evident report.
 
 ## [0.2.1] — 2026-06-05
 
 ### Fixed
+
 - **PEP 440-correct pre-release version comparison.** The CVE range matcher now uses a small, dependency-free pre-release-aware comparator (`dev < alpha < beta < rc < final`, with trailing-zero equivalence) in place of the previous tuple parser, so pre-release versions such as `1.0-beta` sort correctly relative to their final release when evaluated against advisory ranges. Constraint parsing is tightened, and every comparison site is None-safe — unparseable versions or constraints **fail closed** (treated as affected). The tool stays dependency-free: no `packaging` runtime dependency (Homebrew's Python is externally-managed and lacks it, which would fail-close the whole tool). Covered by `tests/test_version_validation.py`.
 - The `test_installed_old_version_is_treated_as_incoming` test no longer reads the live Homebrew openssl@3 release date (it now runs with `--min-age 0`), so it stops failing for ~3 days after every openssl@3 bump.
 
 ### Added
+
 - **Homebrew tap install** — `brew install sharkyger/tap/safe-upgrade` now works (formula lives in [`sharkyger/homebrew-tap`](https://github.com/sharkyger/homebrew-tap)). It installs all three commands plus the runtime modules (`bottle_resolver.py`, `cask_nvd_map.py`) and pulls in `python@3.12`. Tap installs update through brew — `brew update && brew upgrade safe-upgrade` — **not** the bundled `brew safe-update`, which only refreshes a script install in your Homebrew `bin`. README install docs updated to lead with the tap path and document this distinction.
 - Product requirements doc (`docs/PRD.md`).
 
 ## [0.2.0] — 2026-06-03
 
 ### Fixed
+
 - **`brew safe-update` is now self-healing — single-run convergence (fixes the second Intel-Mac error).** While verifying the bottle-SHA fix on a real Intel (x86_64) Mac, two distinct errors surfaced in sequence:
   1. `[BLOCKED] SHA mismatch` on **every** bottle — the architecture bug (see the arch-aware entry below). This is the one the bottle-SHA fix addresses.
   2. After updating, `Error: bottle SHA resolver not found at /usr/local/bin/bottle_resolver.py` — the fail-closed guard firing because the new `bottle_resolver.py` was missing from `/usr/local/bin`.
@@ -60,9 +88,11 @@ The project is pre-1.0; expect minor breaking changes between 0.x releases until
 - **Arch-aware bottle-SHA selection — fixes a uniform Intel (x86_64) false positive.** The local and canonical SHA extractors each picked the *first* bottle tag in JSON key order. `brew info --json=v2` and `formulae.brew.sh` enumerate `bottle.stable.files` in different orders, so on an Intel host the local side resolved the genuine Intel bottle while the canonical side resolved the **arm64** bottle — comparing two real-but-different-arch SHAs and flagging **every** bottle as `[BLOCKED] SHA mismatch`. (Apple Silicon was unaffected, which is why it went unnoticed.) It failed safe — no bad upgrade — but 15-of-15 bogus "tamper" warnings per run are alert fatigue: they train the user to ignore the signal so a *real* tamper later gets dismissed. The new `bottle_resolver.py` resolves the bottle SHA by the host's actual tag — `arm64_<codename>` on Apple Silicon, bare `<codename>` on Intel, `{arch}_linux` on Linux — with a same-arch, progressively-older codename fallback (Homebrew often serves an Intel host's newest OS under an older tag, e.g. `tahoe` → `sonoma`) that **never crosses architecture**. The same resolution is applied to both payloads, so a genuine same-bottle comparison matches. Forced-host-tag regression tests (`BREW_SAFE_HOST_ARCH` / `BREW_SAFE_HOST_OS`) reproduce the bug and verify the fix on any machine — no Intel hardware required. Note for packagers: `bottle_resolver.py` is a new file that must ship alongside the scripts (added to `install.sh`; tap formula updated at release).
 
 ### Added
+
 - **Curated cask → NVD search-keyword map** (`cask_nvd_map.py`). Cask slugs like `brave-browser` rarely match NVD descriptions verbatim, so the scanner previously returned no hits for vendor-shipped GUI apps. The map translates ~55 common casks (browsers, IDEs, communication tools, runtimes) into brew's canonical product name (`name[0]` from `formulae.brew.sh/api/cask/<token>.json`), with a small set of documented overrides where brew's name is bad for NVD search. `query_nvd` looks up the mapped keyword when `ecosystem == "brew"` and the cask slug is in the map; the description-matching filter accepts the mapped keyword in addition to the raw slug. Unmapped casks fall through to the previous naive behavior — open a PR to expand the map. The README states the cask-coverage limits honestly (integrity ≠ vulnerability; SHA enforcement covers tampering, not vendor-shipped CVEs).
 
 ### Changed
+
 - **SHA verification is now default-on** for both `brew-safe-install` and `brew-safe-upgrade`. The bottle SHA from `brew info --json=v2` is compared against the canonical SHA published at `formulae.brew.sh`. Five outcomes:
   - **Match** — `[sha] verified <local>=<canonical>`, install/upgrade proceeds.
   - **Mismatch** — `[BLOCKED] SHA mismatch` with both full fingerprints printed; the package is excluded from the install/upgrade set and the script exits non-zero. **Tampering is never overridable by `--yes`** — it's a deliberate security signal that must surface in CI/pipelines.
@@ -81,30 +111,34 @@ The project is pre-1.0; expect minor breaking changes between 0.x releases until
 Hardening pass following the v0.1.0 review. All changes are internal correctness and defense-in-depth improvements; the public flag/env-var surface is unchanged.
 
 ### Fixed
+
 - `brew list --versions` parsing now uses `awk '$NF'` instead of `awk '$2'`, so when multiple kegs of one formula are installed the **latest** version is used for the incoming-vs-installed comparison rather than the oldest.
 - `INCOMING_DEPS` is now a proper bash array. Iteration uses quoted `${INCOMING_DEPS_ARR[@]}` expansion, preserving whitespace in pathological tap dep names that the previous flat-string approach would have split.
 - `--min-age` for tap-namespaced deps (`foo/bar/baz`) is now an explicit `[skip-dep-age]` log line. Previously the GitHub `homebrew-core` lookup would 404 silently and the age gate fell through unenforced.
 
 ### Security (defense in depth)
+
 - Dep names from `brew deps` output are validated against a `^[a-zA-Z0-9@._/-]+$` regex before being interpolated into any curl URL or passed to the CVE checker. A malformed name from a compromised tap is rejected with `[skip-dep] -- invalid name, refusing to query`.
 - The same regex guard is now applied to the **main-package** age check in both `brew-safe-install` and `brew-safe-upgrade`. (Previously only the dep-check code was protected; the main-package path inherited a pre-existing gap from before the SSRF input validation in PR #11.)
 
 ### Changed
+
 - The pre-install / pre-upgrade warning block no longer combines vulnerable and too-fresh deps under one `"known issues"` header. Vulnerable deps now appear under `"WARNING: incoming dependencies have known CVEs:"`; fresh deps under `"Incoming dependencies are below --min-age:"`. They are distinct risk signals and the previous wording conflated them.
 - `brew-safe-upgrade --yes` stderr bypass message reworded from `"despite dep CVE warnings"` to `"despite dep warnings"` (now covers both CVE and freshness holds).
 
 ### Documented
+
 - Added an in-code design note explaining why transitive deps deliberately do **not** receive the CVE-aware `--min-age` bypass that applies to the user-named package.
 
-
-
 ### Added
+
 - Transitive dependency check for `brew safe-install` and `brew safe-upgrade`. The same vulnerability gate that protects the package you're installing is now applied to the dependencies that come in with it — both brand-new deps and existing deps whose version is being bumped. Already-installed deps that aren't changing are deliberately left to [`brew-vulns`](https://github.com/Homebrew/homebrew-brew-vulns).
 - For `safe-upgrade`, incoming deps are deduplicated across the whole upgrade batch (so `openssl@3` appearing in five outdated packages is checked once).
 - New `--no-deps` flag and `BREW_SAFE_NO_DEPS=1` environment variable to opt out of the dep check per invocation. Defaults remain safe; the flag is per-invocation only.
 - Mock-`brew` based test harness in `tests/fixtures/mock_brew/` and `tests/test_brew_safe_deps.py` covering flag parsing, env-var override, and dep classification (not-installed / same-version / older-version).
 
 ### Reliability
+
 - Strip Homebrew revision suffix (`_1`, `_2`, …) from the installed-version string before comparing to the latest stable version, so a revision bump of an already-current dep isn't misclassified as incoming.
 - Use `|` (not `@`) as the internal `name|version` separator inside the dep list so that versioned formulae (e.g. `openssl@3`) and the rare version that contains `@` round-trip correctly.
 - Read `brew deps` output line-by-line into an array so dep names containing whitespace (third-party taps) aren't word-split and silently dropped.
@@ -113,6 +147,7 @@ Hardening pass following the v0.1.0 review. All changes are internal correctness
 - Compatible with macOS system bash 3.2 (no `mapfile`/`readarray`).
 
 ### Documentation
+
 - New "Transitive dependency check" section in README, including a note on NVD's 5 req/30s anonymous rate limit for large upgrade batches.
 - `brew-vulns` comparison table now includes a "Scope" row that makes the division of labour explicit.
 - Stated minimum Python version corrected to 3.11 in README and `pyproject.toml`. CI has tested on 3.11 and 3.13 since #16 dropped 3.9; the README and `requires-python` were left at the original 3.8 by oversight. `ruff target-version` bumped to `py311` for consistency.
