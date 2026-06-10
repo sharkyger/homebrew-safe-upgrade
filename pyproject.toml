@@ -42,6 +42,14 @@ strict_equality = true
 # exercised by pytest, not the type gate.
 files = ["dependency_security_check.py", "bottle_resolver.py", "cask_nvd_map.py"]
 
+# certifi is an OPTIONAL runtime import (guarded by try/except ImportError — the
+# scanner stays stdlib-only and falls back to the system trust store without it),
+# so it is intentionally absent from the dev env. Don't fail the type gate on its
+# missing stub.
+[[tool.mypy.overrides]]
+module = "certifi"
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
