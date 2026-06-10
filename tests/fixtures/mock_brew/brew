@@ -31,14 +31,14 @@ case "$1" in
         for arg in "$@"; do :; done
         NAME="$arg"
         F="$DIR/deps_${NAME}.txt"
-        [ -f "$F" ] && cat "$F" || true
+        if [ -f "$F" ]; then cat "$F"; fi
         ;;
     list)
         # `brew list --versions --formula <name>` → installed versions
         for arg in "$@"; do :; done
         NAME="$arg"
         F="$DIR/list_${NAME}.txt"
-        [ -f "$F" ] && cat "$F" || true
+        if [ -f "$F" ]; then cat "$F"; fi
         ;;
     outdated)
         F="$DIR/outdated.json"
