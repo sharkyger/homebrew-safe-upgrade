@@ -7,6 +7,7 @@ a partially-installed tree.
 """
 
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -14,6 +15,10 @@ import pytest
 
 REPO = Path(__file__).parent.parent
 COMMANDS = ["brew-safe-upgrade", "brew-safe-install", "brew-safe-update"]
+
+# When help text is blank Homebrew falls back to this generic banner. Its
+# presence in `brew <cmd> --help` output means our help was NOT picked up.
+GENERIC_BREW_HELP_MARKER = "Example usage:"
 
 
 def _run(args):
@@ -77,3 +82,52 @@ def test_min_age_without_value_errors_not_loops(cmd):
     result = _run([cmd, "--min-age"])
     assert result.returncode == 2, result.stdout + result.stderr
     assert "requires a numeric argument" in result.stderr
+
+
+# --- Homebrew dispatcher integration (issue #66 follow-up) -------------------
+# `brew <cmd> --help` is intercepted by Homebrew BEFORE the script runs, so the
+# print_help() tests above (which exec the script directly) cannot catch the
+# real-world break. Homebrew renders external-command help only from lines that
+# begin with `#:`. Without them it shows the generic brew banner instead.
+@pytest.mark.parametrize("cmd", COMMANDS)
+def test_brew_help_convention_present(cmd):
+    """Each command must carry `#:` doc lines, or `brew <cmd> --help` will show
+    the generic Homebrew banner instead of our usage."""
+    lines = (REPO / cmd).read_text().splitlines()
+    doc_lines = [ln for ln in lines if ln.startswith("#:")]
+    brew_name = cmd.replace("brew-safe-", "safe-")
+    assert doc_lines, (
+        f"{cmd}: no `#:` help lines — `brew {brew_name} --help` will fall back "
+        f"to the generic Homebrew help. See docs.brew.sh/External-Commands."
+    )
+    # The synopsis must name the user-facing `brew safe-*` command.
+    assert any(f"brew {brew_name}" in ln for ln in doc_lines), doc_lines
+
+
+@pytest.mark.parametrize("cmd", COMMANDS)
+def test_brew_dispatcher_help_not_generic(cmd):
+    """Integration: drive help through the real `brew` dispatcher and assert it
+    does NOT degrade to the generic banner. Skipped where brew is unavailable
+    (e.g. Linux CI without Homebrew)."""
+    brew = shutil.which("brew")
+    if not brew:
+        pytest.skip("brew not on PATH")
+    brew_name = cmd.replace("brew-safe-", "safe-")
+    # Prepend the repo to PATH so brew finds our (un-installed) brew-safe-* file.
+    env = dict(os.environ, PATH=f"{REPO}{os.pathsep}{os.environ.get('PATH', '')}")
+    env.setdefault("HOMEBREW_NO_AUTO_UPDATE", "1")
+    env.setdefault("HOMEBREW_NO_INSTALL_FROM_API", "1")
+    result = subprocess.run(
+        [brew, brew_name, "--help"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+        env=env,
+    )
+    out = result.stdout + result.stderr
+    assert GENERIC_BREW_HELP_MARKER not in out, (
+        f"`brew {brew_name} --help` returned the generic Homebrew banner — "
+        f"the `#:` help block was not picked up.\n{out}"
+    )
+    assert f"brew {brew_name}" in out, out

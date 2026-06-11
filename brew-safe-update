@@ -1,4 +1,18 @@
 #!/bin/bash
+#:  `brew safe-update` [options]
+#:
+#:  Re-fetch the brew-safe-* commands and helpers from the latest release,
+#:  verify every file against its signed SHA256SUMS manifest, and swap them
+#:  in atomically (all-or-nothing, fail-closed).
+#:
+#:      --version    Print version, install route, and helper-file status.
+#:      -h, --help   Show this help and exit.
+#:
+#:  Run with sudo if your Homebrew bin is not writable by your user.
+#:
+#:  NOTE: Homebrew intercepts -h/--help/--usage/-? before exec'ing this script
+#:  and renders help from these `#:` lines. The print_help() block below serves
+#:  direct invocation (and the test suite). Keep the two in sync.
 # brew-safe-update — updates the homebrew-safe-upgrade tools (scripts plus the
 # Python modules they depend on at runtime) to the latest version from GitHub.
 #
