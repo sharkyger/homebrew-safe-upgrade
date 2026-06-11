@@ -1,4 +1,24 @@
 #!/bin/bash
+#:  `brew safe-install` [options] <package> [package ...]
+#:
+#:  Security-first `brew install`. Resolves and CVE-checks each requested
+#:  package (and its dependencies) against OSV.dev, the GitHub Advisory
+#:  Database, and NIST NVD before installing. Fail-closed.
+#:
+#:      --min-age N            Hold packages younger than N days
+#:                             (default: 3; 0 disables the freshness hold).
+#:      --allow-unknown-age    Permit unverifiable-age packages
+#:                             (default: held — fail closed).
+#:      --no-verify-sha        Skip bottle SHA verification (default: on).
+#:      --no-deps              Skip transitive dependency checking.
+#:      --version              Print version, install route, helper status.
+#:      -h, --help             Show this help and exit.
+#:
+#:  All other flags are passed through to `brew install`.
+#:
+#:  NOTE: Homebrew intercepts -h/--help/--usage/-? before exec'ing this script
+#:  and renders help from these `#:` lines. The print_help() block below serves
+#:  direct invocation (and the test suite). Keep the two in sync.
 # brew-safe-install — checks packages AND their incoming dependencies for known
 # vulnerabilities before installing.
 # Queries 3 databases: OSV.dev, GitHub Advisory, NIST NVD.
