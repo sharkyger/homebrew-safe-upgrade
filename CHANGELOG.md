@@ -8,6 +8,10 @@ The project is pre-1.0; expect minor breaking changes between 0.x releases until
 
 ## [Unreleased]
 
+### Fixed
+
+- **`brew safe-upgrade --help` (and `safe-install` / `safe-update`) now render the tool's own usage instead of Homebrew's generic `Example usage:` banner** (follow-up to [#66](https://github.com/sharkyger/homebrew-safe-upgrade/issues/66)). Homebrew's dispatcher intercepts `--help` *before* exec'ing an external command and renders help only from lines beginning with `#:` (see [External Commands](https://docs.brew.sh/External-Commands)); the scripts carried plain `#` comments, so brew fell back to its built-in banner and `print_help()` never ran on that path. Each `brew-safe-*` script now carries a `#:` help block mirroring its `print_help()`. The direct-invocation `--help` added in 0.2.5 was unaffected and continues to work.
+
 ## [0.2.5] — 2026-06-10
 
 ### Added
