@@ -294,6 +294,27 @@ run_brew_update() {
     return "$rc"
 }
 
+# Print up to 5 CVE detail lines ("    [SEV] CVE-ID (CVSS n.n) — source") from
+# a scanner JSON verdict ($1). Shared by the security-check loop and the
+# age-check CVE bypass (#72), so every "has CVEs" verdict names the CVEs the
+# user is being asked to act on.
+print_vuln_lines() {
+    echo "$1" | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    for v in data.get('vulnerabilities', [])[:5]:
+        sev = v.get('severity', '?')
+        vid = v.get('id', '?')
+        score = v.get('score', 0)
+        src = v.get('source', '?')
+        score_str = f' (CVSS {score})' if score > 0 else ''
+        print(f'    [{sev}] {vid}{score_str} — {src}')
+except Exception:
+    pass
+" 2>/dev/null || true
+}
+
 echo "Updating Homebrew..."
 run_brew_update || true
 
@@ -439,6 +460,9 @@ if [ "$MIN_AGE" -gt 0 ] 2>/dev/null; then
 
             if [ "$INSTALLED_EXIT" -eq 1 ]; then
                 echo "  [ok] $name $current — released $AGE_DAYS day(s) ago ($PUB_DATE), but installed $installed has CVEs — bypassing age check"
+                # Name the CVEs (#72) so the decision rests on data, not on a
+                # bare "CVE! update!" note.
+                print_vuln_lines "$_INSTALLED_RESULT"
                 FILTERED_OUTDATED="${FILTERED_OUTDATED}${name} ${installed} ${current}"$'\n'
             else
                 echo "  [HOLD] $name $current — released $AGE_DAYS day(s) ago ($PUB_DATE), min-age: $MIN_AGE days"
@@ -497,7 +521,12 @@ while read -r name installed current; do
         if [ "$EXIT_CODE" -eq 0 ]; then
             # --- SHA verification (default ON; --no-verify-sha to opt out) ---
             # See brew-safe-install for the full contract; this block must stay symmetric.
+            # Passing-path [sha] detail lines are BUFFERED in SHA_DETAIL and printed
+            # under the package's verdict line, so per-package details never appear
+            # above the package they belong to (#73). The [BLOCKED] mismatch block
+            # still prints immediately — it IS the verdict and names the package.
             SHA_VERDICT="skip"
+            SHA_DETAIL=""
             if [ "$VERIFY_SHA" = true ]; then
                 # Determine type — upgrade lists formulae and casks together.
                 PKG_INFO_JSON=$(brew info --json=v2 "$name" 2>/dev/null)
@@ -514,7 +543,7 @@ except Exception:
 " 2>/dev/null)
 
                 if [ "$PKG_TYPE_HERE" = "cask" ]; then
-                    echo "    [sha] casks not in scope — brew enforces cask-file SHA at install"
+                    SHA_DETAIL="    [sha] casks not in scope — brew enforces cask-file SHA at install"$'\n'
                     SHA_VERDICT="cask"
                 else
                     # Resolved by the host's actual bottle tag (arch + macOS
@@ -545,7 +574,7 @@ except Exception:
                     # that never ships bottles), there is nothing to compare against
                     # the canonical record — treat as no-bottle, not as tampering.
                     if [ -z "$LOCAL_SHA" ]; then
-                        echo "    [sha] no local bottle — built from source, skipping canonical check"
+                        SHA_DETAIL="    [sha] no local bottle — built from source, skipping canonical check"$'\n'
                         SHA_VERDICT="no_bottle"
                         SHA_HTTP_CODE="SKIP"
                     fi
@@ -555,13 +584,13 @@ except Exception:
                         200)
                             CANON_SHA=$(echo "$CANON_JSON" | python3 "$BOTTLE_RESOLVER" --source canonical 2>/dev/null)
                             if [ "$CANON_SHA" = "NO_BOTTLE" ]; then
-                                echo "    [sha] no bottle — built from source"
+                                SHA_DETAIL="    [sha] no bottle — built from source"$'\n'
                                 SHA_VERDICT="no_bottle"
                             elif [ "$CANON_SHA" = "PARSE_ERROR" ] || [ -z "$CANON_SHA" ]; then
                                 SHA_API_ERROR_PKGS="$SHA_API_ERROR_PKGS $name"
                                 SHA_VERDICT="api_error"
                             elif [ "$LOCAL_SHA" = "$CANON_SHA" ]; then
-                                echo "    [sha] verified ${LOCAL_SHA:0:16}=${CANON_SHA:0:16}"
+                                SHA_DETAIL="    [sha] verified ${LOCAL_SHA:0:16}=${CANON_SHA:0:16}"$'\n'
                                 SHA_VERDICT="match"
                             else
                                 echo "    [BLOCKED] SHA mismatch for $name"
@@ -572,7 +601,7 @@ except Exception:
                             fi
                             ;;
                         404)
-                            echo "    [sha] tap-only formula — no canonical SHA available"
+                            SHA_DETAIL="    [sha] tap-only formula — no canonical SHA available"$'\n'
                             SHA_VERDICT="tap_only"
                             ;;
                         *)
@@ -587,25 +616,12 @@ except Exception:
                 : # [BLOCKED] already emitted; don't count as clean. --yes never overrides this.
             else
                 echo "  [ok] $name $current"
+                printf '%s' "$SHA_DETAIL"
                 CLEAN_COUNT=$((CLEAN_COUNT + 1))
             fi
         elif [ "$EXIT_CODE" -eq 1 ]; then
             echo "  [VULN] $name $current -- vulnerabilities found!"
-            # Parse CVE details from JSON output
-            echo "$RESULT_JSON" | python3 -c "
-import sys, json
-try:
-    data = json.load(sys.stdin)
-    for v in data.get('vulnerabilities', [])[:5]:
-        sev = v.get('severity', '?')
-        vid = v.get('id', '?')
-        score = v.get('score', 0)
-        src = v.get('source', '?')
-        score_str = f' (CVSS {score})' if score > 0 else ''
-        print(f'    [{sev}] {vid}{score_str} — {src}')
-except Exception:
-    pass
-" 2>/dev/null || true
+            print_vuln_lines "$RESULT_JSON"
             BLOCKED_PKGS="$BLOCKED_PKGS $name"
         else
             echo "  [skip] $name $current -- check failed, will not upgrade"

@@ -26,7 +26,7 @@ set -euo pipefail
 # Bumped on every release (kept in lockstep with the VERSION file). The tag
 # v<PINNED_REF without leading v> must exist before curl|bash users are pointed
 # at the matching install.sh.
-PINNED_REF="v0.2.6"
+PINNED_REF="v0.2.7"
 REF="${SAFE_UPGRADE_REF:-$PINNED_REF}"
 
 # Download base. Defaults to GitHub raw; SAFE_UPGRADE_BASE_URL lets a hermetic

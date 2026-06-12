@@ -340,21 +340,28 @@ def test_upgrade_non_lib_l_formula_still_uses_first_letter(age_env):
 def test_upgrade_too_fresh_but_installed_has_cve_bypasses_hold(age_env, monkeypatch):
     """CVE-aware bypass (unchanged behavior): a too-fresh upgrade is allowed when
     the INSTALLED version has known CVEs — the fresh release is likely the fix.
-    Must remain on the *known* path only, never the unknown-age path."""
+    Must remain on the *known* path only, never the unknown-age path.
+    The bypass message must NAME the CVEs (#72) so the user decides on data."""
     write_outdated(
         age_env["brew"],
         formulae=[{"name": "wget", "installed_versions": ["1.24.0"], "current_version": "1.25.0"}],
     )
     set_commits(age_env["commits"], "wget", commit_json_days_ago(0))  # released today
 
-    # CVE stub: the INSTALLED version (1.24.0) is vulnerable (exit 1); anything
-    # else is clean (exit 0). The age-check probes `brew wget 1.24.0`.
+    # CVE stub: the INSTALLED version (1.24.0) is vulnerable (exit 1, JSON
+    # verdict on stdout like the real scanner); anything else is clean
+    # (exit 0). The age-check probes `brew wget 1.24.0`.
     stub = age_env["tmp"] / "cve_installed_vuln.py"
     stub.write_text(
         "#!/usr/bin/env python3\n"
         "import sys\n"
         "ver = sys.argv[3] if len(sys.argv) > 3 else ''\n"
-        "sys.exit(1 if ver == '1.24.0' else 0)\n"
+        "if ver == '1.24.0':\n"
+        '    print(\'{"status": "vulnerable", "vulnerabilities": '
+        '[{"id": "CVE-2099-1234", "severity": "HIGH", "score": 8.1, '
+        '"source": "NIST NVD"}]}\')\n'
+        "    sys.exit(1)\n"
+        "sys.exit(0)\n"
     )
     stub.chmod(0o755)
     monkeypatch.setenv("DEPENDENCY_SECURITY_CHECK", str(stub))
@@ -362,4 +369,8 @@ def test_upgrade_too_fresh_but_installed_has_cve_bypasses_hold(age_env, monkeypa
     result = run_upgrade(["--no-deps", "--min-age", "3"])
 
     assert "but installed 1.24.0 has CVEs — bypassing age check" in result.stdout
+    # The CVE detail line prints under the bypass line, naming the CVE (#72).
+    bypass_idx = result.stdout.index("bypassing age check")
+    assert "[HIGH] CVE-2099-1234 (CVSS 8.1) — NIST NVD" in result.stdout
+    assert result.stdout.index("CVE-2099-1234") > bypass_idx
     assert "[HOLD] wget" not in result.stdout

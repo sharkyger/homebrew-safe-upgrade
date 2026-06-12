@@ -304,20 +304,28 @@ sudo brew safe-update
 
 ## Standalone security checker
 
-The vulnerability checker works independently for any ecosystem:
+The vulnerability checker works independently for any ecosystem. Where it
+lives depends on how you installed the tool:
 
-```
-python3 dependency_security_check.py <ecosystem> <package> [version]
+```bash
+# Homebrew tap install — the script sits in the formula's libexec:
+python3 "$(brew --prefix safe-upgrade)/libexec/dependency_security_check.py" <ecosystem> <package> [version]
+
+# Script install (install.sh) — it sits in Homebrew's bin:
+python3 "$(brew --prefix)/bin/dependency_security_check.py" <ecosystem> <package> [version]
 ```
 
 Supported ecosystems: `pip`, `npm`, `composer`, `cargo`, `go`, `maven`, `gem`, `brew`
 
-```
-# Check a specific version
-python3 dependency_security_check.py pip requests 2.31.0
+```bash
+# Check a specific Homebrew formula version (tap install shown)
+python3 "$(brew --prefix safe-upgrade)/libexec/dependency_security_check.py" brew cmake 4.3.3
+
+# Check a specific version in another ecosystem
+python3 "$(brew --prefix safe-upgrade)/libexec/dependency_security_check.py" pip requests 2.31.0
 
 # Check latest version (auto-resolved for pip/npm)
-python3 dependency_security_check.py npm lodash
+python3 "$(brew --prefix safe-upgrade)/libexec/dependency_security_check.py" npm lodash
 ```
 
 Exit codes:
