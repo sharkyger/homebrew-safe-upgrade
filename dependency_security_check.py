@@ -75,6 +75,10 @@ ECOSYSTEM_MAP = {
 }
 
 # Distro-specific CPE vendors whose package versions don't match upstream.
+# Deliberately NOT "oracle": Oracle is also the upstream vendor of widely
+# brewed software (mysql, openjdk, virtualbox — cpe:2.3:a:oracle:mysql:*),
+# so skipping it would hide real upstream CVEs. Oracle Linux distro CPEs
+# are OS-type (cpe:2.3:o:...) and are already filtered by the part check.
 DISTRO_VENDORS = {
     "opensuse",
     "suse",
@@ -83,7 +87,6 @@ DISTRO_VENDORS = {
     "ubuntu",
     "canonical",
     "fedoraproject",
-    "oracle",
     "centos",
 }
 

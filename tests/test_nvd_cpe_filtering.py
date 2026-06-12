@@ -198,3 +198,16 @@ def test_relevant_cpe_version_range_still_applies():
     ).encode()
     assert len(_query("wget", "brew", "1.9.0", body)) == 1  # in range — affected
     assert _query("wget", "brew", "2.1.0", body) == []  # past the fix — clean
+
+
+def test_oracle_application_cpe_is_not_treated_as_distro_only():
+    """Oracle is an upstream vendor (mysql, openjdk, virtualbox), not only a
+    distro — its application CPEs must stay relevant, never blanket-skipped."""
+    body = _nvd_response(
+        "CVE-2099-0014",
+        "mysql is vulnerable to privilege escalation.",
+        ["cpe:2.3:a:oracle:mysql:*:*:*:*:*:*:*:*"],
+    )
+    findings = _query("mysql", "brew", None, body)
+    assert len(findings) == 1
+    assert findings[0]["id"] == "CVE-2099-0014"
