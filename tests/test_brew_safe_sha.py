@@ -538,3 +538,53 @@ def test_install_intel_host_no_exact_tag_falls_back_same_arch(sha_env):
     assert "[sha] verified" in result.stdout, result.stdout
     assert "[BLOCKED]" not in result.stdout
     assert "SHA mismatch" not in result.stdout
+
+
+# ----------------------- Case 8: package line precedes its details (#73) -----------------------
+# Per-package detail lines ([sha] ...) used to print BEFORE the [ok] verdict
+# line, so a package's details visually attached to the PREVIOUS package.
+# Contract: the [ok] line prints first; details print indented beneath it.
+
+WGET_SHA = "a" * 64
+CURL_SHA = "c" * 64
+
+
+def test_upgrade_ok_line_precedes_its_sha_detail(sha_env):
+    """Two packages: each [ok] line must precede its own [sha] detail, and the
+    first package's detail must precede the second package's [ok] line."""
+    write_formula_info(sha_env["brew"], "wget", "1.25.0", WGET_SHA)
+    write_canonical_sha(sha_env["api"], "wget", WGET_SHA)
+    write_deps(sha_env["brew"], "wget", [])
+    write_formula_info(sha_env["brew"], "curl", "8.10.0", CURL_SHA)
+    write_canonical_sha(sha_env["api"], "curl", CURL_SHA)
+    write_deps(sha_env["brew"], "curl", [])
+    write_outdated(
+        sha_env["brew"],
+        [
+            outdated_entry("wget", "1.24.0", "1.25.0"),
+            outdated_entry("curl", "8.9.0", "8.10.0"),
+        ],
+    )
+
+    result = run_safe(SAFE_UPGRADE, ["--yes"], input_text="")
+    # Scope to the security-check section — the age-check section above it
+    # prints its own [ok] lines for the same packages.
+    out = result.stdout[result.stdout.index("Running security checks") :]
+    idx_ok_wget = out.index("[ok] wget 1.25.0")
+    idx_sha_wget = out.index(f"[sha] verified {WGET_SHA[:16]}")
+    idx_ok_curl = out.index("[ok] curl 8.10.0")
+    idx_sha_curl = out.index(f"[sha] verified {CURL_SHA[:16]}")
+    assert idx_ok_wget < idx_sha_wget < idx_ok_curl < idx_sha_curl, out
+
+
+def test_install_ok_line_precedes_its_sha_detail(sha_env):
+    """Symmetric contract for brew-safe-install."""
+    write_formula_info(sha_env["brew"], "wget", "1.25.0", WGET_SHA)
+    write_canonical_sha(sha_env["api"], "wget", WGET_SHA)
+    write_deps(sha_env["brew"], "wget", [])
+
+    result = run_safe(SAFE_INSTALL, ["wget"], input_text="n\n")
+    out = result.stdout
+    idx_ok = out.index("[ok] wget 1.25.0")
+    idx_sha = out.index(f"[sha] verified {WGET_SHA[:16]}")
+    assert idx_ok < idx_sha, out

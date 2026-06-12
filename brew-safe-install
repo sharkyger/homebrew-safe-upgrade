@@ -417,10 +417,15 @@ except Exception:
         #   no_bottle  -> "[sha] no bottle — built from source", verdict=no_bottle
         #   tap_only   -> "[sha] tap-only formula — no canonical SHA available", verdict=tap_only
         #   api_error  -> queued into SHA_API_ERROR_PKGS for a single batch prompt at end of loop
+        # Passing-path [sha] detail lines are BUFFERED in SHA_DETAIL and printed
+        # under the package's [ok] verdict line, so details never appear above
+        # the line they belong to (#73). [BLOCKED] still prints immediately —
+        # it IS the verdict and names the package. Symmetric with brew-safe-upgrade.
         SHA_VERDICT="skip"
+        SHA_DETAIL=""
         if [ "$VERIFY_SHA" = true ]; then
             if [ "$PKG_TYPE" = "cask" ]; then
-                echo "    [sha] casks not in scope — brew enforces cask-file SHA at install"
+                SHA_DETAIL="    [sha] casks not in scope — brew enforces cask-file SHA at install"$'\n'
                 SHA_VERDICT="cask"
             else
                 # 1. Extract local SHA from the same `brew info` payload we already fetched.
@@ -453,7 +458,7 @@ except Exception:
                 # that never ships bottles), there is nothing to compare against
                 # the canonical record — treat as no-bottle, not as tampering.
                 if [ -z "$LOCAL_SHA" ]; then
-                    echo "    [sha] no local bottle — built from source, skipping canonical check"
+                    SHA_DETAIL="    [sha] no local bottle — built from source, skipping canonical check"$'\n'
                     SHA_VERDICT="no_bottle"
                     SHA_HTTP_CODE="SKIP"
                 fi
@@ -464,13 +469,13 @@ except Exception:
                     200)
                         CANON_SHA=$(echo "$CANON_JSON" | python3 "$BOTTLE_RESOLVER" --source canonical 2>/dev/null)
                         if [ "$CANON_SHA" = "NO_BOTTLE" ]; then
-                            echo "    [sha] no bottle — built from source"
+                            SHA_DETAIL="    [sha] no bottle — built from source"$'\n'
                             SHA_VERDICT="no_bottle"
                         elif [ "$CANON_SHA" = "PARSE_ERROR" ] || [ -z "$CANON_SHA" ]; then
                             SHA_API_ERROR_PKGS="$SHA_API_ERROR_PKGS $pkg"
                             SHA_VERDICT="api_error"
                         elif [ "$LOCAL_SHA" = "$CANON_SHA" ]; then
-                            echo "    [sha] verified ${LOCAL_SHA:0:16}=${CANON_SHA:0:16}"
+                            SHA_DETAIL="    [sha] verified ${LOCAL_SHA:0:16}=${CANON_SHA:0:16}"$'\n'
                             SHA_VERDICT="match"
                         else
                             # Tampering — print BOTH full fingerprints so the user can verify themselves.
@@ -482,7 +487,7 @@ except Exception:
                         fi
                         ;;
                     404)
-                        echo "    [sha] tap-only formula — no canonical SHA available"
+                        SHA_DETAIL="    [sha] tap-only formula — no canonical SHA available"$'\n'
                         SHA_VERDICT="tap_only"
                         ;;
                     *)
@@ -499,6 +504,7 @@ except Exception:
             : # already echoed [BLOCKED] above; do not add to CLEAN_PKGS
         else
             echo "  [ok] $pkg $VERSION"
+            printf '%s' "$SHA_DETAIL"
             CLEAN_PKGS="$CLEAN_PKGS $pkg"
             CLEAN_COUNT=$((CLEAN_COUNT + 1))
         fi

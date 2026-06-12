@@ -8,6 +8,21 @@ The project is pre-1.0; expect minor breaking changes between 0.x releases until
 
 ## [Unreleased]
 
+## [0.2.7] — 2026-06-12
+
+### Fixed
+
+- **More precise NVD CPE applicability matching — same-named packages from other ecosystems no longer block a Homebrew formula** ([#74](https://github.com/sharkyger/homebrew-safe-upgrade/issues/74)). NVD keyword search matches on text, so a formula could collide with an identically-named package from a language ecosystem (the canonical `cmake` formula was permanently blocked by an advisory for the long-dead npm `cmake` package). The scanner now reads the CPE 2.3 `target_sw` field and skips advisories whose every applicability statement is pinned to a *different* language ecosystem (node.js, python, ruby, php, rust, go, java, …). Fail-closed bounds kept: an advisory with even one generic or matching applicability statement still flags, and CPE relevance is now evaluated even when no version is supplied (previously CPE inspection was skipped entirely in that path — distro- and OS-scoped advisories are now filtered there too).
+- **Per-package output lines no longer print above the package they belong to** ([#73](https://github.com/sharkyger/homebrew-safe-upgrade/issues/73)). In the "Running security checks" step, detail lines such as `[sha] verified …` printed *before* their `[ok] <package>` line, visually attaching each package's details to the previous package. Details now print indented beneath the package's own verdict line, in `brew safe-upgrade` and `brew safe-install` alike.
+
+### Added
+
+- **The age-check CVE bypass now names the CVEs it acted on** ([#72](https://github.com/sharkyger/homebrew-safe-upgrade/issues/72)). When a too-fresh upgrade is allowed through because the *installed* version has known CVEs, the affected CVE IDs (severity, CVSS score, source — up to 5) print under the bypass line, so the decision to upgrade rests on data instead of a bare "has CVEs" note.
+
+### Documentation
+
+- **README documents where the standalone scanner lives for each install route** ([#75](https://github.com/sharkyger/homebrew-safe-upgrade/issues/75)): `$(brew --prefix safe-upgrade)/libexec/dependency_security_check.py` for tap installs, `$(brew --prefix)/bin/dependency_security_check.py` for script installs.
+
 ## [0.2.6] — 2026-06-12
 
 ### Fixed

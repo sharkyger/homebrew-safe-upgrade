@@ -74,6 +74,50 @@ ECOSYSTEM_MAP = {
     },
 }
 
+# Distro-specific CPE vendors whose package versions don't match upstream.
+DISTRO_VENDORS = {
+    "opensuse",
+    "suse",
+    "redhat",
+    "debian",
+    "ubuntu",
+    "canonical",
+    "fedoraproject",
+    "oracle",
+    "centos",
+}
+
+# CPE 2.3 `target_sw` values that scope an advisory to a language-package
+# ecosystem. NVD keyword search matches on text, so a package can collide
+# with a same-named package from another ecosystem (e.g. the npm "cmake"
+# package, cpe:2.3:a:cmake_project:cmake:-:*:*:*:*:node.js:*:*, vs the
+# canonical cmake formula). A vulnerable CPE whose target_sw belongs to a
+# DIFFERENT ecosystem than the one being checked is not about this package.
+ECOSYSTEM_TARGET_SW = {
+    "npm": {"node.js", "nodejs", "npm"},
+    "pip": {"python"},
+    "gem": {"ruby", "rails", "rubygems"},
+    "composer": {"php"},
+    "cargo": {"rust"},
+    "go": {"go", "golang"},
+    "maven": {"java", "maven"},
+    "brew": set(),
+}
+_ALL_ECOSYSTEM_TARGET_SW = set().union(*ECOSYSTEM_TARGET_SW.values())
+
+
+def _foreign_target_sw(target_sw, ecosystem):
+    """True if a CPE's target_sw pins it to a DIFFERENT language ecosystem.
+
+    Generic values (*, -, empty) and values we don't recognize as a language
+    ecosystem are never foreign — only a positive match against another
+    ecosystem's known target_sw set disqualifies a CPE (fail closed).
+    """
+    if target_sw in ("*", "-", ""):
+        return False
+    own = ECOSYSTEM_TARGET_SW.get(ecosystem, set())
+    return target_sw in _ALL_ECOSYSTEM_TARGET_SW and target_sw not in own
+
 
 def resolve_latest_version(package_name, ecosystem):
     """Resolve the latest version of a package from its registry."""
@@ -506,85 +550,85 @@ def query_nvd(package_name, ecosystem, version=None):
                     score = cvss.get("baseScore", score)
                     break
 
-            # Version filtering via CPE matches
+            # CPE applicability — evaluated with or without a version. First
+            # pass: which vulnerable CPEs are actually about THIS package in
+            # THIS ecosystem? Distro/OS-scoped applicability and CPEs whose
+            # target_sw pins them to a different language ecosystem (the npm
+            # "cmake" advisory vs the canonical cmake formula) don't count.
+            relevant_cpes = []
+            has_any_cpe = False
+            for config in cve.get("configurations", []):
+                for node in config.get("nodes", []):
+                    for cpe in node.get("cpeMatch", []):
+                        if not cpe.get("vulnerable", False):
+                            continue
+                        has_any_cpe = True
+                        # cpe:2.3:part:vendor:product:version:update:edition:
+                        #   language:sw_edition:target_sw:target_hw:other
+                        cpe_parts = cpe.get("criteria", "").split(":")
+                        if len(cpe_parts) >= 5:
+                            cpe_type = cpe_parts[2].lower()  # a=app, o=os, h=hw
+                            cpe_vendor = cpe_parts[3].lower()
+                            # OS-type CPEs are distro packages, not upstream
+                            if cpe_type == "o":
+                                continue
+                            if cpe_vendor in DISTRO_VENDORS:
+                                continue
+                        if len(cpe_parts) >= 11 and _foreign_target_sw(
+                            cpe_parts[10].lower(), ecosystem
+                        ):
+                            continue
+                        relevant_cpes.append(cpe)
+
+            # Every applicability statement points at a distro, an OS, or a
+            # different ecosystem — the CVE is not about the package we're
+            # checking. (A CVE with even ONE generic/relevant CPE stays in:
+            # ambiguity counts as affected.)
+            if has_any_cpe and not relevant_cpes:
+                continue
+
+            # Version filtering via the relevant CPE matches
             if version:
                 affected = False
-                has_cpe = False
-                has_any_cpe = False
-                # Distro-specific vendors whose package versions don't match upstream
-                distro_vendors = {
-                    "opensuse",
-                    "suse",
-                    "redhat",
-                    "debian",
-                    "ubuntu",
-                    "canonical",
-                    "fedoraproject",
-                    "oracle",
-                    "centos",
-                }
-                configurations = cve.get("configurations", [])
-                for config in configurations:
-                    for node in config.get("nodes", []):
-                        for cpe in node.get("cpeMatch", []):
-                            if not cpe.get("vulnerable", False):
-                                continue
-                            has_any_cpe = True
-                            # Skip distro/OS-specific CPEs — their versions don't match upstream
-                            cpe_str = cpe.get("criteria", "")
-                            cpe_parts = cpe_str.split(":")
-                            if len(cpe_parts) >= 5:
-                                cpe_type = cpe_parts[2].lower()  # a=app, o=os, h=hw
-                                cpe_vendor = cpe_parts[3].lower()
-                                # OS-type CPEs are distro packages, not upstream
-                                if cpe_type == "o":
-                                    continue
-                                if cpe_vendor in distro_vendors:
-                                    continue
-                            has_cpe = True
-                            ver_end_exc = cpe.get("versionEndExcluding")
-                            ver_end_inc = cpe.get("versionEndIncluding")
-                            ver_start_inc = cpe.get("versionStartIncluding")
-                            ver_start_exc = cpe.get("versionStartExcluding")
+                for cpe in relevant_cpes:
+                    ver_end_exc = cpe.get("versionEndExcluding")
+                    ver_end_inc = cpe.get("versionEndIncluding")
+                    ver_start_inc = cpe.get("versionStartIncluding")
+                    ver_start_exc = cpe.get("versionStartExcluding")
 
-                            if ver_end_exc or ver_end_inc or ver_start_inc or ver_start_exc:
-                                # Range-based CPE — check if our version falls within
-                                in_range = True
-                                if ver_start_inc and _ver_lt(version, ver_start_inc):
-                                    in_range = False
-                                if ver_start_exc and _ver_le(version, ver_start_exc):
-                                    in_range = False
-                                if ver_end_exc and _ver_ge(version, ver_end_exc):
-                                    in_range = False
-                                if ver_end_inc and _ver_gt(version, ver_end_inc):
-                                    in_range = False
-                                if in_range:
-                                    affected = True
-                            else:
-                                # Exact version match — extract from CPE URI
-                                # Format: cpe:2.3:a:vendor:product:VERSION:...
-                                cpe_str = cpe.get("criteria", "")
-                                cpe_parts = cpe_str.split(":")
-                                if len(cpe_parts) >= 6:
-                                    cpe_ver = cpe_parts[5]
-                                    if cpe_ver in ("*", "-", ""):
-                                        affected = True  # Wildcard — can't determine
-                                    elif parse_version(version) == parse_version(cpe_ver):
-                                        affected = True
+                    if ver_end_exc or ver_end_inc or ver_start_inc or ver_start_exc:
+                        # Range-based CPE — check if our version falls within
+                        in_range = True
+                        if ver_start_inc and _ver_lt(version, ver_start_inc):
+                            in_range = False
+                        if ver_start_exc and _ver_le(version, ver_start_exc):
+                            in_range = False
+                        if ver_end_exc and _ver_ge(version, ver_end_exc):
+                            in_range = False
+                        if ver_end_inc and _ver_gt(version, ver_end_inc):
+                            in_range = False
+                        if in_range:
+                            affected = True
+                    else:
+                        # Exact version match — extract from CPE URI
+                        # Format: cpe:2.3:a:vendor:product:VERSION:...
+                        cpe_parts = cpe.get("criteria", "").split(":")
+                        if len(cpe_parts) >= 6:
+                            cpe_ver = cpe_parts[5]
+                            if cpe_ver in ("*", "-", ""):
+                                affected = True  # Wildcard — can't determine
+                            elif parse_version(version) == parse_version(cpe_ver):
+                                affected = True
 
                 # If CPE data exists and our version isn't in any affected range, skip
-                if has_cpe and not affected:
-                    continue
-
-                # All CPEs were distro-specific — not relevant to upstream/Homebrew
-                if has_any_cpe and not has_cpe:
+                if relevant_cpes and not affected:
                     continue
 
                 # Fallback: if no CPE data, try to extract version range from description.
                 # GitHub-style advisories often read "Starting in version X and prior to
                 # version Y" — handle the optional "version"/"v" prefix and inclusive vs
                 # exclusive boundaries.
-                if not has_cpe:
+                if not relevant_cpes:
                     v_re = r"(?:version\s+)?v?([\d]+(?:\.[\d]+)*)"
 
                     # Exclusive upper bound: fixed at the matched version
