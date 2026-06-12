@@ -8,9 +8,11 @@ The project is pre-1.0; expect minor breaking changes between 0.x releases until
 
 ## [Unreleased]
 
+## [0.2.6] — 2026-06-12
+
 ### Fixed
 
-- **`brew safe-upgrade --help` (and `safe-install` / `safe-update`) now render the tool's own usage instead of Homebrew's generic `Example usage:` banner** (follow-up to [#66](https://github.com/sharkyger/homebrew-safe-upgrade/issues/66)). Homebrew's dispatcher intercepts `--help` *before* exec'ing an external command and renders help only from lines beginning with `#:` (see [External Commands](https://docs.brew.sh/External-Commands)); the scripts carried plain `#` comments, so brew fell back to its built-in banner and `print_help()` never ran on that path. Each `brew-safe-*` script now carries a `#:` help block mirroring its `print_help()`. The direct-invocation `--help` added in 0.2.5 was unaffected and continues to work.
+- **`brew safe-upgrade --help` (and `safe-install` / `safe-update`) now render the tool's own usage instead of Homebrew's generic `Example usage:` banner** (follow-up to [#66](https://github.com/sharkyger/homebrew-safe-upgrade/issues/66)). Homebrew's dispatcher intercepts `--help` *before* exec'ing an external command and renders help only from lines beginning with `#:` (see [External Commands](https://docs.brew.sh/External-Commands)); the scripts carried plain `#` comments, so brew fell back to its built-in banner and `print_help()` never ran on that path. Each `brew-safe-*` script now carries a `#:` help block mirroring its `print_help()`, and a regression test drives `brew <cmd> --help` through the real dispatcher to assert the generic banner is gone. The direct-invocation `--help` added in 0.2.5 was unaffected and continues to work.
 
 ## [0.2.5] — 2026-06-10
 
@@ -190,7 +192,11 @@ pre-tag history by theme rather than by release. Full detail is in `git log`.
 - CodeQL, gitleaks, and dependabot wired up.
 - Community health files: issue templates (bug, false-positive, feature), discussion link from README on the open `--min-age` default question.
 
-[Unreleased]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.2.6...HEAD
+[0.2.6]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.2.5...v0.2.6
+[0.2.5]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.2.4...v0.2.5
+[0.2.4]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.2.3...v0.2.4
+[0.2.3]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.1.1...v0.2.0
