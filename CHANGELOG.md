@@ -8,6 +8,14 @@ The project is pre-1.0; expect minor breaking changes between 0.x releases until
 
 ## [Unreleased]
 
+### Added
+
+- **Authenticated GitHub API requests for the age check** ([#84](https://github.com/sharkyger/homebrew-safe-upgrade/issues/84)). The minimum-age/freshness check reads release dates from the GitHub API, which allows only 60 requests/hour for unauthenticated callers — so a machine with many outdated packages (or repeated runs) could exhaust the quota and lose the ability to verify package age. `brew safe-upgrade` and `brew safe-install` now send authenticated requests (5,000 requests/hour) when a token is available, resolved in order from `GH_TOKEN`, `GITHUB_TOKEN`, then an authenticated `gh` CLI. With no token the tool still works, just at the lower anonymous limit.
+
+### Fixed
+
+- **A GitHub API rate limit is now reported distinctly instead of being mistaken for unverifiable age** ([#84](https://github.com/sharkyger/homebrew-safe-upgrade/issues/84)). When the API rate limit was exhausted, the age check previously returned the same "age could not be verified" result as an unreachable repo, so — under the fail-closed default — every remaining package was silently held. The tool now detects the rate-limit response, stops, and reports when the limit resets, with guidance to authenticate (`GH_TOKEN` / `gh auth login`) or re-run with `--allow-unknown-age`. `--allow-unknown-age` now also permits packages whose age check was blocked by a rate limit.
+
 ## [0.2.7] — 2026-06-12
 
 ### Fixed

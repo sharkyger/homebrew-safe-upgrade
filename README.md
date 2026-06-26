@@ -171,7 +171,7 @@ The flag is per-invocation by design — the safe default always returns the nex
 
 Hold back **formulae, casks, and tap formulae** published less than N days ago. Protects against supply chain attacks where a compromised version is published minutes after credential theft — before any CVE database knows about it. Worm-class npm compromises (Shai-Hulud, Mini Shai-Hulud) have repeatedly shown live windows of 1–6 hours between malicious publish and registry takedown; a multi-day freshness hold trades a small lag against the entire attack window.
 
-The release age is read from each package's home repo — `homebrew-core` for core formulae, `homebrew-cask` for casks, and the tap's own repo for tap formulae.
+The release age is read from each package's home repo via the GitHub API — `homebrew-core` for core formulae, `homebrew-cask` for casks, and the tap's own repo for tap formulae.
 
 ```bash
 brew safe-upgrade             # uses default --min-age 3
@@ -186,11 +186,30 @@ Checking package age (min-age: 3 days)...
   [HOLD] some-cask 5.0 — age could not be verified (min-age: 3 days); re-run with --allow-unknown-age to override
 ```
 
-**Fail closed.** If the release age cannot be verified — the home repo is unreachable, GitHub is rate-limiting, or a tap uses a non-standard layout — the package is **held**, never waved through. This is deliberate: a freshness hold that silently no-ops the moment it can't reach the registry would be worthless exactly when an attacker can induce that condition. Pass `--allow-unknown-age` to permit unverifiable-age packages when you accept that risk.
+**Fail closed.** If the release age cannot be verified — the home repo is unreachable, or a tap uses a non-standard layout — the package is **held**, never waved through. This is deliberate: a freshness hold that silently no-ops the moment it can't reach the registry would be worthless exactly when an attacker can induce that condition. Pass `--allow-unknown-age` to permit unverifiable-age packages when you accept that risk.
 
 **CVE-aware bypass:** If your *installed* version has known CVEs, the freshness hold on a too-fresh upgrade is skipped — the fresh version is likely the fix, and holding it back would leave you exposed. So `--min-age` never prevents security patches from reaching you.
 
 Use `--min-age 0` to disable the freshness hold entirely.
+
+#### GitHub API authentication (rate limits)
+
+The age check queries the GitHub API. Unauthenticated requests are limited to **60 per hour per IP**, so on a machine with many outdated packages — or across repeated runs — the quota runs out and the age check can no longer verify packages. Authenticate to raise the limit to **5,000 per hour**:
+
+```bash
+export GH_TOKEN=ghp_...      # a Personal Access Token (no scopes needed), or
+gh auth login                # the gh CLI token is picked up automatically
+```
+
+The token is read from `GH_TOKEN`, then `GITHUB_TOKEN`, then an authenticated [`gh`](https://cli.github.com/) CLI — whichever is found first. In GitHub Actions, pass the built-in token:
+
+```yaml
+- run: brew safe-upgrade
+  env:
+    GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+```
+
+If the rate limit is reached, the run **stops and reports when the limit resets**, rather than mislabeling the packages as unverifiable. Pass `--allow-unknown-age` to proceed anyway (fail-open — the age check is skipped for the affected packages).
 
 ### Cask CVE coverage (honest limits)
 

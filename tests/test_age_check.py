@@ -55,6 +55,10 @@ def age_env(tmp_path, monkeypatch):
     monkeypatch.setenv("MOCK_COMMITS_API_DIR", str(commits_dir))
     monkeypatch.setenv("PATH", f"{MOCK_BREW_BIN}:{os.environ['PATH']}")
     monkeypatch.delenv("BREW_SAFE_NO_DEPS", raising=False)
+    # Hermetic: pin a token so resolve_gh_token() short-circuits and never shells
+    # out to a host `gh auth token`. In mock mode the token is unused (the commits
+    # API is read from disk, not curled), so this changes nothing but the speed.
+    monkeypatch.setenv("GH_TOKEN", "test-token")
 
     stub = tmp_path / "cve_stub.py"
     stub.write_text("#!/usr/bin/env python3\nimport sys\nprint('{}')\nsys.exit(0)\n")
@@ -374,3 +378,97 @@ def test_upgrade_too_fresh_but_installed_has_cve_bypasses_hold(age_env, monkeypa
     assert "[HIGH] CVE-2099-1234 (CVSS 8.1) — NIST NVD" in result.stdout
     assert result.stdout.index("CVE-2099-1234") > bypass_idx
     assert "[HOLD] wget" not in result.stdout
+
+
+# ----------------------- GitHub API rate-limit handling (issue #84) -----------------------
+#
+# The age check queries GitHub's commits API. Unauthenticated that's only 60
+# req/hour/IP, so a busy machine exhausts the quota and every lookup then fails.
+# A rate-limit must be a DISTINCT verdict from "unknown age": the run aborts with
+# the reset time (fail closed) unless --allow-unknown-age is passed. The
+# `__RATELIMIT__ [epoch]` mock body simulates a 403/429 without real curl/headers.
+#
+# NOTE: that authenticated requests actually send the Authorization header is NOT
+# unit-testable through this seam — MOCK_COMMITS_API_DIR bypasses curl entirely,
+# so no header is built. Token wiring (GH_TOKEN/GITHUB_TOKEN/`gh auth token`) is
+# covered by the container dogfood, not here.
+
+# A fixed token keeps the run hermetic: resolve_gh_token() returns it immediately
+# and never shells out to a host `gh` during the test.
+_RL_ENV = {"GH_TOKEN": "test-token"}
+
+
+def test_upgrade_rate_limit_aborts_unless_allow_unknown_age(age_env):
+    """A rate-limited age lookup aborts the whole upgrade with a clear, actionable
+    message — NOT a silent per-package hold."""
+    write_outdated(
+        age_env["brew"],
+        formulae=[{"name": "wget", "installed_versions": ["1.24.0"], "current_version": "1.25.0"}],
+    )
+    set_commits(age_env["commits"], "wget", "__RATELIMIT__")
+
+    result = run_upgrade(["--no-deps"], env_extra=_RL_ENV)
+
+    assert result.returncode != 0
+    assert "rate limit reached" in result.stdout
+    assert "GH_TOKEN" in result.stdout
+    assert "gh auth login" in result.stdout
+    assert "--allow-unknown-age" in result.stdout
+    assert "[ok] wget" not in result.stdout
+
+
+def test_upgrade_rate_limit_allowed_by_allow_unknown_age(age_env):
+    """--allow-unknown-age is the explicit opt-out: a rate-limited lookup is then
+    treated like unknown age and the package proceeds."""
+    write_outdated(
+        age_env["brew"],
+        formulae=[{"name": "wget", "installed_versions": ["1.24.0"], "current_version": "1.25.0"}],
+    )
+    set_commits(age_env["commits"], "wget", "__RATELIMIT__")
+
+    result = run_upgrade(["--no-deps", "--allow-unknown-age"], env_extra=_RL_ENV)
+
+    expected = "[ok] wget 1.25.0 — GitHub API rate-limited, allowed by --allow-unknown-age"
+    assert expected in result.stdout
+    assert "rate limit reached" not in result.stdout
+
+
+def test_install_rate_limit_aborts_unless_allow_unknown_age(age_env):
+    """Install-side parity: a rate-limited lookup aborts the install."""
+    write_cask_info(age_env["brew"], "coderabbit", "0.5.4")
+    set_commits(age_env["commits"], "coderabbit", "__RATELIMIT__")
+
+    result = run_install(["coderabbit", "--no-deps"], env_extra=_RL_ENV)
+
+    assert result.returncode != 0
+    assert "rate limit reached" in result.stdout
+    assert "GH_TOKEN" in result.stdout
+    assert "gh auth login" in result.stdout
+
+
+def test_install_rate_limit_allowed_by_allow_unknown_age(age_env):
+    """Install-side --allow-unknown-age covers the rate-limit case too."""
+    write_cask_info(age_env["brew"], "coderabbit", "0.5.4")
+    set_commits(age_env["commits"], "coderabbit", "__RATELIMIT__")
+
+    result = run_install(["coderabbit", "--no-deps", "--allow-unknown-age"], env_extra=_RL_ENV)
+
+    assert "GitHub API rate-limited — allowed by --allow-unknown-age" in result.stdout
+    assert "rate limit reached" not in result.stdout
+
+
+def test_rate_limit_abort_reports_reset_time(age_env):
+    """When the x-ratelimit-reset epoch is known, the abort message reports the
+    reset time in local time (the reporter's explicit ask)."""
+    epoch = 1782413044  # fixed; rendered in the test machine's local tz
+    expected = datetime.datetime.fromtimestamp(epoch).strftime("%H:%M local time")
+    write_outdated(
+        age_env["brew"],
+        formulae=[{"name": "wget", "installed_versions": ["1.24.0"], "current_version": "1.25.0"}],
+    )
+    set_commits(age_env["commits"], "wget", f"__RATELIMIT__ {epoch}")
+
+    result = run_upgrade(["--no-deps"], env_extra=_RL_ENV)
+
+    assert result.returncode != 0
+    assert f"(resets {expected})" in result.stdout

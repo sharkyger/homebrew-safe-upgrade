@@ -43,6 +43,9 @@ def mock_env(tmp_path, monkeypatch):
     monkeypatch.setenv("PATH", f"{MOCK_BREW_BIN}:{os.environ['PATH']}")
     # Ensure no leak from caller's env
     monkeypatch.delenv("BREW_SAFE_NO_DEPS", raising=False)
+    # Hermetic: pin a token so resolve_gh_token() short-circuits and never shells
+    # out to a host `gh auth token` (unused in mock mode — curl is bypassed).
+    monkeypatch.setenv("GH_TOKEN", "test-token")
 
     # SHA verification became default-on in v0.2.0. Tests in this file don't
     # mock canonical formulae.brew.sh responses, so point the mock dir at an
@@ -238,6 +241,29 @@ def test_installed_old_version_is_treated_as_incoming(mock_env, tmp_path):
     )
     assert "Found 1 incoming dependency version(s) to check" in result.stdout
     assert "[ok-dep] openssl@3 3.5.0" in result.stdout
+
+
+def test_dep_rate_limit_aborts_run(mock_env, tmp_path):
+    """A GitHub API rate limit while checking a transitive dependency aborts the
+    whole run (issue #84) — the dep-path -2 verdict must be caught BEFORE the
+    generic '-lt 0' unknown-age hold, and name the dependency."""
+    write_formula_info(mock_env, "wget", "1.25.0")
+    write_formula_info(mock_env, "openssl@3", "3.5.0")
+    write_deps(mock_env, "wget", ["openssl@3"])
+    write_installed_version(mock_env, "openssl@3", "3.0.0")  # older → incoming
+    # wget itself resolves old via _default; the dep lookup is rate-limited.
+    (tmp_path / "commits_api" / "openssl@3.json").write_text("__RATELIMIT__")
+
+    stub = make_cve_stub(tmp_path)  # all packages clean
+
+    result = run_safe_install(
+        ["wget"],
+        env_extra={"DEPENDENCY_SECURITY_CHECK": str(stub), "GH_TOKEN": "test-token"},
+        input_text="n\n",
+    )
+    assert result.returncode != 0
+    assert "rate limit reached" in result.stdout
+    assert "for dependency openssl@3" in result.stdout
 
 
 def test_revision_suffix_does_not_falsely_classify_as_incoming(mock_env, tmp_path):
