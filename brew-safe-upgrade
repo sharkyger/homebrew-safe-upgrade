@@ -11,11 +11,15 @@
 #:      --min-age N            Hold packages published less than N days ago
 #:                             (default: 3; 0 disables the freshness hold).
 #:      --allow-unknown-age    Permit packages whose age cannot be verified
-#:                             (default: held — fail closed).
+#:                             (default: held — fail closed). Also proceeds when
+#:                             the GitHub API rate limit blocks the age check.
 #:      --no-verify-sha        Skip bottle SHA verification (default: on).
 #:      --no-deps              Skip transitive dependency checking.
 #:      --version              Print version, install route, helper status.
 #:      -h, --help             Show this help and exit.
+#:
+#:  The age check queries GitHub's API (60 requests/hour unauthenticated). Set
+#:  GH_TOKEN or GITHUB_TOKEN, or run `gh auth login`, for 5000/hour.
 #:
 #:  NOTE: Homebrew intercepts -h/--help/--usage/-? before exec'ing this script
 #:  and renders help from these `#:` lines. The print_help() block below serves
@@ -119,14 +123,25 @@ Options:
   --min-age N            Hold packages published less than N days ago
                          (default: 3; --min-age 0 disables the freshness hold).
   --allow-unknown-age    Permit packages whose release age cannot be verified
-                         (default: such packages are HELD — fail closed).
+                         (default: such packages are HELD — fail closed). Also
+                         lets the run proceed when the GitHub API rate limit
+                         blocks the age check.
   --no-verify-sha        Skip bottle SHA verification (default: ON).
   --no-deps              Skip transitive dependency checking (default: check).
   --version              Print version, install route, and helper-file status.
   -h, --help             Show this help and exit.
 
+The age check queries GitHub's API, which is rate-limited to 60 requests/hour
+for unauthenticated requests. Authenticate for 5000/hour: set GH_TOKEN or
+GITHUB_TOKEN, or run `gh auth login` (the gh CLI token is used automatically).
+When the limit is hit, the run aborts with the reset time unless
+--allow-unknown-age is passed.
+
 Environment:
   BREW_SAFE_NO_DEPS=1    Same as --no-deps.
+  GH_TOKEN / GITHUB_TOKEN
+                         GitHub token for the age check (raises the API limit to
+                         5000/hour). Falls back to `gh auth token` if unset.
 
 Examples:
   brew safe-upgrade                  # check & upgrade everything outdated
@@ -202,6 +217,25 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Resolve a GitHub API token ONCE per run. The age check queries GitHub's
+# commits API, which allows only 60 requests/hour unauthenticated (per IP) vs
+# 5000/hour authenticated — so a busy machine exhausts the anonymous quota and
+# every age lookup then fails (issue #84). Priority: $GH_TOKEN, then
+# $GITHUB_TOKEN, then an authenticated `gh` CLI. Empty when none are available
+# (requests stay anonymous and still work, just rate-limited). Resolved here,
+# before the per-package loop, so `gh auth token` runs at most once.
+resolve_gh_token() {
+    if [ -n "${GH_TOKEN:-}" ]; then
+        printf '%s' "$GH_TOKEN"
+    elif [ -n "${GITHUB_TOKEN:-}" ]; then
+        printf '%s' "$GITHUB_TOKEN"
+    elif command -v gh >/dev/null 2>&1; then
+        # stderr suppressed: never prompt, never fail the run if gh is unauthed.
+        gh auth token 2>/dev/null || true
+    fi
+}
+GH_AUTH_TOKEN="$(resolve_gh_token)"
+
 # Resolve the release age (in days) of a package's current formula/cask file by
 # reading the last-commit date from the *correct* Homebrew GitHub repo for its
 # type. Routing this by type is the fix for the fail-open bug: casks live in
@@ -209,11 +243,16 @@ done
 # for them returns [] and used to be treated as "age unknown → skip".
 #   $1 = lookup name (core formula name, cask token, or full tap path user/tap/name)
 #   $2 = type: core | cask | tap
-# Echoes "<age_days> <YYYY-MM-DD>"; "-1 unknown" when the age cannot be resolved.
-# Callers MUST treat "-1" as "could not verify" (hold), never as "ok" (fail closed).
+# Echoes one of:
+#   "<age_days> <YYYY-MM-DD>"   resolved age
+#   "-1 unknown"                age could not be resolved -> hold (fail closed)
+#   "-2 ratelimited <reset>"    GitHub API rate limit hit; <reset> = epoch seconds
+#                               (0 if unknown) -> callers abort unless --allow-unknown-age
+# Callers MUST treat "-1"/"-2" as "could not verify", never as "ok" (fail closed).
 # Test seams: MOCK_COMMITS_API_DIR (canned JSON per name, '/'→'_' in filenames;
-# falls back to _default.json, else []) and MOCK_COMMITS_API_LOG (appends
-# "<type>\t<url>" so tests can assert correct-repo routing).
+# falls back to _default.json, else []; a body starting with "__RATELIMIT__"
+# simulates a rate-limit, optional trailing epoch) and MOCK_COMMITS_API_LOG
+# (appends "<type>\t<url>" so tests can assert correct-repo routing).
 fetch_pkg_age() {
     local name="$1" ptype="$2" url first user tap token json key
     case "$ptype" in
@@ -254,8 +293,41 @@ fetch_pkg_age() {
         else
             json="[]"
         fi
+        # Test seam: a "__RATELIMIT__ [epoch]" body simulates a 403/429 without
+        # needing real curl/headers (the mock dir bypasses curl entirely).
+        case "$json" in
+            __RATELIMIT__*)
+                printf '%s\n' "-2 ratelimited $(printf '%s' "$json" | tr -dc '0-9')"
+                return
+                ;;
+        esac
     else
-        json=$(curl -sf "$url" 2>/dev/null || echo "[]")
+        # Capture body, HTTP status, and rate-limit headers (mirrors the bottle
+        # SHA-verify pattern below). Authenticated when a token was resolved —
+        # the header goes in an array so the value is passed as ONE argument (no
+        # word-splitting); the nounset guard keeps an empty array safe under
+        # `set -u` on bash 3.2 (macOS), matching the INCOMING_DEPS_ARR idiom.
+        local hdr body http reset remaining
+        local auth=()
+        [ -n "$GH_AUTH_TOKEN" ] && auth=(-H "Authorization: Bearer $GH_AUTH_TOKEN")
+        hdr=$(mktemp)
+        body=$(mktemp)
+        http=$(curl -s -o "$body" -D "$hdr" -w "%{http_code}" --max-time 10 \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            ${auth[@]+"${auth[@]}"} \
+            "$url" 2>/dev/null || echo "000")
+        json=$(cat "$body" 2>/dev/null || echo "[]")
+        reset=$(grep -i '^x-ratelimit-reset:' "$hdr" | tr -dc '0-9')
+        remaining=$(grep -i '^x-ratelimit-remaining:' "$hdr" | tr -dc '0-9')
+        rm -f "$hdr" "$body"
+        # GitHub signals a primary rate limit with HTTP 403/429 AND
+        # x-ratelimit-remaining: 0. Distinguish it from a real "unknown age" so
+        # the caller can abort with the reset time instead of silently holding.
+        if { [ "$http" = "403" ] || [ "$http" = "429" ]; } && [ "${remaining:-x}" = "0" ]; then
+            printf '%s\n' "-2 ratelimited ${reset:-0}"
+            return
+        fi
     fi
 
     printf '%s' "$json" | python3 -c "
@@ -271,6 +343,24 @@ try:
 except Exception:
     print('-1 unknown')
 " 2>/dev/null
+}
+
+# Abort the run on a GitHub API rate limit (issue #84). $1 = the fetch_pkg_age
+# "-2 ratelimited <epoch>" verdict (reset epoch is field 3); $2 = optional
+# context phrase for the first line (e.g. " for dependency foo"). Converts the
+# reset epoch to local time with stdlib python; omits it when unknown (0).
+rate_limit_abort() {
+    local reset when
+    reset=$(printf '%s' "$1" | awk '{print $3}')
+    when=$(python3 -c "import sys, datetime as d
+e = int(sys.argv[1] or 0)
+print(' (resets ' + d.datetime.fromtimestamp(e).strftime('%H:%M local time') + ')' if e > 0 else '')" "$reset" 2>/dev/null)
+    echo ""
+    echo "ERROR: GitHub API rate limit reached during age check${2:-}${when}."
+    echo "Authenticated requests allow 5000/hour (anonymous: 60). To continue:"
+    echo "  • export GH_TOKEN=<token> (or GITHUB_TOKEN), or run: gh auth login"
+    echo "  • or re-run with --allow-unknown-age to skip age verification"
+    exit 1
 }
 
 # `brew update` intermittently dumps a harmless Ruby backtrace from its own
@@ -453,7 +543,16 @@ if [ "$MIN_AGE" -gt 0 ] 2>/dev/null; then
         AGE_DAYS=$(echo "$AGE_INFO" | awk '{print $1}')
         PUB_DATE=$(echo "$AGE_INFO" | awk '{print $2}')
 
-        if [ "$AGE_DAYS" -ge 0 ] 2>/dev/null && [ "$AGE_DAYS" -lt "$MIN_AGE" ]; then
+        if [ "$AGE_DAYS" = "-2" ]; then
+            # GitHub API rate limit (issue #84). Distinct from "unknown age":
+            # abort with the reset time unless the user opted into fail-open.
+            if [ "$ALLOW_UNKNOWN_AGE" = true ]; then
+                echo "  [ok] $name $current — GitHub API rate-limited, allowed by --allow-unknown-age"
+                FILTERED_OUTDATED="${FILTERED_OUTDATED}${name} ${installed} ${current}"$'\n'
+            else
+                rate_limit_abort "$AGE_INFO"
+            fi
+        elif [ "$AGE_DAYS" -ge 0 ] 2>/dev/null && [ "$AGE_DAYS" -lt "$MIN_AGE" ]; then
             # Known and too fresh. CVE-aware bypass: if the INSTALLED version has
             # known CVEs, this fresh release is likely the fix — let it through.
             _INSTALLED_RESULT=$(python3 "$SCRIPT" brew "$name" "$installed" 2>/dev/null) && INSTALLED_EXIT=0 || INSTALLED_EXIT=$?
@@ -817,7 +916,15 @@ except Exception:
                     PUB_DATE=unknown
                 fi
 
-                if [ "$AGE_DAYS" -ge 0 ] 2>/dev/null && [ "$AGE_DAYS" -lt "$MIN_AGE" ]; then
+                if [ "$AGE_DAYS" = "-2" ]; then
+                    # GitHub API rate limit (issue #84). Must precede the generic
+                    # "-lt 0" unknown-age checks below (which -2 also satisfies):
+                    # abort with the reset time unless the user opted into fail-open.
+                    if [ "$ALLOW_UNKNOWN_AGE" != true ]; then
+                        rate_limit_abort "$AGE_INFO" " for dependency $DEP"
+                    fi
+                    echo "    [age-dep] $DEP — GitHub API rate-limited, allowed by --allow-unknown-age"
+                elif [ "$AGE_DAYS" -ge 0 ] 2>/dev/null && [ "$AGE_DAYS" -lt "$MIN_AGE" ]; then
                     echo "    [HOLD-DEP] $DEP $DEP_VER -- released $AGE_DAYS day(s) ago ($PUB_DATE), min-age: $MIN_AGE days"
                     DEP_BLOCKED_HOLD="$DEP_BLOCKED_HOLD $DEP"
                     DEP_BLOCKED_HOLD_REASONS="${DEP_BLOCKED_HOLD_REASONS}    $DEP $DEP_VER: too fresh ($AGE_DAYS days old, min-age $MIN_AGE)"$'\n'
