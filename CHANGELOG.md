@@ -10,7 +10,7 @@ The project is pre-1.0; expect minor breaking changes between 0.x releases until
 
 ### Added
 
-- **Authenticated GitHub API requests for the age check** ([#84](https://github.com/sharkyger/homebrew-safe-upgrade/issues/84)). The minimum-age/freshness check reads release dates from the GitHub API, which allows only 60 requests/hour for unauthenticated callers — so a machine with many outdated packages (or repeated runs) could exhaust the quota and lose the ability to verify package age. `brew safe-upgrade` and `brew safe-install` now send authenticated requests (5,000 requests/hour) when a token is available, resolved in order from `GH_TOKEN`, `GITHUB_TOKEN`, then an authenticated `gh` CLI. With no token the tool still works, just at the lower anonymous limit.
+- **Authenticated GitHub API requests for the age check** ([#84](https://github.com/sharkyger/homebrew-safe-upgrade/issues/84)). The minimum-age/freshness check reads each package's Homebrew metadata age (the last-commit date of its formula/cask file) from the GitHub API, which allows only 60 requests/hour for unauthenticated callers — so a machine with many outdated packages (or repeated runs) could exhaust the quota and lose the ability to verify package age. `brew safe-upgrade` and `brew safe-install` now send authenticated requests (5,000 requests/hour) when a token is available, resolved in order from `GH_TOKEN`, `GITHUB_TOKEN`, then an authenticated `gh` CLI. With no token the tool still works, just at the lower anonymous limit.
 
 ### Fixed
 

@@ -266,6 +266,28 @@ def test_dep_rate_limit_aborts_run(mock_env, tmp_path):
     assert "for dependency openssl@3" in result.stdout
 
 
+def test_dep_rate_limit_allowed_by_allow_unknown_age(mock_env, tmp_path):
+    """Companion to test_dep_rate_limit_aborts_run: with --allow-unknown-age the
+    dep-path rate-limit is permitted through (not aborted, not held) — guards the
+    dependency-specific -2 branch's opt-out."""
+    write_formula_info(mock_env, "wget", "1.25.0")
+    write_formula_info(mock_env, "openssl@3", "3.5.0")
+    write_deps(mock_env, "wget", ["openssl@3"])
+    write_installed_version(mock_env, "openssl@3", "3.0.0")  # older → incoming
+    (tmp_path / "commits_api" / "openssl@3.json").write_text("__RATELIMIT__")
+
+    stub = make_cve_stub(tmp_path)  # all packages clean
+
+    result = run_safe_install(
+        ["wget", "--allow-unknown-age"],
+        env_extra={"DEPENDENCY_SECURITY_CHECK": str(stub), "GH_TOKEN": "test-token"},
+        input_text="n\n",
+    )
+    expected = "[age-dep] openssl@3 — GitHub API rate-limited, allowed by --allow-unknown-age"
+    assert expected in result.stdout
+    assert "rate limit reached" not in result.stdout
+
+
 def test_revision_suffix_does_not_falsely_classify_as_incoming(mock_env, tmp_path):
     """`brew list` returns `1.2.0_1`; latest is `1.2.0` — must NOT be incoming."""
     write_formula_info(mock_env, "wget", "1.25.0")

@@ -303,14 +303,19 @@ fetch_pkg_age() {
         esac
     else
         # Capture body, HTTP status, and rate-limit headers (mirrors the bottle
-        # SHA-verify pattern below). Authenticated when a token was resolved.
+        # SHA-verify pattern below). Authenticated when a token was resolved —
+        # the header goes in an array so the value is passed as ONE argument (no
+        # word-splitting); the nounset guard keeps an empty array safe under
+        # `set -u` on bash 3.2 (macOS), matching the INCOMING_DEPS_ARR idiom.
         local hdr body http reset remaining
+        local auth=()
+        [ -n "$GH_AUTH_TOKEN" ] && auth=(-H "Authorization: Bearer $GH_AUTH_TOKEN")
         hdr=$(mktemp)
         body=$(mktemp)
         http=$(curl -s -o "$body" -D "$hdr" -w "%{http_code}" --max-time 10 \
             -H "Accept: application/vnd.github+json" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
-            ${GH_AUTH_TOKEN:+-H "Authorization: Bearer $GH_AUTH_TOKEN"} \
+            ${auth[@]+"${auth[@]}"} \
             "$url" 2>/dev/null || echo "000")
         json=$(cat "$body" 2>/dev/null || echo "[]")
         reset=$(grep -i '^x-ratelimit-reset:' "$hdr" | tr -dc '0-9')

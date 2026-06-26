@@ -171,7 +171,7 @@ The flag is per-invocation by design — the safe default always returns the nex
 
 Hold back **formulae, casks, and tap formulae** published less than N days ago. Protects against supply chain attacks where a compromised version is published minutes after credential theft — before any CVE database knows about it. Worm-class npm compromises (Shai-Hulud, Mini Shai-Hulud) have repeatedly shown live windows of 1–6 hours between malicious publish and registry takedown; a multi-day freshness hold trades a small lag against the entire attack window.
 
-The release age is read from each package's home repo via the GitHub API — `homebrew-core` for core formulae, `homebrew-cask` for casks, and the tap's own repo for tap formulae.
+"Age" here is the **Homebrew metadata age** — the date of the last commit that touched the package's formula/cask file, read via the GitHub API from `homebrew-core` for core formulae, `homebrew-cask` for casks, and the tap's own repo for tap formulae. That's when the new version reached Homebrew users, which is the window a freshness hold needs to cover; it is not the upstream project's own release timestamp (a formula bump can lag or be backported).
 
 ```bash
 brew safe-upgrade             # uses default --min-age 3

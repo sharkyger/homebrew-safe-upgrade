@@ -428,6 +428,7 @@ def test_upgrade_rate_limit_allowed_by_allow_unknown_age(age_env):
 
     result = run_upgrade(["--no-deps", "--allow-unknown-age"], env_extra=_RL_ENV)
 
+    assert result.returncode == 0  # the opt-out path completes cleanly
     expected = "[ok] wget 1.25.0 — GitHub API rate-limited, allowed by --allow-unknown-age"
     assert expected in result.stdout
     assert "rate limit reached" not in result.stdout
@@ -453,6 +454,7 @@ def test_install_rate_limit_allowed_by_allow_unknown_age(age_env):
 
     result = run_install(["coderabbit", "--no-deps", "--allow-unknown-age"], env_extra=_RL_ENV)
 
+    assert result.returncode == 0  # the opt-out path completes cleanly
     assert "GitHub API rate-limited — allowed by --allow-unknown-age" in result.stdout
     assert "rate limit reached" not in result.stdout
 
