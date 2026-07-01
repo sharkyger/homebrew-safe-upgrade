@@ -265,6 +265,16 @@ Why `--self`: a plain `brew upgrade safe-upgrade` pulls safe-upgrade's own depen
 
 > This updates **the tool itself**. To CVE-gate an upgrade of *all* your outdated packages, that's the everyday `brew safe-upgrade` (no `--self`).
 
+**Full update routine** — bring both the tool and everything else current, in order:
+
+```bash
+brew update        # refresh Homebrew's metadata
+brew safe-update   # update safe-upgrade itself (gated — runs --self on a formula install)
+brew safe-upgrade  # then CVE-gate an upgrade of everything else outdated
+```
+
+Update the updater first, then everything else — the same *refresh, then upgrade* rhythm you already know from `apt update && apt upgrade` (or `dnf upgrade`, `pacman -Syu`, …). The leading `brew update` is optional — `safe-update` and `safe-upgrade` each run it internally.
+
 ## brew safe-install
 
 Same security gate, but for installing new packages.
