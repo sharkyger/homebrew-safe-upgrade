@@ -252,6 +252,29 @@ brew safe-upgrade --no-verify-sha
 
 Casks are out of scope — brew already enforces the cask-file SHA on every install, so duplicating that check here adds no signal.
 
+## Updating
+
+Keep **safe-upgrade itself** current through the gated path — pick the line for your install route (`brew safe-upgrade --version` tells you which you're on):
+
+| Install route | Update with |
+| ------------- | ----------- |
+| **Homebrew formula** (`brew install sharkyger/tap/safe-upgrade`) | `brew safe-upgrade --self` — gates safe-upgrade's own dependencies first (fail-closed), then upgrades the formula. `brew safe-update` runs this for you. |
+| **Script / curl** (`install.sh`) | `brew safe-update` — re-fetches the tools from the latest release, verifies every file against the `SHA256SUMS` checksum manifest, and swaps them in atomically (fail-closed). |
+
+Why `--self`: a plain `brew upgrade safe-upgrade` pulls safe-upgrade's own dependencies (its managed Python and that Python's dependencies — `openssl@3`, `sqlite`, …) through Homebrew **ungated** — the gap ([#87](https://github.com/sharkyger/homebrew-safe-upgrade/issues/87)) that `--self` closes.
+
+> This updates **the tool itself**. To CVE-gate an upgrade of *all* your outdated packages, that's the everyday `brew safe-upgrade` (no `--self`).
+
+**Full update routine** — bring both the tool and everything else current, in order:
+
+```bash
+brew update        # refresh Homebrew's metadata
+brew safe-update   # update safe-upgrade itself (gated — runs --self on a formula install)
+brew safe-upgrade  # then CVE-gate an upgrade of everything else outdated
+```
+
+Update the updater first, then everything else — the same *refresh, then upgrade* rhythm you already know from `apt update && apt upgrade` (or `dnf upgrade`, `pacman -Syu`, …). The leading `brew update` is optional — `safe-update` and `safe-upgrade` each run it internally.
+
 ## brew safe-install
 
 Same security gate, but for installing new packages.
