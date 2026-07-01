@@ -431,16 +431,30 @@ enumerate_outdated_self_deps() {
     # Print safe-upgrade's currently-outdated brew dependencies, one per line.
     # `brew deps` returns the FULL transitive closure by default, so intersecting
     # it with `brew outdated` covers the whole chain, not just direct deps.
+    #
+    # FAIL CLOSED: any brew/JSON failure returns non-zero so callers ABORT — an
+    # error must never be mistaken for "nothing outdated" and wave the formula
+    # upgrade through ungated (that is the exact #87 gap). An empty result WITH a
+    # zero exit means there genuinely are no outdated deps. (`brew outdated` /
+    # `brew deps` exit 0 on success even when packages are outdated; they return
+    # non-zero only on a real error such as an unresolvable formula.)
     local deps_list outdated_json
-    deps_list="$(brew deps "$SELF_FORMULA" 2>/dev/null || true)"
-    outdated_json="$(brew outdated --json=v2 2>/dev/null || echo '{"formulae":[],"casks":[]}')"
+    if ! deps_list="$(brew deps "$SELF_FORMULA" 2>/dev/null)"; then
+        echo "Error: could not enumerate $SELF_FORMULA dependencies (brew deps failed)." >&2
+        return 1
+    fi
+    if ! outdated_json="$(brew outdated --json=v2 2>/dev/null)"; then
+        echo "Error: could not list outdated formulae (brew outdated failed)." >&2
+        return 1
+    fi
     DEPS_LIST="$deps_list" OUTDATED_JSON="$outdated_json" python3 -c '
-import os, json
+import os, json, sys
 deps = [d.strip() for d in os.environ.get("DEPS_LIST", "").splitlines() if d.strip()]
 try:
     data = json.loads(os.environ.get("OUTDATED_JSON") or "{}")
-except Exception:
-    data = {}
+except Exception as exc:
+    sys.stderr.write("Error: invalid brew outdated JSON: %s\n" % exc)
+    sys.exit(1)
 outdated = {p.get("name", "") for p in data.get("formulae", []) if p.get("name")}
 # Exact canonical-name match. The safe-upgrade dependency closure is entirely
 # homebrew-core (bare names like openssl@3), and brew outdated reports core
@@ -452,7 +466,7 @@ for d in deps:
     if d in outdated and d not in seen:
         seen.add(d)
         print(d)
-' 2>/dev/null || true
+'
 }
 
 upgrade_self_through_gate() {
@@ -466,10 +480,22 @@ upgrade_self_through_gate() {
     esac
 
     echo "Self-upgrade: gating $SELF_FORMULA's dependencies before the formula..."
-    run_brew_update || true
+    # Fail closed if `brew update` fails: this path decides what to gate from the
+    # current dependency graph, and the final formula upgrade must not run against
+    # stale metadata. (The normal flow tolerates this; --self is deliberately
+    # stricter — it is about to upgrade the security tool itself.)
+    if ! run_brew_update; then
+        echo "Error: 'brew update' failed — safe-upgrade was NOT upgraded (fail-closed)."
+        exit 1
+    fi
 
+    # Fail closed if enumeration itself errors (brew/JSON failure): never treat an
+    # enumeration error as "nothing outdated" and let the formula upgrade proceed.
     local outdated_deps
-    outdated_deps="$(enumerate_outdated_self_deps)"
+    if ! outdated_deps="$(enumerate_outdated_self_deps)"; then
+        echo "safe-upgrade was NOT upgraded (fail-closed)."
+        exit 1
+    fi
 
     if [ -n "$outdated_deps" ]; then
         echo "Gating outdated dependencies: $(printf '%s' "$outdated_deps" | tr '\n' ' ')"
@@ -502,7 +528,10 @@ upgrade_self_through_gate() {
     # the upgrade), so re-verify that nothing in the chain is still outdated before
     # the formula upgrade lets brew pull it ungated. Any survivor aborts fail-closed.
     local still_outdated
-    still_outdated="$(enumerate_outdated_self_deps)"
+    if ! still_outdated="$(enumerate_outdated_self_deps)"; then
+        echo "safe-upgrade was NOT upgraded (fail-closed)."
+        exit 1
+    fi
     if [ -n "$still_outdated" ]; then
         echo ""
         echo "These dependencies are still outdated after the gate (held or blocked):"
@@ -513,7 +542,12 @@ upgrade_self_through_gate() {
 
     echo ""
     echo "Upgrading $SELF_FORMULA (dependencies verified clean)..."
-    if ! brew upgrade --formula "$SELF_FORMULA" </dev/null 2>&1; then
+    # HOMEBREW_NO_AUTO_UPDATE=1: without it, this raw `brew upgrade` can trigger
+    # Homebrew's implicit auto-update, which re-refreshes metadata and could pull a
+    # newly-outdated dependency UNGATED between the belt-and-suspenders re-check
+    # above and this upgrade (a TOCTOU gap). We already ran `brew update` and
+    # verified the graph; pin it here so nothing new slips in.
+    if ! HOMEBREW_NO_AUTO_UPDATE=1 brew upgrade --formula "$SELF_FORMULA" </dev/null 2>&1; then
         echo "Error: 'brew upgrade --formula $SELF_FORMULA' failed."
         exit 1
     fi

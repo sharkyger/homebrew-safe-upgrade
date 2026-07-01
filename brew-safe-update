@@ -204,7 +204,10 @@ case "$INSTALL_DIR" in
             echo ""
             exec "$INSTALL_DIR/brew-safe-upgrade" --self "$@"
         fi
-        # Sibling missing (unexpected) — fall through to the script-route updater.
+        # Sibling missing/not executable (unexpected on a formula install). Warn —
+        # the script-route swap below operates on this dir, which Homebrew owns, so
+        # a silent fallthrough would be hard to diagnose.
+        echo "warning: expected 'brew-safe-upgrade' next to this formula install but it is missing or not executable ($INSTALL_DIR); falling back to the script-route updater." >&2
         ;;
 esac
 

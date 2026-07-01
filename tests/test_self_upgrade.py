@@ -243,6 +243,43 @@ def test_self_held_fresh_dep_aborts(formula_env, tmp_path):
     assert "updated through its own gate" not in result.stdout
 
 
+# --- Fail-closed on infrastructure errors -----------------------------------
+
+
+def test_self_enumeration_error_aborts_fail_closed(formula_env, tmp_path):
+    """If `brew outdated` (or `brew deps`) errors, enumeration must fail closed —
+    an error must never be read as 'no outdated deps' and wave the formula
+    upgrade through ungated."""
+    write_deps(formula_env["brew"], SELF_FORMULA, ["python@3.12"])
+    write_outdated(formula_env["brew"], [outdated_formula("python@3.12", "3.12.0", "3.12.1")])
+    stub = make_cve_stub(tmp_path)
+
+    result = run_self(
+        formula_env["script"],
+        ["--self", "--yes", "--no-verify-sha"],
+        env_extra={"DEPENDENCY_SECURITY_CHECK": str(stub), "MOCK_BREW_FAIL": "outdated"},
+    )
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert "fail-closed" in (result.stdout + result.stderr)
+    assert "updated through its own gate" not in result.stdout
+
+
+def test_self_brew_update_failure_aborts_fail_closed(formula_env, tmp_path):
+    """A failing `brew update` must abort --self (don't gate on stale metadata)."""
+    write_deps(formula_env["brew"], SELF_FORMULA, ["python@3.12"])
+    write_outdated(formula_env["brew"], [outdated_formula("python@3.12", "3.12.0", "3.12.1")])
+    stub = make_cve_stub(tmp_path)
+
+    result = run_self(
+        formula_env["script"],
+        ["--self", "--yes", "--no-verify-sha"],
+        env_extra={"DEPENDENCY_SECURITY_CHECK": str(stub), "MOCK_BREW_FAIL": "update"},
+    )
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert "fail-closed" in (result.stdout + result.stderr)
+    assert "updated through its own gate" not in result.stdout
+
+
 # --- Flag threading ---------------------------------------------------------
 
 

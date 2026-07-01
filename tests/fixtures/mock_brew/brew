@@ -20,6 +20,14 @@
 
 DIR="${MOCK_BREW_DIR:-/dev/null}"
 
+# Test seam: MOCK_BREW_FAIL=<subcommand> forces that subcommand to exit non-zero,
+# so tests can exercise the wrappers' fail-closed paths (e.g. a brew deps /
+# outdated / update failure must abort --self, never wave the upgrade through).
+if [ -n "${MOCK_BREW_FAIL:-}" ] && [ "$1" = "$MOCK_BREW_FAIL" ]; then
+    echo "mock brew: simulated failure for '$1'" >&2
+    exit 1
+fi
+
 case "$1" in
     info)
         # last positional arg is the package name
@@ -90,15 +98,16 @@ case "$1" in
                 PKGS="$pkgs" OUTF="$OUTF" python3 -c '
 import os, json
 outf = os.environ["OUTF"]
-upg = set(os.environ["PKGS"].split())
+# Match on basename in BOTH directions so a tap-qualified upgrade arg
+# (sharkyger/tap/foo) drops a bare outdated entry (foo) and vice-versa.
+upg = {u.split("/")[-1] for u in os.environ["PKGS"].split()}
 try:
     with open(outf) as f:
         d = json.load(f)
     for key in ("formulae", "casks"):
         d[key] = [
             x for x in d.get(key, [])
-            if x.get("name") not in upg
-            and x.get("name", "").split("/")[-1] not in upg
+            if x.get("name", "").split("/")[-1] not in upg
         ]
     with open(outf, "w") as f:
         json.dump(d, f)
