@@ -15,6 +15,9 @@
 #:                             the GitHub API rate limit blocks the age check.
 #:      --no-verify-sha        Skip bottle SHA verification (default: on).
 #:      --no-deps              Skip transitive dependency checking.
+#:      --self                 Upgrade safe-upgrade itself THROUGH this gate
+#:                             (Homebrew formula install only; the script install
+#:                             uses `brew safe-update`).
 #:      --version              Print version, install route, helper status.
 #:      -h, --help             Show this help and exit.
 #:
@@ -128,6 +131,10 @@ Options:
                          blocks the age check.
   --no-verify-sha        Skip bottle SHA verification (default: ON).
   --no-deps              Skip transitive dependency checking (default: check).
+  --self                 Upgrade safe-upgrade itself THROUGH this security gate:
+                         gate its outdated dependencies first (fail-closed), then
+                         upgrade the formula. Homebrew formula install only; the
+                         script install uses `brew safe-update`.
   --version              Print version, install route, and helper-file status.
   -h, --help             Show this help and exit.
 
@@ -174,7 +181,11 @@ MIN_AGE=3               # 3-day freshness hold; --min-age 0 to disable.
 ALLOW_UNKNOWN_AGE=false # Fail closed: hold packages whose age can't be verified.
 VERIFY_SHA=true         # Default-on as of v0.2.0 — opt out with --no-verify-sha.
 CHECK_DEPS=true
-TARGET_PKGS="" # Positional package names (#61): restrict the run to these.
+TARGET_PKGS=""          # Positional package names (#61): restrict the run to these.
+SELF_UPGRADE_MODE=false # --self: upgrade safe-upgrade itself through the gate (#87).
+# The tap formula to self-upgrade. Overridable so the test suite can point at a
+# mock formula; production users never set this.
+SELF_FORMULA="${BREW_SAFE_SELF_FORMULA:-sharkyger/tap/safe-upgrade}"
 case "${BREW_SAFE_NO_DEPS:-}" in
     1 | true | TRUE | yes | YES) CHECK_DEPS=false ;;
 esac
@@ -207,6 +218,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --no-deps)
             CHECK_DEPS=false
+            shift
+            ;;
+        --self)
+            SELF_UPGRADE_MODE=true
             shift
             ;;
         -*) shift ;; # Unknown flags: ignore (forward-compat).
@@ -404,6 +419,112 @@ except Exception:
     pass
 " 2>/dev/null || true
 }
+
+# --- Guarded self-upgrade (--self, issue #87) --------------------------------
+# `brew upgrade safe-upgrade` pulls safe-upgrade's OWN outdated dependencies
+# (python@3.12 -> openssl@3, sqlite, ...) with none of the CVE / SHA / freshness
+# gates this tool applies. --self closes that gap: gate safe-upgrade's outdated
+# deps through the normal path FIRST (fail-closed), confirm none is left
+# outdated, and only then upgrade the formula — so brew has nothing ungated left
+# to pull. Homebrew formula install only; the script install uses brew safe-update.
+enumerate_outdated_self_deps() {
+    # Print safe-upgrade's currently-outdated brew dependencies, one per line.
+    # `brew deps` returns the FULL transitive closure by default, so intersecting
+    # it with `brew outdated` covers the whole chain, not just direct deps.
+    local deps_list outdated_json
+    deps_list="$(brew deps "$SELF_FORMULA" 2>/dev/null || true)"
+    outdated_json="$(brew outdated --json=v2 2>/dev/null || echo '{"formulae":[],"casks":[]}')"
+    DEPS_LIST="$deps_list" OUTDATED_JSON="$outdated_json" python3 -c '
+import os, json
+deps = [d.strip() for d in os.environ.get("DEPS_LIST", "").splitlines() if d.strip()]
+try:
+    data = json.loads(os.environ.get("OUTDATED_JSON") or "{}")
+except Exception:
+    data = {}
+outdated = {p.get("name", "") for p in data.get("formulae", []) if p.get("name")}
+# Exact canonical-name match. The safe-upgrade dependency closure is entirely
+# homebrew-core (bare names like openssl@3), and brew outdated reports core
+# formulae by the same bare name, so the names align exactly. Matching on the
+# basename instead would let an UNRELATED outdated tap formula that merely shares
+# a basename (e.g. evil/tap/openssl@3) masquerade as our dependency.
+seen = set()
+for d in deps:
+    if d in outdated and d not in seen:
+        seen.add(d)
+        print(d)
+' 2>/dev/null || true
+}
+
+upgrade_self_through_gate() {
+    case "$SCRIPT_DIR" in
+        */libexec | */libexec/* | */Cellar/*) ;; # Homebrew formula route — proceed.
+        *)
+            echo "Script-install route detected — --self applies to the Homebrew formula install."
+            echo "To update the script install, run: brew safe-update"
+            exit 1
+            ;;
+    esac
+
+    echo "Self-upgrade: gating $SELF_FORMULA's dependencies before the formula..."
+    run_brew_update || true
+
+    local outdated_deps
+    outdated_deps="$(enumerate_outdated_self_deps)"
+
+    if [ -n "$outdated_deps" ]; then
+        echo "Gating outdated dependencies: $(printf '%s' "$outdated_deps" | tr '\n' ' ')"
+
+        # Thread ONLY the policy flags the user set into the gated dep run. --self
+        # is deliberately NOT passed, so the child runs the normal path (no
+        # recursion). The child upgrades the deps through the full gate; a held or
+        # blocked dep is simply left un-upgraded (caught by the re-check below).
+        local child_args=()
+        [ "$AUTO_YES" = true ] && child_args+=("--yes")
+        [ "$MIN_AGE" != "3" ] && child_args+=("--min-age" "$MIN_AGE")
+        [ "$ALLOW_UNKNOWN_AGE" = true ] && child_args+=("--allow-unknown-age")
+        [ "$VERIFY_SHA" = false ] && child_args+=("--no-verify-sha")
+        [ "$CHECK_DEPS" = false ] && child_args+=("--no-deps")
+        while IFS= read -r _dep; do
+            [ -n "$_dep" ] && child_args+=("$_dep")
+        done <<<"$outdated_deps"
+
+        if ! "$0" ${child_args[@]+"${child_args[@]}"}; then
+            echo ""
+            echo "Dependency gate failed — safe-upgrade was NOT upgraded (fail-closed)."
+            exit 1
+        fi
+    else
+        echo "No outdated dependencies — safe-upgrade can be upgraded directly."
+    fi
+
+    # Belt-and-suspenders — the PRIMARY gate. A held or blocked dependency does
+    # not necessarily make the gated run exit non-zero (it is merely EXCLUDED from
+    # the upgrade), so re-verify that nothing in the chain is still outdated before
+    # the formula upgrade lets brew pull it ungated. Any survivor aborts fail-closed.
+    local still_outdated
+    still_outdated="$(enumerate_outdated_self_deps)"
+    if [ -n "$still_outdated" ]; then
+        echo ""
+        echo "These dependencies are still outdated after the gate (held or blocked):"
+        printf '%s\n' "$still_outdated" | sed 's/^/  /'
+        echo "safe-upgrade was NOT upgraded (fail-closed)."
+        exit 1
+    fi
+
+    echo ""
+    echo "Upgrading $SELF_FORMULA (dependencies verified clean)..."
+    if ! brew upgrade --formula "$SELF_FORMULA" </dev/null 2>&1; then
+        echo "Error: 'brew upgrade --formula $SELF_FORMULA' failed."
+        exit 1
+    fi
+    echo ""
+    echo "Done — safe-upgrade updated through its own gate."
+    exit 0
+}
+
+if [ "$SELF_UPGRADE_MODE" = true ]; then
+    upgrade_self_through_gate
+fi
 
 echo "Updating Homebrew..."
 run_brew_update || true

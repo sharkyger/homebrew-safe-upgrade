@@ -170,8 +170,9 @@ brew safe-update — update the homebrew-safe-upgrade tools (script-install rout
 
 Re-fetches the brew-safe-* commands and their helper modules from the latest
 published release, verifies every file against its signed SHA256SUMS manifest,
-and swaps them in atomically (all-or-nothing, fail-closed). The Homebrew formula
-route updates via `brew update && brew upgrade safe-upgrade` instead.
+and swaps them in atomically (all-or-nothing, fail-closed). On a Homebrew formula
+install this command instead runs `brew safe-upgrade --self`, which upgrades
+safe-upgrade through its own security gate (never a raw `brew upgrade`).
 
 Usage: brew safe-update [options]
 
@@ -190,6 +191,20 @@ case " $* " in
     *" --version "*)
         print_version
         exit 0
+        ;;
+esac
+
+# On a Homebrew formula install, this updater's atomic-swap logic does not apply
+# (Homebrew owns those files, and `brew upgrade safe-upgrade` would pull its deps
+# ungated — issue #87). Route to the formula's own guarded self-upgrade instead.
+case "$INSTALL_DIR" in
+    */libexec | */libexec/* | */Cellar/*)
+        if [ -x "$INSTALL_DIR/brew-safe-upgrade" ]; then
+            echo "Homebrew formula install detected — updating via 'brew safe-upgrade --self'."
+            echo ""
+            exec "$INSTALL_DIR/brew-safe-upgrade" --self "$@"
+        fi
+        # Sibling missing (unexpected) — fall through to the script-route updater.
         ;;
 esac
 

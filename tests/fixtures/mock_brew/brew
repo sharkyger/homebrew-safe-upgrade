@@ -4,11 +4,17 @@
 #
 # Supported subcommands (just enough for the wrappers):
 #   brew info --json=v2 [--formula] <name>
-#   brew deps <name>
+#   brew deps <name>                 — normalizes tap-qualified names (foo/bar/baz
+#                                      -> deps_foo_bar_baz.txt) so a slash in the
+#                                      name never becomes a path separator.
 #   brew list --versions [--formula] <name>
 #   brew install <args...>           — no-op success
 #   brew update                      — no-op success
-#   brew upgrade <args...>           — no-op success
+#   brew upgrade <args...>           — records the upgraded package names by
+#                                      removing them from outdated.json, so a
+#                                      later `brew outdated` reflects the upgrade
+#                                      (the --self belt-and-suspenders re-check
+#                                      depends on this being stateful).
 #   brew outdated --json=v2          — returns outdated.json
 #   brew pin/unpin <name>            — no-op success
 
@@ -27,10 +33,12 @@ case "$1" in
         fi
         ;;
     deps)
-        # last positional arg is the package name
+        # last positional arg is the package name. Normalize slashes so a
+        # tap-qualified name (sharkyger/tap/safe-upgrade) maps to a flat filename.
         for arg in "$@"; do :; done
         NAME="$arg"
-        F="$DIR/deps_${NAME}.txt"
+        NAME_NORM="$(printf '%s' "$NAME" | tr '/' '_')"
+        F="$DIR/deps_${NAME_NORM}.txt"
         if [ -f "$F" ]; then cat "$F"; fi
         ;;
     list)
@@ -63,7 +71,45 @@ case "$1" in
         fi
         exit 0
         ;;
-    install | upgrade | pin | unpin)
+    upgrade)
+        # Stateful: drop the upgraded package(s) from outdated.json so a later
+        # `brew outdated` no longer lists them. This models "after upgrade, no
+        # longer outdated" — required for the --self belt-and-suspenders re-check
+        # (deps gated & upgraded first must read as clean before the formula
+        # upgrade). Matches on full name or basename so tap-qualified args work.
+        OUTF="$DIR/outdated.json"
+        if [ -f "$OUTF" ]; then
+            pkgs=""
+            for a in "$@"; do
+                case "$a" in
+                    upgrade | --*) ;;
+                    *) pkgs="$pkgs $a" ;;
+                esac
+            done
+            if [ -n "$pkgs" ]; then
+                PKGS="$pkgs" OUTF="$OUTF" python3 -c '
+import os, json
+outf = os.environ["OUTF"]
+upg = set(os.environ["PKGS"].split())
+try:
+    with open(outf) as f:
+        d = json.load(f)
+    for key in ("formulae", "casks"):
+        d[key] = [
+            x for x in d.get(key, [])
+            if x.get("name") not in upg
+            and x.get("name", "").split("/")[-1] not in upg
+        ]
+    with open(outf, "w") as f:
+        json.dump(d, f)
+except Exception:
+    pass
+' 2>/dev/null
+            fi
+        fi
+        exit 0
+        ;;
+    install | pin | unpin)
         exit 0
         ;;
     *)
