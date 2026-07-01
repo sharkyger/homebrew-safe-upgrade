@@ -259,7 +259,7 @@ Keep **safe-upgrade itself** current through the gated path — pick the line fo
 | Install route | Update with |
 | ------------- | ----------- |
 | **Homebrew formula** (`brew install sharkyger/tap/safe-upgrade`) | `brew safe-upgrade --self` — gates safe-upgrade's own dependencies first (fail-closed), then upgrades the formula. `brew safe-update` runs this for you. |
-| **Script / curl** (`install.sh`) | `brew safe-update` — re-fetches the tools from the latest release, verifies every file against the signed `SHA256SUMS`, and swaps them in atomically (fail-closed). |
+| **Script / curl** (`install.sh`) | `brew safe-update` — re-fetches the tools from the latest release, verifies every file against the `SHA256SUMS` checksum manifest, and swaps them in atomically (fail-closed). |
 
 Why `--self`: a plain `brew upgrade safe-upgrade` pulls safe-upgrade's own dependencies (its managed Python and that Python's dependencies — `openssl@3`, `sqlite`, …) through Homebrew **ungated** — the gap ([#87](https://github.com/sharkyger/homebrew-safe-upgrade/issues/87)) that `--self` closes.
 
