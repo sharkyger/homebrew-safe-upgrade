@@ -8,6 +8,10 @@ The project is pre-1.0; expect minor breaking changes between 0.x releases until
 
 ## [Unreleased]
 
+### Added
+
+- **`brew safe-upgrade --self` — guarded self-upgrade** ([#87](https://github.com/sharkyger/homebrew-safe-upgrade/issues/87)). `brew upgrade safe-upgrade` pulled safe-upgrade's own dependency chain (its managed Python and that Python's dependencies — `openssl@3`, `sqlite`, …) through Homebrew with none of the CVE / bottle-SHA / freshness checks the tool applies to everything else, and the `[y/n]` prompt carried none of that information (and is auto-answered in CI). `--self` closes that gap: it runs safe-upgrade's outdated dependencies through the normal gate first (fail-closed — a flagged or too-fresh dependency aborts the update), re-verifies none is left outdated, and only then upgrades the formula, so brew has nothing ungated left to pull. No new security logic — it reuses the existing check pipeline. Homebrew formula install only; on that route `brew safe-update` now delegates to `brew safe-upgrade --self` instead of pointing at a raw `brew upgrade safe-upgrade`. The script install continues to update via `brew safe-update`'s atomic self-updater.
+
 ## [0.2.8] — 2026-06-26
 
 ### Added

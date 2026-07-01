@@ -104,6 +104,26 @@ def test_brew_help_convention_present(cmd):
     assert any(f"brew {brew_name}" in ln for ln in doc_lines), doc_lines
 
 
+def test_self_flag_documented_in_upgrade_help():
+    """`--self` must appear in both the `#:` doc block (Homebrew renders help
+    from those lines) and the print_help() output of brew-safe-upgrade."""
+    result = _run(["brew-safe-upgrade", "--help"])
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "--self" in result.stdout, result.stdout
+    doc_lines = [
+        ln for ln in (REPO / "brew-safe-upgrade").read_text().splitlines() if ln.startswith("#:")
+    ]
+    assert any("--self" in ln for ln in doc_lines), doc_lines
+
+
+def test_safe_update_help_points_to_self():
+    """brew-safe-update help should recommend `brew safe-upgrade --self` for the
+    formula route rather than the raw `brew upgrade safe-upgrade`."""
+    result = _run(["brew-safe-update", "--help"])
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "brew safe-upgrade --self" in result.stdout, result.stdout
+
+
 @pytest.mark.parametrize("cmd", COMMANDS)
 def test_brew_dispatcher_help_not_generic(cmd):
     """Integration: drive help through the real `brew` dispatcher and assert it

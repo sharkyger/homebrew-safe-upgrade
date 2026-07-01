@@ -319,7 +319,7 @@ No need to re-run the install script. If you get a permission error:
 sudo brew safe-update
 ```
 
-> **Installed via the tap?** Don't use `brew safe-update` — update through brew instead: `brew update && brew upgrade safe-upgrade`. `brew safe-update` only refreshes a script install in `bin`; it doesn't touch the formula in the Homebrew cellar.
+> **Installed via the tap?** On a tap / formula install, `brew safe-update` now delegates to `brew safe-upgrade --self` — it upgrades safe-upgrade *through its own security gate* (its dependencies are checked first, fail-closed) instead of a raw `brew upgrade`. You can also run `brew safe-upgrade --self` directly. See [Updating a tap install](#homebrew-tap-recommended) below.
 
 ## Standalone security checker
 
@@ -395,13 +395,15 @@ brew tap sharkyger/tap
 brew install safe-upgrade
 ```
 
-**Updating a tap install:** update through brew like any other formula —
+**Updating a tap install:** upgrade safe-upgrade *through its own gate* —
 
 ```bash
-brew update && brew upgrade safe-upgrade
+brew safe-upgrade --self
 ```
 
-Don't use `brew safe-update` for a tap install — that refreshes the script-install copy in your Homebrew `bin`, not the formula in the cellar.
+This checks safe-upgrade's own outdated dependencies — its managed Python and that Python's dependencies (`openssl@3`, `sqlite`, …) — against the vulnerability databases and the freshness hold *before* upgrading (fail-closed: a flagged or too-fresh dependency aborts the update), then upgrades the formula once nothing outdated is left for brew to pull. On a formula install, `brew safe-update` runs `brew safe-upgrade --self` for you.
+
+A plain `brew update && brew upgrade safe-upgrade` still works, but Homebrew would then pull those dependencies in unchecked — the gap [#87](https://github.com/sharkyger/homebrew-safe-upgrade/issues/87) that `--self` closes — so `--self` is the recommended path.
 
 ### Script install (no tap)
 
