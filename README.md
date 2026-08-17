@@ -167,6 +167,29 @@ The flag is per-invocation by design — the safe default always returns the nex
 
 > **Note on big upgrade batches.** `brew safe-upgrade` deduplicates incoming deps across the batch, but a large run with many unique deps can still hit NIST NVD's anonymous rate limit (5 requests / 30 seconds). When that happens you'll see `[skip-dep]` lines in the output — those deps were not vetted. Re-run the upgrade later, or pass `--no-deps` if you've vetted upstream another way.
 
+#### When a dependency is flagged: upgrade the rest anyway
+
+If an incoming dependency has a CVE or is below `--min-age`, you get three choices rather than an all-or-nothing decision:
+
+```
+Incoming dependencies are below --min-age:
+    taglib 2.3.1: too fresh (1 days old, min-age 3)
+Depends on a flagged dependency: player
+Unaffected and safe to upgrade now: unrelated ripgrep jq
+Continue upgrade?
+  [y] yes — upgrade everything, including the flagged dependencies
+  [s] skip — upgrade only the unaffected packages above
+  [N] no  — cancel the whole upgrade (default)
+```
+
+`[s]` upgrades the packages that don't touch the flagged dependency and holds back the ones that do. Use `--skip-unsafe` to take that branch non-interactively:
+
+```
+brew safe-upgrade --skip-unsafe
+```
+
+Held packages **and the flagged dependency itself** are `brew pin`-ed for the duration of the upgrade and unpinned afterwards. Keeping a dependent off brew's command line is not sufficient on its own — brew resolves dependencies itself, so the pin is what actually stops the flagged version being pulled in under some other package.
+
 ### Minimum-age / freshness check (on by default, 3 days)
 
 Hold back **formulae, casks, and tap formulae** published less than N days ago. Protects against supply chain attacks where a compromised version is published minutes after credential theft — before any CVE database knows about it. Worm-class npm compromises (Shai-Hulud, Mini Shai-Hulud) have repeatedly shown live windows of 1–6 hours between malicious publish and registry takedown; a multi-day freshness hold trades a small lag against the entire attack window.
@@ -374,7 +397,7 @@ Exit codes:
 
 - `0` — no known vulnerabilities
 - `1` — vulnerabilities found (details on stderr, JSON on stdout)
-- `2` — error (invalid input, network failure)
+- `2` — error (invalid input, network failure, or **no source could answer**)
 
 JSON output on stdout for programmatic use:
 
@@ -384,9 +407,37 @@ JSON output on stdout for programmatic use:
   "package": "requests",
   "ecosystem": "pip",
   "version": "2.31.0",
+  "sources_ok": 3,
+  "sources_total": 3,
+  "sources_failed": [],
   "vulnerabilities": []
 }
 ```
+
+`sources_total` counts only the databases that *can* answer for the ecosystem.
+OSV and the GitHub Advisory Database have no Homebrew ecosystem, so for `brew`
+the total is `1` (NVD) — a `brew` result reading "3 sources checked" would be
+claiming coverage that never existed.
+
+If **no** source answers, the status is `unknown` and the exit code is `2`, not
+`clean`/`0`:
+
+```json
+{
+  "status": "unknown",
+  "package": "openssl@3",
+  "ecosystem": "brew",
+  "version": "3.0.0",
+  "sources_ok": 0,
+  "sources_total": 1,
+  "sources_failed": ["NIST NVD"],
+  "vulnerabilities": []
+}
+```
+
+"Nothing was found" and "nothing was checked" are different answers, and only
+the first one means the package is safe to upgrade. `brew safe-upgrade` treats
+exit `2` as `[skip] … check failed, will not upgrade`.
 
 ## Install
 

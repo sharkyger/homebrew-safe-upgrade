@@ -167,24 +167,34 @@ def test_safe_upgrade_help_header_mentions_no_deps():
 # ----------------------- dep check disabled paths -----------------------
 
 
-def test_no_deps_flag_skips_dep_check(mock_env):
+def test_no_deps_flag_skips_dep_check(mock_env, tmp_path):
     """`--no-deps` must short-circuit dep checking with a clear notice."""
     write_formula_info(mock_env, "wget", "1.25.0")
     write_deps(mock_env, "wget", ["openssl@3"])
     # No deps_check_skipped sentinel file needed; we look for the printed notice.
+    stub = make_cve_stub(tmp_path)  # all packages clean
 
-    result = run_safe_install(["--no-deps", "wget"], input_text="n\n")
+    result = run_safe_install(
+        ["--no-deps", "wget"],
+        env_extra={"DEPENDENCY_SECURITY_CHECK": str(stub)},
+        input_text="n\n",
+    )
     assert "Dependency check skipped" in result.stdout
     # Must NOT print the dep-check header
     assert "Checking transitive dependencies" not in result.stdout
 
 
-def test_env_var_skips_dep_check(mock_env):
+def test_env_var_skips_dep_check(mock_env, tmp_path):
     """`BREW_SAFE_NO_DEPS=1` must short-circuit dep checking the same way."""
     write_formula_info(mock_env, "wget", "1.25.0")
     write_deps(mock_env, "wget", ["openssl@3"])
+    stub = make_cve_stub(tmp_path)  # all packages clean
 
-    result = run_safe_install(["wget"], env_extra={"BREW_SAFE_NO_DEPS": "1"}, input_text="n\n")
+    result = run_safe_install(
+        ["wget"],
+        env_extra={"BREW_SAFE_NO_DEPS": "1", "DEPENDENCY_SECURITY_CHECK": str(stub)},
+        input_text="n\n",
+    )
     assert "Dependency check skipped" in result.stdout
     assert "Checking transitive dependencies" not in result.stdout
 
@@ -192,24 +202,34 @@ def test_env_var_skips_dep_check(mock_env):
 # ----------------------- dep check enabled paths -----------------------
 
 
-def test_dep_check_runs_when_enabled(mock_env):
+def test_dep_check_runs_when_enabled(mock_env, tmp_path):
     """Default behavior: dep check header must appear."""
     write_formula_info(mock_env, "wget", "1.25.0")
     write_deps(mock_env, "wget", [])  # no deps → "no new dependency versions"
+    stub = make_cve_stub(tmp_path)  # all packages clean
 
-    result = run_safe_install(["wget"], input_text="n\n")
+    result = run_safe_install(
+        ["wget"],
+        env_extra={"DEPENDENCY_SECURITY_CHECK": str(stub)},
+        input_text="n\n",
+    )
     assert "Checking transitive dependencies" in result.stdout
     assert "No new dependency versions coming in." in result.stdout
 
 
-def test_already_installed_same_version_dep_is_skipped(mock_env):
+def test_already_installed_same_version_dep_is_skipped(mock_env, tmp_path):
     """A dep already installed at the latest version must not be re-checked."""
     write_formula_info(mock_env, "wget", "1.25.0")
     write_formula_info(mock_env, "openssl@3", "3.5.0")
     write_deps(mock_env, "wget", ["openssl@3"])
     write_installed_version(mock_env, "openssl@3", "3.5.0")  # same version → skip
+    stub = make_cve_stub(tmp_path)  # all packages clean
 
-    result = run_safe_install(["wget"], input_text="n\n")
+    result = run_safe_install(
+        ["wget"],
+        env_extra={"DEPENDENCY_SECURITY_CHECK": str(stub)},
+        input_text="n\n",
+    )
     assert "Checking transitive dependencies" in result.stdout
     # No incoming deps because the only dep is already at latest
     assert "No new dependency versions coming in." in result.stdout

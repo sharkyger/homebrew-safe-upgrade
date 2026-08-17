@@ -167,10 +167,16 @@ def test_mapped_cask_uses_mapped_keyword_in_nvd_url():
     with patch.object(dsc, "_urlopen", side_effect=fake_urlopen):
         dsc.query_nvd("brave-browser", "brew", version=None)
 
-    assert len(captured) == 1
+    # CPE-first means up to two requests (a CPE product query, then the keyword
+    # fallback when NVD has no CPE for it). The contract is about WHICH name is
+    # searched, not how many requests it takes, so assert over all of them.
+    assert captured, "expected at least one NVD request"
     # "Brave" — short, URL-safe, no encoding needed beyond the keyword
-    assert "Brave" in captured[0], f"expected mapped keyword in URL: {captured[0]}"
-    assert "brave-browser" not in captured[0], f"raw slug must not appear: {captured[0]}"
+    assert any("Brave" in u or "brave" in u for u in captured), (
+        f"expected mapped keyword in URLs: {captured}"
+    )
+    for url in captured:
+        assert "brave-browser" not in url, f"raw slug must not appear: {url}"
 
 
 def test_unmapped_brew_package_uses_raw_name():
@@ -253,9 +259,14 @@ def test_non_brew_ecosystem_unaffected_by_cask_map():
 
 
 def test_short_cask_token_with_long_mapped_keyword():
-    """Cask `obs` (3 chars) maps to 'OBS Studio' (10 chars). Without the
-    substitution the scanner's len<4 guard would skip the query; with it,
-    the query should fire."""
+    """Cask `obs` (3 chars) maps to 'OBS Studio'.
+
+    This used to matter because a len<4 guard skipped the NVD query outright
+    for short names. That guard is gone (it silently left xz, git, vim, php
+    and zsh unchecked), but the mapping still has to be applied: the CPE
+    product is `obs_studio` and the keyword fallback is "OBS Studio", never
+    the bare slug.
+    """
     captured = []
 
     def fake_urlopen(req, timeout=15):
@@ -265,5 +276,27 @@ def test_short_cask_token_with_long_mapped_keyword():
     with patch.object(dsc, "_urlopen", side_effect=fake_urlopen):
         dsc.query_nvd("obs", "brew", version=None)
 
-    assert len(captured) == 1
-    assert "OBS%20Studio" in captured[0]
+    assert captured, "expected at least one NVD request"
+    assert any("obs_studio" in u for u in captured), f"expected CPE product query: {captured}"
+    assert any("OBS%20Studio" in u for u in captured), f"expected mapped keyword: {captured}"
+
+
+def test_short_formula_name_is_still_queried():
+    """A <4-character formula must be queried, not silently skipped.
+
+    `xz`, `git`, `vim`, `php` and `zsh` all fell under the old len<4 guard.
+    For brew — where NVD is the only source that can answer — that meant the
+    package was never checked and always came back clean, including xz 5.6.1
+    (CVE-2024-3094, the backdoored release).
+    """
+    captured = []
+
+    def fake_urlopen(req, timeout=15):
+        captured.append(req.full_url)
+        return _FakeResponse(_fake_nvd_response("CVE-2099-0008", "irrelevant"))
+
+    with patch.object(dsc, "_urlopen", side_effect=fake_urlopen):
+        dsc.query_nvd("xz", "brew", version="5.6.1")
+
+    assert captured, "a short formula name must still reach NVD"
+    assert any("xz" in u for u in captured)

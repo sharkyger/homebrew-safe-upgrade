@@ -118,7 +118,16 @@ except Exception:
         fi
         exit 0
         ;;
-    install | pin | unpin)
+    pin | unpin)
+        # Test seam: MOCK_PIN_LOG records pin/unpin calls so a test can assert
+        # that a flagged dependency really was pinned for the duration of the
+        # upgrade (the mechanism that stops brew resolving it in anyway).
+        if [ -n "${MOCK_PIN_LOG:-}" ]; then
+            echo "$1 $2" >>"$MOCK_PIN_LOG"
+        fi
+        exit 0
+        ;;
+    install)
         exit 0
         ;;
     *)

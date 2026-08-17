@@ -15,6 +15,9 @@
 #:                             the GitHub API rate limit blocks the age check.
 #:      --no-verify-sha        Skip bottle SHA verification (default: on).
 #:      --no-deps              Skip transitive dependency checking.
+#:      --skip-unsafe          When an incoming dependency is flagged, hold only
+#:                             the packages that depend on it and upgrade the
+#:                             rest, instead of cancelling the whole run.
 #:      --self                 Upgrade safe-upgrade itself THROUGH this gate
 #:                             (Homebrew formula install only; the script install
 #:                             uses `brew safe-update`).
@@ -32,8 +35,8 @@
 # Queries 3 databases: OSV.dev, GitHub Advisory, NIST NVD.
 #
 # Usage: brew safe-upgrade [--yes|-y] [--min-age N] [--allow-unknown-age]
-#                          [--no-verify-sha] [--no-deps] [--version] [-h|--help]
-#                          [package ...]
+#                          [--no-verify-sha] [--no-deps] [--skip-unsafe]
+#                          [--version] [-h|--help] [package ...]
 #        [package ...]  Restrict the run to the named outdated package(s) instead
 #                       of every outdated package (matches name or basename).
 #        --allow-unknown-age  Permit packages whose release age cannot be verified
@@ -131,6 +134,10 @@ Options:
                          blocks the age check.
   --no-verify-sha        Skip bottle SHA verification (default: ON).
   --no-deps              Skip transitive dependency checking (default: check).
+  --skip-unsafe          When an incoming dependency is flagged (CVE or below
+                         --min-age), hold back only the packages that depend on
+                         it and upgrade the rest, instead of cancelling the
+                         whole run. Interactively this is the [s] answer.
   --self                 Upgrade safe-upgrade itself THROUGH this security gate:
                          gate its outdated dependencies first (fail-closed), then
                          upgrade the formula. Homebrew formula install only; the
@@ -177,6 +184,9 @@ if [ ! -f "$BOTTLE_RESOLVER" ]; then
 fi
 
 AUTO_YES=false
+SKIP_UNSAFE=false       # --skip-unsafe: hold packages with a flagged dep, upgrade the rest (#98).
+DEP_PARTIAL=false       # Set when we upgrade only the unaffected subset.
+DEP_HELD_PKGS=""        # Packages held back because a dependency was flagged.
 MIN_AGE=3               # 3-day freshness hold; --min-age 0 to disable.
 ALLOW_UNKNOWN_AGE=false # Fail closed: hold packages whose age can't be verified.
 VERIFY_SHA=true         # Default-on as of v0.2.0 — opt out with --no-verify-sha.
@@ -209,6 +219,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --allow-unknown-age)
             ALLOW_UNKNOWN_AGE=true
+            shift
+            ;;
+        --skip-unsafe)
+            SKIP_UNSAFE=true
             shift
             ;;
         --verify-sha) shift ;; # Accepted for back-compat — verification is now on by default.
@@ -981,6 +995,11 @@ if [ "$CHECK_DEPS" = true ] && [ -n "$CLEAN_PKGS" ]; then
     echo "Checking transitive dependencies (deduped across batch)..."
 
     INCOMING_DEPS_ARR=()
+    # "<dep>|<pkg>" ownership entries. INCOMING_DEPS_ARR is deduped across the
+    # whole batch, which loses track of WHICH package pulled a dep in — and
+    # without that we can only accept or reject the batch as a whole (#98).
+    # `brew deps` is recursive by default, so this records the full closure.
+    DEP_OWNERS_ARR=()
     for pkg in $CLEAN_PKGS; do
         DEPS_PARSED_ARR=()
         while IFS= read -r line; do
@@ -1026,6 +1045,10 @@ except Exception:
                     [ "$_e" = "$_entry" ] && _seen=1 && break
                 done
                 [ "$_seen" -eq 0 ] && INCOMING_DEPS_ARR+=("$_entry")
+                # Ownership is recorded per (dep, pkg) even when the dep itself
+                # is a duplicate: two packages can share one flagged dep and
+                # both have to be held.
+                DEP_OWNERS_ARR+=("${dep}|${pkg}")
             fi
         done
     done
@@ -1118,6 +1141,34 @@ except Exception:
         # Distinct sections for vulnerable vs. too-fresh: they are different
         # risk signals and the previous combined header conflated them.
         if [ -n "$DEP_BLOCKED_VULN" ] || [ -n "$DEP_BLOCKED_HOLD" ]; then
+            # Which top-level packages depend on a flagged dep? Only those have
+            # to be held; the rest of the batch is unaffected and upgradable.
+            #
+            # This is what makes the partition safe. brew resolves dependencies
+            # itself, so naming package A on the command line lets brew upgrade
+            # the flagged dep D underneath it. Holding every package whose
+            # (recursive) dep closure contains D is therefore not a convenience
+            # — it is the only way to keep D off brew's cmdline.
+            DEP_TAINTED_PKGS=""
+            for _bad in $DEP_BLOCKED_VULN $DEP_BLOCKED_HOLD; do
+                for _own in ${DEP_OWNERS_ARR[@]+"${DEP_OWNERS_ARR[@]}"}; do
+                    _own_dep=${_own%|*}
+                    _own_pkg=${_own##*|}
+                    if [ "$_own_dep" = "$_bad" ]; then
+                        if ! echo " $DEP_TAINTED_PKGS " | grep -qw "$_own_pkg"; then
+                            DEP_TAINTED_PKGS="$DEP_TAINTED_PKGS $_own_pkg"
+                        fi
+                    fi
+                done
+            done
+
+            DEP_SAFE_PKGS=""
+            for _p in $CLEAN_PKGS; do
+                if ! echo " $DEP_TAINTED_PKGS " | grep -qw "$_p"; then
+                    DEP_SAFE_PKGS="$DEP_SAFE_PKGS $_p"
+                fi
+            done
+
             echo ""
             if [ -n "$DEP_BLOCKED_VULN" ]; then
                 echo "WARNING: incoming dependencies have known CVEs:"
@@ -1128,15 +1179,72 @@ except Exception:
                 printf "%s" "$DEP_BLOCKED_HOLD_REASONS"
             fi
             echo "Proceeding will let brew upgrade them anyway."
-            if [ "$AUTO_YES" = true ]; then
+            if [ -n "$DEP_TAINTED_PKGS" ]; then
+                echo "Depends on a flagged dependency:$DEP_TAINTED_PKGS"
+            fi
+            if [ -n "$DEP_SAFE_PKGS" ]; then
+                echo "Unaffected and safe to upgrade now:$DEP_SAFE_PKGS"
+            else
+                echo "No package in this batch is free of the flagged dependencies."
+            fi
+
+            if [ "$SKIP_UNSAFE" = true ]; then
+                echo "[--skip-unsafe] holding:$DEP_TAINTED_PKGS"
+                DEP_PARTIAL=true
+            elif [ "$AUTO_YES" = true ]; then
                 # Visible on stderr so it lands in CI logs even when stdout is redirected
                 echo "[--yes] continuing despite dep warnings — review the lines above" >&2
             else
-                read -rp "Continue upgrade? [y/N] " DEP_CONFIRM
-                if [[ ! "$DEP_CONFIRM" =~ ^[yY] ]]; then
+                # Answering "no" used to cancel the ENTIRE job, so a single
+                # too-fresh dep blocked every unrelated package in the batch
+                # (#98). `s` upgrades only the packages that don't touch it.
+                echo "Continue upgrade?"
+                echo "  [y] yes — upgrade everything, including the flagged dependencies"
+                echo "  [s] skip — upgrade only the unaffected packages above"
+                echo "  [N] no  — cancel the whole upgrade (default)"
+                read -r DEP_CONFIRM
+                if [[ "$DEP_CONFIRM" =~ ^[sS] ]]; then
+                    DEP_PARTIAL=true
+                elif [[ ! "$DEP_CONFIRM" =~ ^[yY] ]]; then
                     echo "Cancelled."
                     exit 0
                 fi
+            fi
+
+            if [ "$DEP_PARTIAL" = true ]; then
+                if [ -z "$DEP_SAFE_PKGS" ]; then
+                    echo ""
+                    echo "Nothing left to upgrade after holding the affected packages."
+                    exit 0
+                fi
+                # Re-filter the formula/cask lists so brew only ever sees the
+                # safe subset. Rebuilding both lists (rather than CLEAN_PKGS
+                # alone) matters: the upgrade step passes them to brew
+                # separately, and a tainted cask left in CLEAN_PKGS_CASKS would
+                # still reach the cmdline.
+                _SAFE_FORMULAE=""
+                for _p in $CLEAN_PKGS_FORMULAE; do
+                    if echo " $DEP_SAFE_PKGS " | grep -qw "$_p"; then
+                        _SAFE_FORMULAE="$_SAFE_FORMULAE $_p"
+                    fi
+                done
+                _SAFE_CASKS=""
+                for _p in $CLEAN_PKGS_CASKS; do
+                    if echo " $DEP_SAFE_PKGS " | grep -qw "$_p"; then
+                        _SAFE_CASKS="$_SAFE_CASKS $_p"
+                    fi
+                done
+                CLEAN_PKGS_FORMULAE="$_SAFE_FORMULAE"
+                CLEAN_PKGS_CASKS="$_SAFE_CASKS"
+                CLEAN_PKGS="${CLEAN_PKGS_FORMULAE}${CLEAN_PKGS_CASKS}"
+                DEP_HELD_PKGS="$DEP_TAINTED_PKGS"
+                # Add BOTH the held dependents and the flagged deps themselves
+                # to EXCLUDE_PKGS. That list is `brew pin`-ed around the upgrade,
+                # and pinning the flagged dep is the actual guarantee: dropping a
+                # dependent from brew's cmdline is not enough on its own, because
+                # some other package's closure could still drag the dep in. The
+                # pin makes brew refuse to touch it either way.
+                EXCLUDE_PKGS="$EXCLUDE_PKGS $DEP_TAINTED_PKGS $DEP_BLOCKED_VULN $DEP_BLOCKED_HOLD"
             fi
         fi
     fi
@@ -1151,6 +1259,9 @@ if [ -z "$CLEAN_PKGS" ]; then
     echo "No verified clean packages to upgrade."
 else
     echo ""
+    if [ -n "$DEP_HELD_PKGS" ]; then
+        echo "Held (flagged dependency):$DEP_HELD_PKGS"
+    fi
     if [ -n "$CLEAN_PKGS_FORMULAE" ]; then
         echo "Clean formulae to upgrade:$CLEAN_PKGS_FORMULAE"
     fi
