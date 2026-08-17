@@ -1004,6 +1004,14 @@ def main():
                 "version": version,
                 "count": len(vulns),
                 "critical_high": len(critical_high),
+                # Same coverage fields as the clean/unknown paths. A finding is
+                # still worth qualifying — "1 CVE, and 2 of 3 sources answered"
+                # is a different statement from "1 CVE, all sources answered" —
+                # and a consumer reading sources_ok should not have to special-
+                # case this branch to avoid a KeyError.
+                "sources_ok": sources_ok,
+                "sources_total": len(applicable),
+                "sources_failed": failed_sources,
                 "vulnerabilities": vulns,
             },
             sys.stdout,

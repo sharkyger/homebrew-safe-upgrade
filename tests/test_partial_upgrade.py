@@ -210,6 +210,28 @@ def test_flagged_dep_itself_is_pinned(mock_env, tmp_path):
     assert "unpin taglib" in pinned, "the pin must be released after the upgrade"
 
 
+def test_all_clean_run_gets_the_affirmative_prompt(mock_env, tmp_path):
+    """With nothing excluded, the prompt should default to YES.
+
+    EXCLUDE_PKGS joins four possibly-empty lists, so "nothing excluded" is a
+    string of three spaces — and it was compared against exactly two, so the
+    all-clean branch was unreachable and even a completely clean run got the
+    cautious "Upgrade clean packages? Excluded ones will be skipped. [y/N]".
+    """
+    write_outdated(
+        mock_env, [{"name": "unrelated", "installed_versions": ["1.0"], "current_version": "2.0"}]
+    )
+    write_formula_info(mock_env, "unrelated", "2.0")
+    write_deps(mock_env, "unrelated", [])
+    stub = make_cve_stub(tmp_path)
+
+    result = run_upgrade([], env_extra={"DEPENDENCY_SECURITY_CHECK": str(stub)}, input_text="n\n")
+    assert "All clean. Run brew upgrade?" in result.stdout, (
+        f"expected the affirmative prompt when nothing is excluded:\n{result.stdout}"
+    )
+    assert "Excluded ones will be skipped" not in result.stdout
+
+
 def test_everything_affected_means_nothing_to_upgrade(mock_env, tmp_path):
     """If no package is free of the flagged dep, say so instead of upgrading."""
     write_outdated(

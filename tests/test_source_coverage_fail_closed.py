@@ -154,6 +154,57 @@ def test_real_finding_beats_a_source_failure():
     assert out["status"] == "vulnerable"
 
 
+def test_vulnerable_result_carries_the_same_coverage_fields():
+    """Every status must expose sources_ok/sources_total/sources_failed.
+
+    They were added to the clean and unknown paths but not the vulnerable one,
+    so a consumer reading `result["sources_ok"]` hit a KeyError exactly when the
+    scanner had found something. Coverage is also still meaningful here — "one
+    CVE, two of three sources answered" is a weaker statement than "one CVE,
+    all sources answered".
+    """
+    code, out = run_main(
+        ["dependency_security_check.py", "pip", "django", "2.2.0"],
+        {
+            "osv": [vuln_finding("OSV.dev", "CVE-2019-14234")],
+            "github": [error_finding("GitHub Advisory")],
+            "nvd": [],
+        },
+    )
+    assert code == 1
+    assert out["status"] == "vulnerable"
+    assert out["sources_ok"] == 2
+    assert out["sources_total"] == 3
+    assert out["sources_failed"] == ["GitHub Advisory"]
+
+
+def test_every_status_exposes_the_same_coverage_keys():
+    """Pinned as a contract so a future status branch cannot omit them."""
+    required = {"sources_ok", "sources_total", "sources_failed"}
+    scenarios = [
+        ("clean", {"osv": [], "github": [], "nvd": []}, 0),
+        (
+            "vulnerable",
+            {"osv": [vuln_finding("OSV.dev")], "github": [], "nvd": []},
+            1,
+        ),
+        (
+            "unknown",
+            {
+                "osv": [error_finding("OSV.dev")],
+                "github": [error_finding("GitHub Advisory")],
+                "nvd": [error_finding("NIST NVD")],
+            },
+            2,
+        ),
+    ]
+    for expected_status, findings, expected_code in scenarios:
+        code, out = run_main(["dependency_security_check.py", "pip", "django", "9.9.9"], findings)
+        assert code == expected_code, f"{expected_status}: exit {code}"
+        assert out["status"] == expected_status
+        assert required <= set(out), f"{expected_status} is missing {required - set(out)}"
+
+
 def test_full_coverage_clean_is_unchanged():
     """The happy path keeps exit 0 and status clean."""
     code, out = run_main(

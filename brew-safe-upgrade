@@ -1272,11 +1272,24 @@ else
     if [ "$AUTO_YES" = true ]; then
         CONFIRM="y"
     else
-        if [ -z "$EXCLUDE_PKGS" ] || [ "$EXCLUDE_PKGS" = "  " ]; then
-            read -rp "All clean. Run brew upgrade? [Y/n] " CONFIRM
+        # Trim rather than compare against a literal run of spaces. EXCLUDE_PKGS
+        # joins four (now more) possibly-empty lists, so "nothing excluded" is a
+        # string of N-1 spaces — it was compared against exactly two, so the
+        # all-clean branch could never be reached and a first run with nothing
+        # blocked still got the cautious "[y/N]" prompt. Adding more lists to
+        # the join would have silently changed the count again.
+        EXCLUDE_PKGS_TRIMMED=$(echo "$EXCLUDE_PKGS" | xargs)
+        # echo + read rather than `read -rp`: bash only renders a -p prompt when
+        # stdin is a terminal, so under a pipe (CI, `yes |`, the test suite) the
+        # question was never shown at all — the run just looked like it stopped.
+        # Same reasoning as the SHA prompt above.
+        if [ -z "$EXCLUDE_PKGS_TRIMMED" ]; then
+            echo "All clean. Run brew upgrade? [Y/n] "
+            read -r CONFIRM
             [[ "$CONFIRM" =~ ^[nN] ]] && CONFIRM="n" || CONFIRM="y"
         else
-            read -rp "Upgrade clean packages? Excluded ones will be skipped. [y/N] " CONFIRM
+            echo "Upgrade clean packages? Excluded ones will be skipped. [y/N] "
+            read -r CONFIRM
             [[ "$CONFIRM" =~ ^[yY] ]] && CONFIRM="y" || CONFIRM="n"
         fi
     fi
