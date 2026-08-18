@@ -5,6 +5,18 @@ updates:
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
+    groups:
+      # init and analyze must move in lockstep — a version skew fails the
+      # Analyze Python job (see PRs #112/#113). Two groups because a group
+      # only covers version updates unless applies-to says otherwise.
+      codeql-action-version:
+        applies-to: version-updates
+        patterns:
+          - "github/codeql-action/*"
+      codeql-action-security:
+        applies-to: security-updates
+        patterns:
+          - "github/codeql-action/*"
 
   - package-ecosystem: "pip"
     directory: "/"

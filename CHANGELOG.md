@@ -8,6 +8,8 @@ The project is pre-1.0; expect minor breaking changes between 0.x releases until
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-08-18
+
 ### Changed
 
 - **NVD is now queried CPE-first, and the result set is paginated.** The NVD lookup used a keyword search capped at `resultsPerPage=10` with no pagination. NVD returns results oldest-first, so for any established package only its *ten oldest* CVEs were ever retrieved — openssh has 177, libreoffice 109. Every report of "current version flagged with a decades-old CVE" traces back to this: those ancient CVEs were the only candidates the matcher ever saw. Queries now go through `virtualMatchString`, which asks NVD for the CVEs applying to a specific product **and** version, so the result set is small, complete and already scoped; keyword search remains as a paginated fallback for products NVD has no CPE for. A result set too large to page through fully is reported as a source failure rather than summarised as "clean". Fixes [#94](https://github.com/sharkyger/homebrew-safe-upgrade/issues/94), [#95](https://github.com/sharkyger/homebrew-safe-upgrade/issues/95) and [#109](https://github.com/sharkyger/homebrew-safe-upgrade/issues/109).
@@ -244,7 +246,10 @@ pre-tag history by theme rather than by release. Full detail is in `git log`.
 - CodeQL, gitleaks, and dependabot wired up.
 - Community health files: issue templates (bug, false-positive, feature), discussion link from README on the open `--min-age` default question.
 
-[Unreleased]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.2.7...HEAD
+[Unreleased]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.2.9...v0.3.0
+[0.2.9]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.2.8...v0.2.9
+[0.2.8]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.2.7...v0.2.8
 [0.2.7]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.2.6...v0.2.7
 [0.2.6]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.2.5...v0.2.6
 [0.2.5]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.2.4...v0.2.5
