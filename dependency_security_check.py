@@ -486,6 +486,13 @@ NVD_MAX_RETRIES = 3
 NVD_RETRY_BASE_SECONDS = 6  # a little under the 30s window / 5 requests
 
 
+NVD_KEY_HINT = (
+    "NVD rate limit reached (5 requests / 30s without a key). "
+    "Set NVD_API_KEY for 50/30s — free, no approval wait: "
+    "https://nvd.nist.gov/developers/request-an-api-key"
+)
+
+
 def _nvd_headers():
     """Request headers for NVD, including the API key when one is configured.
 
@@ -913,6 +920,9 @@ def query_nvd(package_name, ecosystem, version=None):
                 }
             )
     except (urllib.error.URLError, json.JSONDecodeError, TimeoutError) as e:
+        # Distinguish "NVD threw us out for asking too fast" from any other
+        # failure. Both fail closed, but only one of them has a fix the user can
+        # act on, and without saying so the run just looks broken.
         findings.append(
             {
                 "source": "NIST NVD",
@@ -920,6 +930,7 @@ def query_nvd(package_name, ecosystem, version=None):
                 "severity": "UNKNOWN",
                 "score": 0,
                 "summary": f"Query failed: {e}",
+                "rate_limited": isinstance(e, urllib.error.HTTPError) and e.code in (403, 429),
             }
         )
     return findings
@@ -1023,6 +1034,9 @@ def main():
     # was built from. Reporting "2/3 sources checked" when NVD is the one that
     # failed would claim coverage that never existed.
     failed_sources = sorted({e["source"] for e in errors})
+    # Surfaced in the JSON as well as on stderr: the wrappers invoke this script
+    # with 2>/dev/null, so stdout is the only channel they can actually read.
+    rate_limited = any(e.get("rate_limited") for e in errors)
     sources_ok = len([s for s in applicable if s not in failed_sources])
 
     if not vulns and sources_ok == 0:
@@ -1035,6 +1049,8 @@ def main():
             f"({', '.join(failed_sources)}). Not reporting this package as clean.",
             file=sys.stderr,
         )
+        if rate_limited and not os.environ.get("NVD_API_KEY", "").strip():
+            print(f"  -> {NVD_KEY_HINT}", file=sys.stderr)
         json.dump(
             {
                 "status": "unknown",
@@ -1044,6 +1060,7 @@ def main():
                 "sources_ok": 0,
                 "sources_total": len(applicable),
                 "sources_failed": failed_sources,
+                "rate_limited": rate_limited,
                 "vulnerabilities": [],
             },
             sys.stdout,
@@ -1069,6 +1086,7 @@ def main():
                 "sources_ok": sources_ok,
                 "sources_total": len(applicable),
                 "sources_failed": failed_sources,
+                "rate_limited": rate_limited,
                 "vulnerabilities": [],
             },
             sys.stdout,
@@ -1104,6 +1122,7 @@ def main():
                 "sources_ok": sources_ok,
                 "sources_total": len(applicable),
                 "sources_failed": failed_sources,
+                "rate_limited": rate_limited,
                 "vulnerabilities": vulns,
             },
             sys.stdout,

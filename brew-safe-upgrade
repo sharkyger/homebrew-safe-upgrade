@@ -777,6 +777,22 @@ echo ""
 
 BLOCKED_PKGS=""
 TAMPERED_PKGS=""
+
+# One actionable note per run when NVD threw us out for asking too fast.
+# The scanner is invoked with 2>/dev/null, so its stderr hint never reaches the
+# user here — the signal travels in the JSON on stdout instead. Without this a
+# throttled run just shows packages being held for no stated reason, which reads
+# as the tool being broken and pushes people toward --no-deps.
+RATE_LIMIT_SEEN=false
+note_rate_limit() {
+    [ "$RATE_LIMIT_SEEN" = true ] || return 0
+    [ -n "${NVD_API_KEY:-}" ] && return 0
+    echo ""
+    echo "  Note: NIST NVD rate-limited this run (5 requests / 30s without a key)."
+    echo "        Packages above were HELD because nothing could vet them, not because"
+    echo "        they are known-bad. Set NVD_API_KEY for 50/30s — free, no approval wait:"
+    echo "        https://nvd.nist.gov/developers/request-an-api-key"
+}
 SKIPPED_PKGS=""
 CLEAN_COUNT=0
 SHA_API_ERROR_PKGS=""
@@ -894,6 +910,9 @@ except Exception:
         else
             echo "  [skip] $name $current -- check failed, will not upgrade"
             SKIPPED_PKGS="$SKIPPED_PKGS $name"
+            if echo "$RESULT_JSON" | grep -q '"rate_limited": *true'; then
+                RATE_LIMIT_SEEN=true
+            fi
         fi
     else
         echo "  Error: Security check script not found at $SCRIPT"
@@ -964,6 +983,7 @@ if [ -n "$HELD_PKGS" ]; then
 fi
 if [ -n "$SKIPPED_PKGS" ]; then
     echo "  Skipped (check failed):$SKIPPED_PKGS"
+    note_rate_limit
 fi
 
 # --- Transitive dependency check (default on; --no-deps to skip) ---
@@ -1129,6 +1149,9 @@ except Exception:
             else
                 echo "    [skip-dep] $DEP $DEP_VER -- check failed (network or DB error)"
                 DEP_SKIPPED="$DEP_SKIPPED $DEP"
+                if echo "$DEP_RESULT" | grep -q '"rate_limited": *true'; then
+                    RATE_LIMIT_SEEN=true
+                fi
             fi
         done
 
@@ -1136,6 +1159,7 @@ except Exception:
             echo ""
             echo "  Note: dep checks failed for:$DEP_SKIPPED"
             echo "  These will upgrade unchecked. Re-run later or use --no-deps to suppress."
+            note_rate_limit
         fi
 
         # Distinct sections for vulnerable vs. too-fresh: they are different
