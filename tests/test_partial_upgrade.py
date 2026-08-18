@@ -18,6 +18,7 @@ The fix therefore also `brew pin`s the flagged dep — see
 test_flagged_dep_itself_is_pinned.
 """
 
+import datetime
 import json
 import os
 import subprocess
@@ -87,12 +88,14 @@ def write_deps(fixture_dir, name, deps):
 
 
 def write_installed_version(fixture_dir, name, version):
-    (fixture_dir / f"installed_{name}.txt").write_text(f"{name} {version}\n")
+    # mock brew reads `list_<name>.txt` for `brew list --versions` — writing
+    # any other name silently leaves the version unset, which still routes to
+    # "incoming" via the empty branch and makes the test pass for the wrong
+    # reason.
+    (fixture_dir / f"list_{name}.txt").write_text(f"{name} {version}\n")
 
 
 def fresh_commit(fixture_dir, name, days=0):
-    import datetime
-
     dt = datetime.datetime.now(datetime.UTC) - datetime.timedelta(days=days)
     commits_dir = Path(os.environ["MOCK_COMMITS_API_DIR"])
     (commits_dir / f"{name}.json").write_text(
@@ -208,6 +211,46 @@ def test_flagged_dep_itself_is_pinned(mock_env, tmp_path):
     assert "pin taglib" in pinned, f"the flagged dep must be pinned, got:\n{pinned}"
     assert "pin player" in pinned, f"the held dependent must be pinned, got:\n{pinned}"
     assert "unpin taglib" in pinned, "the pin must be released after the upgrade"
+
+
+def test_package_name_with_a_dot_is_matched_literally(mock_env, tmp_path):
+    """Membership must not go through a regex.
+
+    `grep -qw llama.cpp` matches the unrelated `llamaXcpp`, because `.` is a
+    wildcard in a BRE. In the safe-list filter that over-match runs the UNSAFE
+    way: a tainted package could be judged safe and handed to brew. Here
+    `llama.cpp` depends on the too-fresh dep and `llamaXcpp` does not, so a
+    regex match would wrongly hold `llamaXcpp` — and, in the reverse filter,
+    wrongly release `llama.cpp`.
+    """
+    write_outdated(
+        mock_env,
+        [
+            {"name": "llama.cpp", "installed_versions": ["1.0"], "current_version": "2.0"},
+            {"name": "llamaXcpp", "installed_versions": ["1.0"], "current_version": "2.0"},
+        ],
+    )
+    for n, v in (("llama.cpp", "2.0"), ("llamaXcpp", "2.0"), ("taglib", "2.3.1")):
+        write_formula_info(mock_env, n, v)
+    write_deps(mock_env, "llama.cpp", ["taglib"])
+    write_deps(mock_env, "llamaXcpp", [])
+    write_installed_version(mock_env, "taglib", "2.2.0")
+    fresh_commit(mock_env, "taglib", days=0)
+    stub = make_cve_stub(tmp_path)
+
+    result = run_upgrade(
+        ["--skip-unsafe"], env_extra={"DEPENDENCY_SECURITY_CHECK": str(stub)}, input_text="y\n"
+    )
+    held = [ln for ln in result.stdout.splitlines() if "holding:" in ln]
+    upgrade_line = [ln for ln in result.stdout.splitlines() if "Clean formulae to upgrade:" in ln]
+    assert held and "llama.cpp" in held[0], f"llama.cpp depends on taglib: {result.stdout}"
+    assert held and "llamaXcpp" not in held[0], (
+        f"llamaXcpp has no flagged dep and must not be held: {held}"
+    )
+    assert upgrade_line and "llamaXcpp" in upgrade_line[0], f"{result.stdout}"
+    assert upgrade_line and "llama.cpp" not in upgrade_line[0], (
+        f"tainted llama.cpp must never reach brew's cmdline: {upgrade_line}"
+    )
 
 
 def test_all_clean_run_gets_the_affirmative_prompt(mock_env, tmp_path):

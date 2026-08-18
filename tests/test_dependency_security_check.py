@@ -51,6 +51,13 @@ def skip_if_unchecked(exit_code, output, case):
     the databases do answer, instead of turning a rate limit into a red build.
     """
     if exit_code == 2:
+        # Exit 2 is also returned for invalid input and a broken script path.
+        # Only the documented no-source-answered shape may skip; anything else
+        # exiting 2 is a real failure and must not be swallowed.
+        assert output.get("status") == "unknown", (
+            f"exit 2 without the documented unknown-result shape: {output!r}"
+        )
+        assert output.get("sources_ok") == 0, f"exit 2 but sources_ok != 0: {output!r}"
         failed = output.get("sources_failed") or ["unknown"]
         pytest.skip(
             f"no vulnerability source answered for {case['package']}@{case['version']} "

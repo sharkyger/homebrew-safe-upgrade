@@ -100,14 +100,51 @@ def test_brew_nvd_failure_is_unknown_not_clean():
 
 
 def test_brew_denominator_excludes_sources_that_never_run():
-    """The old code said '2/3 sources checked' when zero sources ran."""
-    code, out = run_main(
-        ["dependency_security_check.py", "brew", "wget", "1.21.4"],
-        {"osv": [], "github": [], "nvd": []},
-    )
-    assert code == 0
+    """The old code said '2/3 sources checked' when zero sources ran.
+
+    Asserts the *reason* as well as the count: OSV and GitHub must never be
+    called at all for brew. A denominator of 1 that came from those two being
+    called and returning empty would be a different (and wrong) implementation
+    passing the same numeric assertion.
+    """
+    requested = []
+    out_io, err_io = io.StringIO(), io.StringIO()
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return b'{"totalResults": 0, "vulnerabilities": []}'
+
+    def fake_urlopen(req, timeout=15):
+        requested.append(req.full_url)
+        return _Resp()
+
+    # query_osv/query_github ARE invoked — they return empty immediately because
+    # ECOSYSTEM_MAP maps brew to None. So the property worth asserting is that
+    # neither issues a REQUEST, not that neither function is entered.
+    with (
+        patch.object(sys, "argv", ["dependency_security_check.py", "brew", "wget", "1.21.4"]),
+        patch.object(dsc, "_urlopen", side_effect=fake_urlopen),
+        redirect_stdout(out_io),
+        redirect_stderr(err_io),
+        pytest.raises(SystemExit) as exc,
+    ):
+        dsc.main()
+
+    out = json.loads(out_io.getvalue())
+    assert exc.value.code == 0
     assert out["sources_total"] == 1
     assert out["sources_ok"] == 1
+    assert requested, "NVD is the one source that must actually be queried for brew"
+    for url in requested:
+        assert "nvd.nist.gov" in url, f"only NVD may be queried for brew, got: {url}"
+    assert not any("osv.dev" in u for u in requested), "OSV must not be queried for brew"
+    assert not any("api.github.com" in u for u in requested), "GitHub must not be queried for brew"
 
 
 def test_all_three_sources_failing_is_unknown():

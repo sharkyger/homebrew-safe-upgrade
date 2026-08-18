@@ -334,6 +334,30 @@ def test_truncated_result_set_is_reported_as_a_source_failure():
     )
 
 
+def test_cpe_update_field_carries_the_openssh_portmark():
+    """NVD splits the portmark into the CPE UPDATE component.
+
+    CVE-2016-6210 is recorded as `cpe:2.3:a:openbsd:openssh:*:p2:*`. Homebrew
+    spells the same thing as one string ("10.3p1"), so comparing only the
+    version component against it can never match — an exact-version CPE pinned
+    to a portmark would be judged not-affected and the finding lost.
+    """
+    payload = _nvd_response(
+        [
+            (
+                "CVE-2016-6210",
+                "OpenSSH has a user enumeration flaw.",
+                [{"vulnerable": True, "criteria": "cpe:2.3:a:openbsd:openssh:7.2:p2:*:*:*:*:*:*"}],
+            )
+        ]
+    )
+    assert ids(run_query("openssh", "7.2p2", payload)) == {"CVE-2016-6210"}, (
+        "an exact-version CPE with the portmark in the update field must still match"
+    )
+    # ...and a different portable build of the same release must NOT match.
+    assert ids(run_query("openssh", "7.2p1", payload)) == set()
+
+
 def test_persistent_false_positive_would_disable_the_freshness_hold():
     """Why these false positives were worse than cosmetic.
 

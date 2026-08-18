@@ -1149,24 +1149,32 @@ except Exception:
             # the flagged dep D underneath it. Holding every package whose
             # (recursive) dep closure contains D is therefore not a convenience
             # — it is the only way to keep D off brew's cmdline.
+            # Membership is tested with `case`, not `grep -qw`. Homebrew names
+            # carry regex metacharacters — `grep -qw llama.cpp` matches the
+            # unrelated `llamaXcpp`, because `.` is a wildcard in a BRE. In the
+            # safe-list filter below that over-match runs the UNSAFE way: a
+            # tainted package could be judged safe and handed to brew. `case`
+            # patterns match literally here, so a package can only match itself.
             DEP_TAINTED_PKGS=""
             for _bad in $DEP_BLOCKED_VULN $DEP_BLOCKED_HOLD; do
                 for _own in ${DEP_OWNERS_ARR[@]+"${DEP_OWNERS_ARR[@]}"}; do
                     _own_dep=${_own%|*}
                     _own_pkg=${_own##*|}
                     if [ "$_own_dep" = "$_bad" ]; then
-                        if ! echo " $DEP_TAINTED_PKGS " | grep -qw "$_own_pkg"; then
-                            DEP_TAINTED_PKGS="$DEP_TAINTED_PKGS $_own_pkg"
-                        fi
+                        case " $DEP_TAINTED_PKGS " in
+                            *" $_own_pkg "*) ;;
+                            *) DEP_TAINTED_PKGS="$DEP_TAINTED_PKGS $_own_pkg" ;;
+                        esac
                     fi
                 done
             done
 
             DEP_SAFE_PKGS=""
             for _p in $CLEAN_PKGS; do
-                if ! echo " $DEP_TAINTED_PKGS " | grep -qw "$_p"; then
-                    DEP_SAFE_PKGS="$DEP_SAFE_PKGS $_p"
-                fi
+                case " $DEP_TAINTED_PKGS " in
+                    *" $_p "*) ;;
+                    *) DEP_SAFE_PKGS="$DEP_SAFE_PKGS $_p" ;;
+                esac
             done
 
             echo ""
@@ -1224,15 +1232,15 @@ except Exception:
                 # still reach the cmdline.
                 _SAFE_FORMULAE=""
                 for _p in $CLEAN_PKGS_FORMULAE; do
-                    if echo " $DEP_SAFE_PKGS " | grep -qw "$_p"; then
-                        _SAFE_FORMULAE="$_SAFE_FORMULAE $_p"
-                    fi
+                    case " $DEP_SAFE_PKGS " in
+                        *" $_p "*) _SAFE_FORMULAE="$_SAFE_FORMULAE $_p" ;;
+                    esac
                 done
                 _SAFE_CASKS=""
                 for _p in $CLEAN_PKGS_CASKS; do
-                    if echo " $DEP_SAFE_PKGS " | grep -qw "$_p"; then
-                        _SAFE_CASKS="$_SAFE_CASKS $_p"
-                    fi
+                    case " $DEP_SAFE_PKGS " in
+                        *" $_p "*) _SAFE_CASKS="$_SAFE_CASKS $_p" ;;
+                    esac
                 done
                 CLEAN_PKGS_FORMULAE="$_SAFE_FORMULAE"
                 CLEAN_PKGS_CASKS="$_SAFE_CASKS"
@@ -1278,7 +1286,10 @@ else
         # all-clean branch could never be reached and a first run with nothing
         # blocked still got the cautious "[y/N]" prompt. Adding more lists to
         # the join would have silently changed the count again.
-        EXCLUDE_PKGS_TRIMMED=$(echo "$EXCLUDE_PKGS" | xargs)
+        # Parameter expansion, not xargs: xargs parses quotes and backslashes,
+        # so malformed content could collapse to empty and silently select the
+        # affirmative "All clean" default.
+        EXCLUDE_PKGS_TRIMMED="${EXCLUDE_PKGS//[[:space:]]/}"
         # echo + read rather than `read -rp`: bash only renders a -p prompt when
         # stdin is a terminal, so under a pipe (CI, `yes |`, the test suite) the
         # question was never shown at all — the run just looked like it stopped.

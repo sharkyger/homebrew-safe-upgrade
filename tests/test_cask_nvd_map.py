@@ -171,9 +171,14 @@ def test_mapped_cask_uses_mapped_keyword_in_nvd_url():
     # fallback when NVD has no CPE for it). The contract is about WHICH name is
     # searched, not how many requests it takes, so assert over all of them.
     assert captured, "expected at least one NVD request"
+    # Check the KEYWORD request specifically. Accepting a match from the CPE
+    # candidate URL would let a regression that drops the mapping on the keyword
+    # path still pass, since the CPE product happens to contain "brave" too.
+    keyword_urls = [u for u in captured if "keywordSearch=" in u]
+    assert keyword_urls, f"expected a keyword-search request: {captured}"
     # "Brave" — short, URL-safe, no encoding needed beyond the keyword
-    assert any("Brave" in u or "brave" in u for u in captured), (
-        f"expected mapped keyword in URLs: {captured}"
+    assert any("keywordSearch=Brave" in u for u in keyword_urls), (
+        f"expected the mapped keyword on the keyword path: {keyword_urls}"
     )
     for url in captured:
         assert "brave-browser" not in url, f"raw slug must not appear: {url}"

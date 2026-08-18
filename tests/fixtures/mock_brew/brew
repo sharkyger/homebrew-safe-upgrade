@@ -123,7 +123,13 @@ except Exception:
         # that a flagged dependency really was pinned for the duration of the
         # upgrade (the mechanism that stops brew resolving it in anyway).
         if [ -n "${MOCK_PIN_LOG:-}" ]; then
-            echo "$1 $2" >>"$MOCK_PIN_LOG"
+            # One line per package: real `brew pin` accepts several at once, and
+            # logging only $2 would hide everything after the first.
+            _cmd="$1"
+            shift
+            for _pkg in "$@"; do
+                echo "$_cmd $_pkg" >>"$MOCK_PIN_LOG"
+            done
         fi
         exit 0
         ;;

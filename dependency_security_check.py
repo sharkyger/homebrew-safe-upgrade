@@ -13,13 +13,18 @@ Usage:
 Ecosystems: pip, npm, composer, cargo, go, maven, gem, brew
 Exit codes: 0 = clean, 1 = vulnerabilities found, 2 = error
 
-No API keys required. All three databases are free and public.
+All three databases are free and public and no key is required. Setting
+NVD_API_KEY (free, https://nvd.nist.gov/developers/request-an-api-key) raises
+NVD's rate limit from 5 to 50 requests per rolling 30 seconds, which matters on
+large batches: a package no source could answer for is HELD, not passed.
 """
 
 import json
+import os
 import re
 import ssl
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -469,6 +474,32 @@ NVD_API = "https://services.nvd.nist.gov/rest/json/cves/2.0"
 NVD_PAGE_SIZE = 200
 NVD_MAX_PAGES = 5
 
+# NVD throttles anonymous callers to 5 requests per rolling 30 seconds; an API
+# key raises that to 50. Set NVD_API_KEY to use one — request it (free) at
+# https://nvd.nist.gov/developers/request-an-api-key.
+#
+# Without a key this matters more than it used to. Now that a package with no
+# answering source is held rather than reported clean, being throttled means
+# packages do not upgrade — a batch of ten can lose several. Hence: send the key
+# when present, and back off and retry rather than giving up on the first 403.
+NVD_MAX_RETRIES = 3
+NVD_RETRY_BASE_SECONDS = 6  # a little under the 30s window / 5 requests
+
+
+def _nvd_headers():
+    """Request headers for NVD, including the API key when one is configured.
+
+    The key goes in a HEADER, never the query string — NVD's documented method,
+    and it keeps the secret out of anything that logs or reports a URL. Nothing
+    here is ever printed: the failure paths report the exception, not the
+    headers.
+    """
+    headers = {"User-Agent": USER_AGENT}
+    api_key = os.environ.get("NVD_API_KEY", "").strip()
+    if api_key:
+        headers["apiKey"] = api_key
+    return headers
+
 
 def _nvd_cpe_products(package_name, ecosystem):
     """CPE product-name candidates for a package, most specific first.
@@ -495,6 +526,38 @@ def _nvd_cpe_products(package_name, ecosystem):
     return ordered
 
 
+def _nvd_get(url):
+    """GET one NVD page, retrying a throttling response with backoff.
+
+    NVD answers 403 (and sometimes 429) when the rate limit is exceeded. Giving
+    up on the first one means the package ends up with no answering source,
+    which is now a HOLD rather than a false "clean" — so a transient throttle
+    would stop packages upgrading. Retry a bounded number of times, honouring
+    Retry-After when NVD sends it, and let the exception through afterwards so
+    the caller still fails closed.
+    """
+    last_error = None
+    for attempt in range(NVD_MAX_RETRIES):
+        req = urllib.request.Request(url, headers=_nvd_headers())
+        try:
+            with _urlopen(req) as resp:
+                return json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            if e.code not in (403, 429) or attempt == NVD_MAX_RETRIES - 1:
+                raise
+            last_error = e
+            retry_after = e.headers.get("Retry-After") if e.headers else None
+            try:
+                delay = (
+                    float(retry_after) if retry_after else NVD_RETRY_BASE_SECONDS * (attempt + 1)
+                )
+            except (TypeError, ValueError):
+                delay = NVD_RETRY_BASE_SECONDS * (attempt + 1)
+            # Cap so a hostile or malformed Retry-After cannot stall the run.
+            time.sleep(min(delay, 30))
+    raise last_error if last_error else urllib.error.URLError("NVD request failed")
+
+
 def _nvd_fetch(params):
     """Fetch all pages for an NVD query.
 
@@ -506,9 +569,7 @@ def _nvd_fetch(params):
     start = 0
     for _ in range(NVD_MAX_PAGES):
         url = f"{NVD_API}?{params}&resultsPerPage={NVD_PAGE_SIZE}&startIndex={start}"
-        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-        with _urlopen(req) as resp:
-            data = json.loads(resp.read())
+        data = _nvd_get(url)
         total = data.get("totalResults", 0)
         page = data.get("vulnerabilities", [])
         records.extend(page)
@@ -594,10 +655,20 @@ def _cpe_version_affected(version, relevant_cpes):
                 affected = True
         else:
             # Exact version match — extract from CPE URI
-            # Format: cpe:2.3:a:vendor:product:VERSION:...
+            # Format: cpe:2.3:a:vendor:product:VERSION:UPDATE:...
             cpe_parts = cpe.get("criteria", "").split(":")
             if len(cpe_parts) >= 6:
                 cpe_ver = cpe_parts[5]
+                # NVD carries the OpenSSH portmark in the UPDATE component, not
+                # in the version: CVE-2016-6210 is
+                # `cpe:2.3:a:openbsd:openssh:*:p2:*`. Homebrew spells the same
+                # thing as one string ("10.3p1"), so comparing only the version
+                # component against it can never match — an exact-version CPE
+                # pinned to a portmark would be judged not-affected, missing a
+                # real finding. Rejoin them before comparing.
+                cpe_update = cpe_parts[6] if len(cpe_parts) >= 7 else "*"
+                if re.match(r"^p\d+$", cpe_update or ""):
+                    cpe_ver = f"{cpe_ver}{cpe_update}" if cpe_ver not in ("*", "-", "") else cpe_ver
                 if cpe_ver in ("*", "-", ""):
                     affected = True  # Wildcard — can't determine
                 elif parse_version(version) == parse_version(cpe_ver):
@@ -893,8 +964,20 @@ def main():
         print(f"  Version: {version}", file=sys.stderr)
     else:
         print("  Version: unknown (checking all known CVEs)", file=sys.stderr)
+    # Which sources can actually answer for this ecosystem? OSV and GitHub have
+    # no Homebrew ecosystem (both map `brew` to None) and return empty WITHOUT
+    # querying, so for `brew` NVD is the only source that ever runs. Computed
+    # once, before the queries, so the opening line and the closing coverage
+    # count cannot disagree — announcing "3 databases" and then reporting out of
+    # 1 was the same overstated-coverage problem in a different place.
+    applicable = ["NIST NVD"]
+    if ECOSYSTEM_MAP["osv"].get(ecosystem):
+        applicable.append("OSV.dev")
+    if ECOSYSTEM_MAP["github"].get(ecosystem):
+        applicable.append("GitHub Advisory")
+    plural = "database" if len(applicable) == 1 else "databases"
     print(
-        "  Querying 3 vulnerability databases (NVD + OSV + GitHub)...\n",
+        f"  Querying {len(applicable)} vulnerability {plural} ({' + '.join(applicable)})...\n",
         file=sys.stderr,
     )
 
@@ -920,16 +1003,9 @@ def main():
     for e in errors:
         print(f"  Warning: {e['source']}: {e['summary']}", file=sys.stderr)
 
-    # Coverage accounting. Only sources that can actually answer for this
-    # ecosystem count: OSV and GitHub have no Homebrew ecosystem (both map
-    # `brew` to None) and return empty WITHOUT querying, so for `brew` NVD is
-    # the only source that ever runs. Reporting "2/3 sources checked" when NVD
-    # is the one that failed would claim coverage that never existed.
-    applicable = ["NIST NVD"]
-    if ECOSYSTEM_MAP["osv"].get(ecosystem):
-        applicable.append("OSV.dev")
-    if ECOSYSTEM_MAP["github"].get(ecosystem):
-        applicable.append("GitHub Advisory")
+    # Coverage accounting, against the same `applicable` list the opening line
+    # was built from. Reporting "2/3 sources checked" when NVD is the one that
+    # failed would claim coverage that never existed.
     failed_sources = sorted({e["source"] for e in errors})
     sources_ok = len([s for s in applicable if s not in failed_sources])
 
