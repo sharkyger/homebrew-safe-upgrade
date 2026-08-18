@@ -1,5 +1,5 @@
 {
-  "comment": "Known-vulnerable and known-clean triples. Verified against live databases 2026-04-22.",
+  "comment": "Known-vulnerable and known-clean triples, checked against live databases. NOTE: 'vulnerable' entries are stable over time (a published CVE never un-publishes), but a 'clean' entry decays the moment the world finds a CVE — brew:wget@1.25.0 was listed clean on 2026-04-22 and by 2026-08-17 carried CVE-2026-58469..58472 ('GNU Wget through 1.25.0'). Clean cases must therefore assert VERSION FILTERING against an unreleased version rather than the current state of a real release.",
   "vulnerable": [
     {
       "ecosystem": "pip",
@@ -18,14 +18,20 @@
       "package": "django",
       "version": "2.2.0",
       "reason": "Multiple CVEs in early 2.2.x series"
+    },
+    {
+      "ecosystem": "brew",
+      "package": "wget",
+      "version": "1.25.0",
+      "reason": "CVE-2026-58469/58470/58471/58472 — 'GNU Wget through 1.25.0'. Listed as CLEAN until 2026-08-17; the CPE-first rework surfaced these, the old keyword+resultsPerPage=10 path never fetched them because wget's ten oldest CVEs filled the page."
     }
   ],
   "clean": [
     {
       "ecosystem": "brew",
       "package": "wget",
-      "version": "1.25.0",
-      "reason": "Current stable, verified clean 2026-04-22"
+      "version": "99.99.0",
+      "reason": "Unreleased version, above every published wget CVE range — asserts the version filter EXCLUDES out-of-range CVEs. Cannot decay: a future CVE cannot bound a version that does not exist yet."
     }
   ]
 }

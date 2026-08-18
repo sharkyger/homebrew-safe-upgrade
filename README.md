@@ -22,7 +22,7 @@ Every outdated package is checked against:
 
 Results are deduplicated across sources. Version-aware filtering eliminates false positives from old CVEs that don't affect the target version.
 
-No API keys required. All three databases are free and public.
+All three databases are free and public, and no key is required to use the tool. Setting `NVD_API_KEY` is strongly recommended on larger upgrade batches — see below.
 
 ## How it works
 
@@ -165,7 +165,49 @@ export BREW_SAFE_NO_DEPS=1
 
 The flag is per-invocation by design — the safe default always returns the next time you run the command without it. The env var is the only way to make it sticky, and you have to put it in your shell rc yourself; the tool never writes any persistent config.
 
-> **Note on big upgrade batches.** `brew safe-upgrade` deduplicates incoming deps across the batch, but a large run with many unique deps can still hit NIST NVD's anonymous rate limit (5 requests / 30 seconds). When that happens you'll see `[skip-dep]` lines in the output — those deps were not vetted. Re-run the upgrade later, or pass `--no-deps` if you've vetted upstream another way.
+> **Note on big upgrade batches.** `brew safe-upgrade` deduplicates incoming deps across the batch, but a large run with many unique deps can still hit NIST NVD's anonymous rate limit (5 requests / 30 seconds). When that happens you'll see `[skip-dep]` lines in the output — those deps were not vetted. Re-run the upgrade later, or pass `--no-deps` if you've vetted upstream another way. **Setting `NVD_API_KEY` largely removes this** — see below.
+
+#### When a dependency is flagged: upgrade the rest anyway
+
+If an incoming dependency has a CVE or is below `--min-age`, you get three choices rather than an all-or-nothing decision:
+
+```
+Incoming dependencies are below --min-age:
+    taglib 2.3.1: too fresh (1 days old, min-age 3)
+Depends on a flagged dependency: player
+Unaffected and safe to upgrade now: unrelated ripgrep jq
+Continue upgrade?
+  [y] yes — upgrade everything, including the flagged dependencies
+  [s] skip — upgrade only the unaffected packages above
+  [N] no  — cancel the whole upgrade (default)
+```
+
+`[s]` upgrades the packages that don't touch the flagged dependency and holds back the ones that do. Use `--skip-unsafe` to take that branch non-interactively:
+
+```
+brew safe-upgrade --skip-unsafe
+```
+
+Held packages **and the flagged dependency itself** are `brew pin`-ed for the duration of the upgrade and unpinned afterwards. Keeping a dependent off brew's command line is not sufficient on its own — brew resolves dependencies itself, so the pin is what actually stops the flagged version being pulled in under some other package.
+
+### `NVD_API_KEY` — strongly recommended
+
+NIST NVD allows **5 requests per rolling 30 seconds** anonymously, and **50 with an API key**. A package that no source could answer for is *held*, not reported clean, so being throttled means packages don't upgrade. Measured on a batch of ten formulae in a container:
+
+| | packages left unchecked |
+|---|---|
+| with `NVD_API_KEY` | **0 of 10** |
+| without | 3 of 10 |
+
+Requests are retried with backoff when NVD throttles, but under sustained load backoff alone cannot recover a 5-request budget — the key is what actually fixes it.
+
+Get one free at <https://nvd.nist.gov/developers/request-an-api-key> (no approval wait; you'll get a single-use activation link by email, valid 7 days). Then:
+
+```bash
+export NVD_API_KEY="your-key-here"
+```
+
+Put it in `~/.zshenv` rather than `~/.zshrc` if you want non-interactive tools and scripts to see it — zsh only reads `.zshrc` for interactive shells. The key is sent as a request header, never in the URL, so it won't appear in logs or error output.
 
 ### Minimum-age / freshness check (on by default, 3 days)
 
@@ -374,7 +416,7 @@ Exit codes:
 
 - `0` — no known vulnerabilities
 - `1` — vulnerabilities found (details on stderr, JSON on stdout)
-- `2` — error (invalid input, network failure)
+- `2` — error (invalid input, network failure, or **no source could answer**)
 
 JSON output on stdout for programmatic use:
 
@@ -384,9 +426,37 @@ JSON output on stdout for programmatic use:
   "package": "requests",
   "ecosystem": "pip",
   "version": "2.31.0",
+  "sources_ok": 3,
+  "sources_total": 3,
+  "sources_failed": [],
   "vulnerabilities": []
 }
 ```
+
+`sources_total` counts the databases that are *applicable* to the ecosystem — not the ones that answered successfully. A failed source is still counted in `sources_total` and named in `sources_failed`; `sources_ok` is the number that actually replied.
+OSV and the GitHub Advisory Database have no Homebrew ecosystem, so for `brew`
+the total is `1` (NVD) — a `brew` result reading "3 sources checked" would be
+claiming coverage that never existed.
+
+If **no** source answers, the status is `unknown` and the exit code is `2`, not
+`clean`/`0`:
+
+```json
+{
+  "status": "unknown",
+  "package": "openssl@3",
+  "ecosystem": "brew",
+  "version": "3.0.0",
+  "sources_ok": 0,
+  "sources_total": 1,
+  "sources_failed": ["NIST NVD"],
+  "vulnerabilities": []
+}
+```
+
+"Nothing was found" and "nothing was checked" are different answers, and only
+the first one means the package is safe to upgrade. `brew safe-upgrade` treats
+exit `2` as `[skip] … check failed, will not upgrade`.
 
 ## Install
 
