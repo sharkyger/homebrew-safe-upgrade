@@ -223,3 +223,98 @@ def test_install_surfaces_the_note_too(brew_env, tmp_path):
     result = run_wrapper(SAFE_INSTALL, ["wget"], make_stub(tmp_path, "True"))
     assert "rate-limited this run" in result.stdout, f"no note:\n{result.stdout}"
     assert "NVD_API_KEY" in result.stdout
+
+
+def make_dep_scenario(fixture_dir):
+    """wget with one incoming dep, so BOTH check paths run in a single invocation."""
+    (fixture_dir / "deps_wget.txt").write_text("libfoo\n")
+    (fixture_dir / "info_libfoo.json").write_text(
+        json.dumps({"formulae": [{"name": "libfoo", "versions": {"stable": "2.0"}}], "casks": []})
+    )
+    (fixture_dir / "list_libfoo.txt").write_text("libfoo 1.0\n")
+
+
+def test_note_appears_once_even_when_both_paths_are_throttled(brew_env, tmp_path):
+    """Two call sites, one message.
+
+    Reaching both takes care: a throttled top-level package is EXCLUDED from
+    CLEAN_PKGS, and the dependency check only runs when that list is non-empty.
+    So the scenario needs one package throttled (firing the skip-summary note)
+    AND a second, clean package whose dependency is throttled (firing the
+    dep-summary note). Without an idempotence guard the user reads the same
+    four-line paragraph twice.
+    """
+    (brew_env / "outdated.json").write_text(
+        json.dumps(
+            {
+                "formulae": [
+                    {"name": "pkga", "installed_versions": ["1.0"], "current_version": "2.0"},
+                    {"name": "pkgb", "installed_versions": ["1.0"], "current_version": "2.0"},
+                ],
+                "casks": [],
+            }
+        )
+    )
+    for name in ("pkga", "pkgb", "libfoo"):
+        (brew_env / f"info_{name}.json").write_text(
+            json.dumps({"formulae": [{"name": name, "versions": {"stable": "2.0"}}], "casks": []})
+        )
+    (brew_env / "deps_pkga.txt").write_text("")
+    (brew_env / "deps_pkgb.txt").write_text("libfoo\n")
+    (brew_env / "list_libfoo.txt").write_text("libfoo 1.0\n")
+
+    # Throttle pkga (top-level) and libfoo (dependency); pkgb resolves clean so
+    # the dependency stage is reached at all.
+    stub = tmp_path / "two_paths.py"
+    stub.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, sys\n"
+        "pkg = sys.argv[2]\n"
+        "if pkg in ('pkga', 'libfoo'):\n"
+        "    json.dump({'status': 'unknown', 'package': pkg, 'sources_ok': 0,\n"
+        "               'sources_total': 1, 'sources_failed': ['NIST NVD'],\n"
+        "               'rate_limited': True, 'vulnerabilities': []}, sys.stdout)\n"
+        "    sys.exit(2)\n"
+        "json.dump({'status': 'clean', 'package': pkg, 'sources_ok': 1,\n"
+        "           'sources_total': 1, 'sources_failed': [], 'rate_limited': False,\n"
+        "           'vulnerabilities': []}, sys.stdout)\n"
+        "sys.exit(0)\n"
+    )
+    stub.chmod(0o755)
+
+    result = run_wrapper(SAFE_UPGRADE, [], stub)
+    assert "[skip] pkga" in result.stdout, result.stdout
+    assert "[skip-dep] libfoo" in result.stdout, "both paths must actually run"
+    occurrences = result.stdout.count("rate-limited this run")
+    assert occurrences == 1, f"expected exactly one note, got {occurrences}:\n{result.stdout}"
+
+
+def test_install_notes_a_dependency_only_throttle(brew_env, tmp_path):
+    """The note must not depend on a top-level package also being skipped.
+
+    brew-safe-install only called note_rate_limit inside the SKIPPED_PKGS block,
+    so a run where the named package resolved fine but a dependency was
+    throttled printed nothing at all.
+    """
+    make_dep_scenario(brew_env)
+    stub = tmp_path / "dep_only.py"
+    stub.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, sys\n"
+        "pkg = sys.argv[2]\n"
+        "if pkg == 'libfoo':\n"
+        "    json.dump({'status': 'unknown', 'package': pkg, 'sources_ok': 0,\n"
+        "               'sources_total': 1, 'sources_failed': ['NIST NVD'],\n"
+        "               'rate_limited': True, 'vulnerabilities': []}, sys.stdout)\n"
+        "    sys.exit(2)\n"
+        "json.dump({'status': 'clean', 'package': pkg, 'sources_ok': 1,\n"
+        "           'sources_total': 1, 'sources_failed': [], 'rate_limited': False,\n"
+        "           'vulnerabilities': []}, sys.stdout)\n"
+        "sys.exit(0)\n"
+    )
+    stub.chmod(0o755)
+    result = run_wrapper(SAFE_INSTALL, ["wget"], stub)
+    assert "[skip-dep] libfoo" in result.stdout, result.stdout
+    assert result.stdout.count("rate-limited this run") == 1, (
+        f"a dependency-only throttle must still be explained:\n{result.stdout}"
+    )

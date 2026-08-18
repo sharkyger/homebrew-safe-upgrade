@@ -784,9 +784,16 @@ TAMPERED_PKGS=""
 # throttled run just shows packages being held for no stated reason, which reads
 # as the tool being broken and pushes people toward --no-deps.
 RATE_LIMIT_SEEN=false
+RATE_LIMIT_NOTED=false
 note_rate_limit() {
     [ "$RATE_LIMIT_SEEN" = true ] || return 0
     [ -n "${NVD_API_KEY:-}" ] && return 0
+    # At most once per run. There is a call site after the top-level skip
+    # summary and another after the dependency one, and a throttle severe
+    # enough to hit packages usually hits deps too — so both fire and the user
+    # reads the same paragraph twice.
+    [ "$RATE_LIMIT_NOTED" = true ] && return 0
+    RATE_LIMIT_NOTED=true
     echo ""
     echo "  Note: NIST NVD rate-limited this run (5 requests / 30s without a key)."
     echo "        Packages above were HELD because nothing could vet them, not because"
