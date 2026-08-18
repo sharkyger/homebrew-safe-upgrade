@@ -31,6 +31,7 @@ import io
 import json
 import sys
 import urllib.error
+import urllib.parse
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
@@ -102,10 +103,10 @@ def test_brew_nvd_failure_is_unknown_not_clean():
 def test_brew_denominator_excludes_sources_that_never_run():
     """The old code said '2/3 sources checked' when zero sources ran.
 
-    Asserts the *reason* as well as the count: OSV and GitHub must never be
-    called at all for brew. A denominator of 1 that came from those two being
-    called and returning empty would be a different (and wrong) implementation
-    passing the same numeric assertion.
+    Asserts the *reason* as well as the count: for brew, NVD must be the only
+    host actually contacted. A denominator of 1 arrived at some other way — by
+    querying all three and discarding two — would be a different (and wrong)
+    implementation passing the same numeric assertion.
     """
     requested = []
     out_io, err_io = io.StringIO(), io.StringIO()
@@ -141,10 +142,11 @@ def test_brew_denominator_excludes_sources_that_never_run():
     assert out["sources_total"] == 1
     assert out["sources_ok"] == 1
     assert requested, "NVD is the one source that must actually be queried for brew"
-    for url in requested:
-        assert "nvd.nist.gov" in url, f"only NVD may be queried for brew, got: {url}"
-    assert not any("osv.dev" in u for u in requested), "OSV must not be queried for brew"
-    assert not any("api.github.com" in u for u in requested), "GitHub must not be queried for brew"
+    # Compare the parsed hostname, not a substring. `"nvd.nist.gov" in url` also
+    # matches https://attacker.example/?x=nvd.nist.gov, so it would not actually
+    # pin where the request went.
+    hosts = {urllib.parse.urlparse(u).hostname for u in requested}
+    assert hosts == {"services.nvd.nist.gov"}, f"only NVD may be queried for brew, got: {hosts}"
 
 
 def test_all_three_sources_failing_is_unknown():

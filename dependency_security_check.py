@@ -667,10 +667,26 @@ def _cpe_version_affected(version, relevant_cpes):
                 # pinned to a portmark would be judged not-affected, missing a
                 # real finding. Rejoin them before comparing.
                 cpe_update = cpe_parts[6] if len(cpe_parts) >= 7 else "*"
-                if re.match(r"^p\d+$", cpe_update or ""):
-                    cpe_ver = f"{cpe_ver}{cpe_update}" if cpe_ver not in ("*", "-", "") else cpe_ver
+                update_portmark = re.match(r"^p\d+$", cpe_update or "")
+                if update_portmark and cpe_ver not in ("*", "-", ""):
+                    cpe_ver = f"{cpe_ver}{cpe_update}"
                 if cpe_ver in ("*", "-", ""):
-                    affected = True  # Wildcard — can't determine
+                    if update_portmark:
+                        # Wildcard version but a pinned portable build, e.g.
+                        # `openssh:*:p2`. Treating that as a bare wildcard flags
+                        # EVERY OpenSSH version — the exact shape of the false
+                        # positive in issue #94, since CVE-2016-6210 is recorded
+                        # this way. Match only the same portmark; if the
+                        # installed version carries none, we cannot disprove it
+                        # and fail closed.
+                        installed_portmark = re.search(r"p(\d+)$", str(version or ""))
+                        if (
+                            installed_portmark is None
+                            or installed_portmark.group(1) == update_portmark.group(0)[1:]
+                        ):
+                            affected = True
+                    else:
+                        affected = True  # Wildcard — can't determine
                 elif parse_version(version) == parse_version(cpe_ver):
                     affected = True
     return affected

@@ -358,6 +358,42 @@ def test_cpe_update_field_carries_the_openssh_portmark():
     assert ids(run_query("openssh", "7.2p1", payload)) == set()
 
 
+def test_wildcard_version_with_portmark_does_not_flag_every_build():
+    """`openssh:*:p2` pins a portable build, not "any version".
+
+    CVE-2016-6210 is recorded exactly this way. Treating the wildcard version as
+    "affects everything" and ignoring the update component flags every OpenSSH
+    release — the same false positive shape as #94, just via a different field.
+    """
+    payload = _nvd_response(
+        [
+            (
+                "CVE-2016-6210",
+                "OpenSSH user enumeration.",
+                [{"vulnerable": True, "criteria": "cpe:2.3:a:openbsd:openssh:*:p2:*:*:*:*:*:*"}],
+            )
+        ]
+    )
+    assert ids(run_query("openssh", "10.3p1", payload)) == set(), "p1 is not the pinned p2 build"
+    assert ids(run_query("openssh", "7.2p2", payload)) == {"CVE-2016-6210"}, "p2 must still flag"
+    # No portmark at all => we cannot disprove it => fail closed.
+    assert ids(run_query("openssh", "7.2", payload)) == {"CVE-2016-6210"}
+
+
+def test_plain_wildcard_cpe_still_flags():
+    """The portmark handling must not weaken an ordinary version wildcard."""
+    payload = _nvd_response(
+        [
+            (
+                "CVE-2099-0001",
+                "OpenSSH flaw.",
+                [{"vulnerable": True, "criteria": "cpe:2.3:a:openbsd:openssh:*:*:*:*:*:*:*:*"}],
+            )
+        ]
+    )
+    assert ids(run_query("openssh", "10.3p1", payload)) == {"CVE-2099-0001"}
+
+
 def test_persistent_false_positive_would_disable_the_freshness_hold():
     """Why these false positives were worse than cosmetic.
 

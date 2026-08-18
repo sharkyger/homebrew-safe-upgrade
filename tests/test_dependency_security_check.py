@@ -58,6 +58,12 @@ def skip_if_unchecked(exit_code, output, case):
             f"exit 2 without the documented unknown-result shape: {output!r}"
         )
         assert output.get("sources_ok") == 0, f"exit 2 but sources_ok != 0: {output!r}"
+        assert isinstance(output.get("sources_total"), int) and output["sources_total"] > 0, (
+            f"unknown result must name how many sources were applicable: {output!r}"
+        )
+        assert output.get("sources_failed"), (
+            f"unknown result must name the sources that failed: {output!r}"
+        )
         failed = output.get("sources_failed") or ["unknown"]
         pytest.skip(
             f"no vulnerability source answered for {case['package']}@{case['version']} "
