@@ -218,6 +218,31 @@ def test_upgrade_stays_quiet_when_a_key_is_set(brew_env, tmp_path):
     assert "rate-limited this run" not in result.stdout
 
 
+def test_whitespace_only_key_still_gets_the_note(brew_env, tmp_path):
+    """A blank-ish key is the worst case, not an edge case.
+
+    The scanner strips before deciding whether to send the apiKey header, so
+    NVD_API_KEY="   " means no header goes out and the run really is throttled.
+    A wrapper that read the same value as "key present" would suppress the
+    explanation precisely when the user is most confused — they believe they
+    configured a key. The two must agree on what counts as unset.
+    """
+    result = run_wrapper(
+        SAFE_UPGRADE, [], make_stub(tmp_path, "True"), env_extra={"NVD_API_KEY": "   "}
+    )
+    assert "rate-limited this run" in result.stdout, (
+        f"a whitespace-only key must not suppress the note:\n{result.stdout}"
+    )
+
+
+def test_whitespace_only_key_still_gets_the_note_in_install(brew_env, tmp_path):
+    """Same contract in the other wrapper."""
+    result = run_wrapper(
+        SAFE_INSTALL, ["wget"], make_stub(tmp_path, "True"), env_extra={"NVD_API_KEY": "   "}
+    )
+    assert "rate-limited this run" in result.stdout, result.stdout
+
+
 def test_install_surfaces_the_note_too(brew_env, tmp_path):
     """Both entry points hit the same limit; both must explain it."""
     result = run_wrapper(SAFE_INSTALL, ["wget"], make_stub(tmp_path, "True"))

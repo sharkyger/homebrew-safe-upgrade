@@ -387,7 +387,14 @@ RATE_LIMIT_SEEN=false
 RATE_LIMIT_NOTED=false
 note_rate_limit() {
     [ "$RATE_LIMIT_SEEN" = true ] || return 0
-    [ -n "${NVD_API_KEY:-}" ] && return 0
+    # Trim before deciding, matching the scanner's .strip(). They must agree:
+    # the scanner sends no apiKey header for a whitespace-only value, so the run
+    # IS throttled — and a wrapper that read the same value as "key present"
+    # would suppress the explanation in exactly the case the user most needs it,
+    # because they believe they have a working key.
+    _nvd_key="${NVD_API_KEY:-}"
+    _nvd_key="${_nvd_key//[[:space:]]/}"
+    [ -n "$_nvd_key" ] && return 0
     # At most once per run. There is a call site after the top-level skip
     # summary and another after the dependency one, and a throttle severe
     # enough to hit packages usually hits deps too — so both fire and the user
