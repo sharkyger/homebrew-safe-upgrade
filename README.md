@@ -209,6 +209,19 @@ export NVD_API_KEY="your-key-here"
 
 Put it in `~/.zshenv` rather than `~/.zshrc` if you want non-interactive tools and scripts to see it — zsh only reads `.zshrc` for interactive shells. The key is sent as a request header, never in the URL, so it won't appear in logs or error output.
 
+If you do get throttled, the run tells you — once, at the end:
+
+```
+  Skipped (check failed): tree gawk pcre2
+
+  Note: NIST NVD rate-limited this run (5 requests / 30s without a key).
+        Packages above were HELD because nothing could vet them, not because
+        they are known-bad. Set NVD_API_KEY for 50/30s — free, no approval wait:
+        https://nvd.nist.gov/developers/request-an-api-key
+```
+
+That distinction matters: a held package is one nothing could check, which is not the same as one known to be vulnerable.
+
 ### Minimum-age / freshness check (on by default, 3 days)
 
 Hold back **formulae, casks, and tap formulae** published less than N days ago. Protects against supply chain attacks where a compromised version is published minutes after credential theft — before any CVE database knows about it. Worm-class npm compromises (Shai-Hulud, Mini Shai-Hulud) have repeatedly shown live windows of 1–6 hours between malicious publish and registry takedown; a multi-day freshness hold trades a small lag against the entire attack window.

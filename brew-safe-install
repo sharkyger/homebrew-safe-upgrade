@@ -377,6 +377,36 @@ echo ""
 BLOCKED_PKGS=""
 TAMPERED_PKGS=""
 SKIPPED_PKGS=""
+
+# One actionable note per run when NVD threw us out for asking too fast.
+# The scanner is invoked with stderr suppressed, so its own hint never reaches
+# the user here — the signal travels in the JSON on stdout instead. Without this
+# a throttled run just shows packages held for no stated reason, which reads as
+# the tool being broken and pushes people toward --no-deps.
+RATE_LIMIT_SEEN=false
+RATE_LIMIT_NOTED=false
+note_rate_limit() {
+    [ "$RATE_LIMIT_SEEN" = true ] || return 0
+    # Trim before deciding, matching the scanner's .strip(). They must agree:
+    # the scanner sends no apiKey header for a whitespace-only value, so the run
+    # IS throttled — and a wrapper that read the same value as "key present"
+    # would suppress the explanation in exactly the case the user most needs it,
+    # because they believe they have a working key.
+    _nvd_key="${NVD_API_KEY:-}"
+    _nvd_key="${_nvd_key//[[:space:]]/}"
+    [ -n "$_nvd_key" ] && return 0
+    # At most once per run. There is a call site after the top-level skip
+    # summary and another after the dependency one, and a throttle severe
+    # enough to hit packages usually hits deps too — so both fire and the user
+    # reads the same paragraph twice.
+    [ "$RATE_LIMIT_NOTED" = true ] && return 0
+    RATE_LIMIT_NOTED=true
+    echo ""
+    echo "  Note: NIST NVD rate-limited this run (5 requests / 30s without a key)."
+    echo "        Packages above were HELD because nothing could vet them, not because"
+    echo "        they are known-bad. Set NVD_API_KEY for 50/30s — free, no approval wait:"
+    echo "        https://nvd.nist.gov/developers/request-an-api-key"
+}
 HELD_PKGS=""
 CLEAN_PKGS=""
 CLEAN_COUNT=0
@@ -611,6 +641,9 @@ except Exception:
     else
         echo "  [skip] $pkg $VERSION -- check failed, will not install"
         SKIPPED_PKGS="$SKIPPED_PKGS $pkg"
+        if echo "$RESULT" | grep -q '"rate_limited": *true'; then
+            RATE_LIMIT_SEEN=true
+        fi
     fi
 done
 
@@ -655,6 +688,7 @@ if [ -n "$HELD_PKGS" ]; then
 fi
 if [ -n "$SKIPPED_PKGS" ]; then
     echo "  Skipped:$SKIPPED_PKGS"
+    note_rate_limit
 fi
 
 # Install
@@ -820,6 +854,9 @@ except Exception:
             else
                 echo "    [skip-dep] $DEP $DEP_VER -- check failed (network or DB error)"
                 DEP_SKIPPED="$DEP_SKIPPED $DEP"
+                if echo "$DEP_RESULT" | grep -q '"rate_limited": *true'; then
+                    RATE_LIMIT_SEEN=true
+                fi
             fi
         done
 
@@ -827,6 +864,7 @@ except Exception:
             echo ""
             echo "  Note: dep checks failed for:$DEP_SKIPPED"
             echo "  These will install unchecked. Re-run later or use --no-deps to suppress."
+            note_rate_limit
         fi
 
         # Distinct sections for vulnerable vs. too-fresh: they are different
