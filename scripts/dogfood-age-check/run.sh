@@ -24,10 +24,10 @@ trap 'rm -rf "$BUILD"' EXIT
 start=$(grep -n '^resolve_gh_token() {' "$REPO/brew-safe-upgrade" | cut -d: -f1)
 fstart=$(grep -n '^fetch_pkg_age() {' "$REPO/brew-safe-upgrade" | cut -d: -f1)
 fend=$(awk -v s="$fstart" 'NR>=s && /^}$/{print NR; exit}' "$REPO/brew-safe-upgrade")
-[ -n "$start" ] && [ -n "$fend" ] || {
+if [ -z "$start" ] || [ -z "$fend" ]; then
     echo "could not locate the age functions" >&2
     exit 1
-}
+fi
 sed -n "${start},${fend}p" "$REPO/brew-safe-upgrade" >"$BUILD/age_funcs.sh"
 bash -n "$BUILD/age_funcs.sh" || {
     echo "extracted functions do not parse" >&2
