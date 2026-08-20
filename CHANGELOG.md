@@ -8,6 +8,8 @@ The project is pre-1.0; expect minor breaking changes between 0.x releases until
 
 ## [Unreleased]
 
+## [0.3.1] — 2026-08-20
+
 ### Fixed
 
 - **The age check no longer exhausts GitHub's anonymous rate limit on a machine with a large upgrade backlog.** `fetch_pkg_age` spent one GitHub REST call per outdated package, and anonymous GitHub allows 60 per hour per IP. A machine left un-upgraded for a few weeks routinely has 50–70 outdated packages, so the *first* run could exhaust the quota and a second run within the hour always did — at which point the run aborts and nothing upgrades, which is the worst outcome for exactly the machines that are furthest behind. [#84](https://github.com/sharkyger/homebrew-safe-upgrade/issues/84) raised the ceiling by authenticating; this removes most of the traffic instead. Two changes:
@@ -15,6 +17,8 @@ The project is pre-1.0; expect minor breaking changes between 0.x releases until
   - **homebrew-core formulae now resolve from the bottle manifest** (`org.opencontainers.image.created` on the OCI image index) rather than the GitHub commits API. Anonymous registry reads are not metered against the REST budget. Measured in a container on a real 49-package backlog (`scripts/dogfood-age-check`): **5 GitHub calls cold and 1 warm, against 49 before.**
 
 - **The bottle timestamp is also the more accurate date.** The commits API returns the last commit that *touched* the formula file, which is not the release. homebrew-core lands a version bump and its bottle hashes as two separate commits — `python@3.14 3.14.7` on 2026-08-09, then `python@3.14: update 3.14.7 bottle.` on 2026-08-13 — and unrelated maintenance commits move the file too, so `per_page=1` could report days after the release it was meant to date. Casks and tap formulae deliberately stay on the commit date: a commit date is attested by GitHub, whereas a tap owner controls their own manifest annotations and could backdate one to slip past `--min-age`.
+
+- **Age-cache hardening from review.** The cache key is the SHA-256 of package type, name and version — the earlier separator folding was not injective (`core:zlib@1.3_1` and `core:zlib_1.3@1` shared a file), so a stale cached date could have waved a brand-new package past `--min-age`. Every timestamp — bottle-manifest annotation, commit date, and cache entry — must now parse as a complete ISO-8601 datetime before it is used or stored; a malformed value is treated as absent and the resolver falls through to the next source, instead of caching a permanent "unknown" hold. Caches written by the pre-release branch are simply not found under the new keys and re-resolve once.
 
 - **`NVD_API_KEY` and `GH_TOKEN` never reached the tool when invoked as `brew safe-upgrade`.** Homebrew does not pass the user's environment to external commands — `bin/brew` rebuilds it with `env -i` from an allowlist (`HOME SHELL PATH TERM …` plus every `HOMEBREW_*` variable) and drops the rest. So the documented advice to `export NVD_API_KEY=...` was silently ineffective on the `brew` route: the run fell back to the anonymous 5-requests/30s budget while the user believed the key was active, and the same applied to `GH_TOKEN`/`GITHUB_TOKEN` for the age check. `HOMEBREW_NVD_API_KEY` and Homebrew's own `HOMEBREW_GITHUB_API_TOKEN` are now accepted as equivalent spellings, both of which survive the scrub by construction. The unprefixed names keep working for direct invocation and CI, and `gh auth login` was always unaffected because that token comes off disk. README updated to stop recommending an export that cannot work.
 
@@ -264,7 +268,8 @@ pre-tag history by theme rather than by release. Full detail is in `git log`.
 - CodeQL, gitleaks, and dependabot wired up.
 - Community health files: issue templates (bug, false-positive, feature), discussion link from README on the open `--min-age` default question.
 
-[Unreleased]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.2.9...v0.3.0
 [0.2.9]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.2.8...v0.2.9
 [0.2.8]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.2.7...v0.2.8
