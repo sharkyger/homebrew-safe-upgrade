@@ -25,7 +25,8 @@
 #:      -h, --help             Show this help and exit.
 #:
 #:  The age check queries GitHub's API (60 requests/hour unauthenticated). Set
-#:  GH_TOKEN or GITHUB_TOKEN, or run `gh auth login`, for 5000/hour.
+#:  `gh auth login` or HOMEBREW_GITHUB_API_TOKEN for 5000/hour (GH_TOKEN and
+#:  GITHUB_TOKEN work only outside `brew`, which scrubs the environment).
 #:
 #:  NOTE: Homebrew intercepts -h/--help/--usage/-? before exec'ing this script
 #:  and renders help from these `#:` lines. The print_help() block below serves
@@ -258,12 +259,203 @@ resolve_gh_token() {
         printf '%s' "$GH_TOKEN"
     elif [ -n "${GITHUB_TOKEN:-}" ]; then
         printf '%s' "$GITHUB_TOKEN"
+    elif [ -n "${HOMEBREW_GITHUB_API_TOKEN:-}" ]; then
+        # The only spelling that survives `brew`. Homebrew re-execs external
+        # commands through `env -i` with an allowlist (bin/brew) that keeps
+        # HOMEBREW_* and drops everything else — so GH_TOKEN and GITHUB_TOKEN
+        # exported in a shell profile never reach us when invoked as
+        # `brew safe-upgrade`. This is Homebrew's own documented token variable
+        # (Library/Homebrew/env_config.rb), so most users who need it have it.
+        printf '%s' "$HOMEBREW_GITHUB_API_TOKEN"
     elif command -v gh >/dev/null 2>&1; then
         # stderr suppressed: never prompt, never fail the run if gh is unauthed.
         gh auth token 2>/dev/null || true
     fi
 }
 GH_AUTH_TOKEN="$(resolve_gh_token)"
+
+# ---------------------------------------------------------------------------
+# Age-resolution cache + ghcr.io bottle dates
+#
+# Issue #84 raised the GitHub API ceiling by authenticating. This addresses the
+# call VOLUME, which is the part that breaks on real machines: fetch_pkg_age
+# spends one GitHub request per outdated package, and anonymous REST allows 60
+# per hour per IP. A machine left un-upgraded for a few weeks routinely has
+# 50-70 outdated packages, so the FIRST run can exhaust the quota, and a second
+# run within the hour always does. The gate then fails closed on everything and
+# the user upgrades nothing — the worst outcome for the machines that are
+# furthest behind.
+#
+# Two changes remove most of that traffic:
+#
+#   1. A publication date is IMMUTABLE. Once pandoc 3.10.2 is dated 2026-08-13
+#      it is dated that forever, so (type,name,version) -> timestamp is cached
+#      on disk and re-runs cost zero requests.
+#   2. Homebrew publishes core bottles to ghcr.io as OCI artifacts whose index
+#      carries org.opencontainers.image.created. Anonymous ghcr reads are not
+#      metered against the 60/hour REST budget, so core formulae resolve for
+#      free and GitHub is left to handle only casks and tap formulae.
+#
+# On accuracy: the GitHub date is the last commit to TOUCH the formula file,
+# which is not the release date. homebrew-core lands a version bump and its
+# bottle hashes as two commits ("python@3.14 3.14.7" on 2026-08-09, then
+# "python@3.14: update 3.14.7 bottle." on 2026-08-13), and unrelated
+# maintenance commits move it too. per_page=1 returns whichever came last. The
+# ghcr annotation is the bottle build time — the moment the artifact a user
+# would actually download became public, which is what a freshness hold is
+# trying to measure.
+#
+# On trust: ONLY homebrew-core is read from ghcr. Those manifests are pushed by
+# Homebrew's CI alone. A third-party tap owner controls their own annotations
+# and could backdate one to slip past --min-age, so taps keep using the commit
+# date, which is attested by GitHub rather than self-reported by the publisher.
+# Casks have no bottles and are unaffected.
+# ---------------------------------------------------------------------------
+
+# Cache location. Honors an explicit override first (tests), then Homebrew's own
+# cache root, then the platform default — Homebrew runs on Linux too, where
+# ~/Library does not exist.
+AGE_CACHE_ENABLED=true
+if [ -n "${BREW_SAFE_AGE_CACHE_DIR:-}" ]; then
+    AGE_CACHE_DIR="$BREW_SAFE_AGE_CACHE_DIR"
+elif [ -n "${MOCK_COMMITS_API_DIR:-}" ]; then
+    # Hermetic test mode. Without this a date resolved by one test would persist
+    # in the user's real cache and leak into the next — and into their next real
+    # run. Tests that want cache behaviour set BREW_SAFE_AGE_CACHE_DIR explicitly.
+    AGE_CACHE_ENABLED=false
+    AGE_CACHE_DIR=""
+elif [ -n "${HOMEBREW_CACHE:-}" ]; then
+    AGE_CACHE_DIR="${HOMEBREW_CACHE}/safe-upgrade-age"
+elif [ -n "${HOME:-}" ] && [ -d "${HOME}/Library/Caches" ]; then
+    # The -n guard matters: with HOME unset, -d "/Library/Caches" is still true
+    # on macOS (it exists at the filesystem root) and the branch would then
+    # expand an unbound $HOME.
+    AGE_CACHE_DIR="${HOME}/Library/Caches/homebrew-safe-upgrade/age"
+elif [ -n "${XDG_CACHE_HOME:-}" ]; then
+    AGE_CACHE_DIR="${XDG_CACHE_HOME}/homebrew-safe-upgrade/age"
+elif [ -n "${HOME:-}" ]; then
+    # Kept flat rather than ${XDG_CACHE_HOME:-${HOME}/.cache}: bash 3.2, which
+    # is what ships with macOS, expands the nested default eagerly and trips
+    # `set -u` when HOME is unset.
+    AGE_CACHE_DIR="${HOME}/.cache/homebrew-safe-upgrade/age"
+else
+    # No usable home (some CI and test harnesses): run without a cache rather
+    # than dying under `set -u`.
+    AGE_CACHE_ENABLED=false
+    AGE_CACHE_DIR=""
+fi
+
+# Cache key for one resolved package version. Folding separators into '_' is
+# NOT injective — `core:zlib@1.3_1` and `core:zlib_1.3@1` would share a file, and
+# a stale date under a shared key could wave a brand-new package past --min-age.
+# Hash the three fields with a delimiter that cannot appear in any of them.
+age_cache_key() {
+    printf '%s\n%s\n%s\n' "$1" "$2" "$3" | python3 -c "
+import sys, hashlib
+print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())
+" 2>/dev/null
+}
+
+# Echo the timestamp if it parses as a complete ISO-8601 datetime, else return 1.
+# Shared by every path that admits a date into the cache or a decision, so a
+# malformed registry annotation or cache file cannot become a persistent
+# "-1 unknown" hold — it degrades to the next resolver instead.
+valid_iso() {
+    python3 -c "
+import sys, datetime
+v = sys.argv[1]
+try:
+    datetime.datetime.fromisoformat(v.replace('Z', '+00:00'))
+except Exception:
+    sys.exit(1)
+print(v)
+" "$1" 2>/dev/null
+}
+
+# Echo the cached ISO timestamp for a key, or return 1. The stored value is
+# re-validated on read: a truncated or hand-edited cache file must degrade to a
+# live lookup, never inject a bogus date into a security decision.
+age_cache_get() {
+    local f="$AGE_CACHE_DIR/$1" v
+    [ "$AGE_CACHE_ENABLED" = true ] || return 1
+    [ -f "$f" ] || return 1
+    v=$(cat "$f" 2>/dev/null) || return 1
+    valid_iso "$v"
+}
+
+# Store a resolved ISO timestamp. Best-effort: a read-only or full cache dir
+# must never fail the run, it just means the next run pays for the lookup again.
+age_cache_put() {
+    [ "$AGE_CACHE_ENABLED" = true ] || return 0
+    [ -n "${1:-}" ] && [ -n "${2:-}" ] || return 0
+    mkdir -p "$AGE_CACHE_DIR" 2>/dev/null || return 0
+    printf '%s\n' "$2" >"$AGE_CACHE_DIR/$1" 2>/dev/null || true
+}
+
+# Render an ISO timestamp as the "<age_days> <YYYY-MM-DD>" contract shared by
+# every fetch_pkg_age return path.
+age_from_iso() {
+    python3 -c "
+import sys, datetime
+try:
+    dt = datetime.datetime.fromisoformat(sys.argv[1].replace('Z', '+00:00'))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    age = (datetime.datetime.now(datetime.timezone.utc) - dt).days
+    print(f'{age} {dt.strftime(\"%Y-%m-%d\")}')
+except Exception:
+    print('-1 unknown')
+" "$1" 2>/dev/null
+}
+
+# Bottle publication timestamp for a homebrew-core formula, read from the OCI
+# image index on the Homebrew bottle registry. Echoes an ISO timestamp, or
+# nothing when the bottle, the tag, or the annotation is absent (source-only
+# formulae, brand-new versions) — every such case falls back to the GitHub path.
+#
+# Test seam: MOCK_GHCR_DIR holds one file per "<name>@<version>" ('/' and '@'
+# folded to '_') containing the manifest JSON; a missing file means "no bottle".
+BOTTLE_REGISTRY="${BREW_SAFE_BOTTLE_REGISTRY:-https://ghcr.io}"
+fetch_ghcr_date() {
+    local name="$1" ver="$2" repo tok mf key
+    [ -n "$ver" ] || return 0
+
+    if [ -n "${MOCK_GHCR_DIR:-}" ]; then
+        key=$(printf '%s' "${name}@${ver}" | tr '/@' '__')
+        [ -f "$MOCK_GHCR_DIR/${key}.json" ] || return 0
+        mf=$(cat "$MOCK_GHCR_DIR/${key}.json")
+    elif [ -n "${MOCK_COMMITS_API_DIR:-}" ]; then
+        # Mock mode with no registry fixture: report "no bottle" so the test
+        # exercises the commit-date path instead of reaching the network.
+        return 0
+    else
+        # Versioned formulae map '@' to a path segment: python@3.14 lives at
+        # homebrew/core/python/3.14.
+        repo="homebrew/core/$(printf '%s' "$name" | tr '@' '/')"
+        tok=$(curl -s --max-time 10 \
+            "${BOTTLE_REGISTRY}/token?service=ghcr.io&scope=repository:${repo}:pull" 2>/dev/null |
+            python3 -c "import sys,json;print(json.load(sys.stdin).get('token',''))" 2>/dev/null)
+        [ -n "$tok" ] || return 0
+        mf=$(curl -s --max-time 10 \
+            -H "Authorization: Bearer ${tok}" \
+            -H "Accept: application/vnd.oci.image.index.v1+json" \
+            "${BOTTLE_REGISTRY}/v2/${repo}/manifests/${ver}" 2>/dev/null) || return 0
+    fi
+
+    local created
+    created=$(printf '%s' "$mf" | python3 -c "
+import sys, json
+try:
+    print(json.load(sys.stdin).get('annotations', {}).get('org.opencontainers.image.created', ''))
+except Exception:
+    print('')
+" 2>/dev/null)
+    # A malformed annotation is "no bottle metadata", not a date: fall through to
+    # the commit-date path rather than caching something that never parses.
+    if [ -n "$created" ]; then
+        valid_iso "$created" || true
+    fi
+}
 
 # Resolve the release age (in days) of a package's current formula/cask file by
 # reading the last-commit date from the *correct* Homebrew GitHub repo for its
@@ -284,6 +476,26 @@ GH_AUTH_TOKEN="$(resolve_gh_token)"
 # (appends "<type>\t<url>" so tests can assert correct-repo routing).
 fetch_pkg_age() {
     local name="$1" ptype="$2" url first user tap token json key
+    local ver="${3:-}" ckey="" cached iso ghcr_iso
+
+    # Cache and the bottle registry both key on an exact version. Dependency
+    # lookups do not carry one, so they fall straight through to the commit-date
+    # path and behave exactly as before.
+    if [ -n "$ver" ]; then
+        ckey=$(age_cache_key "$ptype" "$name" "$ver")
+        if cached=$(age_cache_get "$ckey"); then
+            age_from_iso "$cached"
+            return
+        fi
+        if [ "$ptype" = "core" ]; then
+            ghcr_iso=$(fetch_ghcr_date "$name" "$ver")
+            if [ -n "$ghcr_iso" ]; then
+                age_cache_put "$ckey" "$ghcr_iso"
+                age_from_iso "$ghcr_iso"
+                return
+            fi
+        fi
+    fi
     case "$ptype" in
         cask)
             first=$(printf '%s' "$name" | cut -c1)
@@ -359,19 +571,21 @@ fetch_pkg_age() {
         fi
     fi
 
-    printf '%s' "$json" | python3 -c "
-import sys, json, datetime
+    iso=$(printf '%s' "$json" | python3 -c "
+import sys, json
 try:
     data = json.load(sys.stdin)
-    if data and len(data) > 0:
-        dt = datetime.datetime.fromisoformat(data[0]['commit']['committer']['date'].replace('Z', '+00:00'))
-        age = (datetime.datetime.now(datetime.timezone.utc) - dt).days
-        print(f'{age} {dt.strftime(\"%Y-%m-%d\")}')
-    else:
-        print('-1 unknown')
+    print((data[0]['commit']['committer']['date'] or '') if data else '')
 except Exception:
-    print('-1 unknown')
-" 2>/dev/null
+    print('')
+" 2>/dev/null)
+
+    if [ -n "$iso" ] && iso=$(valid_iso "$iso"); then
+        age_cache_put "$ckey" "$iso"
+        age_from_iso "$iso"
+    else
+        printf '%s\n' "-1 unknown"
+    fi
 }
 
 # Abort the run on a GitHub API rate limit (issue #84). $1 = the fetch_pkg_age
@@ -387,7 +601,9 @@ print(' (resets ' + d.datetime.fromtimestamp(e).strftime('%H:%M local time') + '
     echo ""
     echo "ERROR: GitHub API rate limit reached during age check${2:-}${when}."
     echo "Authenticated requests allow 5000/hour (anonymous: 60). To continue:"
-    echo "  • export GH_TOKEN=<token> (or GITHUB_TOKEN), or run: gh auth login"
+    echo "  • run: gh auth login   (works under \`brew\`: the token is read from disk)"
+    echo "  • or export HOMEBREW_GITHUB_API_TOKEN=<token>   (survives \`brew\`)"
+    echo "  • GH_TOKEN / GITHUB_TOKEN work only outside \`brew\`, which scrubs them"
     echo "  • or re-run with --allow-unknown-age to skip age verification"
     exit 1
 }
@@ -708,7 +924,7 @@ if [ "$MIN_AGE" -gt 0 ] 2>/dev/null; then
                 ;;
         esac
 
-        AGE_INFO=$(fetch_pkg_age "$name" "$PKG_TYPE_AGE")
+        AGE_INFO=$(fetch_pkg_age "$name" "$PKG_TYPE_AGE" "$current")
         AGE_DAYS=$(echo "$AGE_INFO" | awk '{print $1}')
         PUB_DATE=$(echo "$AGE_INFO" | awk '{print $2}')
 
@@ -792,7 +1008,11 @@ note_rate_limit() {
     # IS throttled — and a wrapper that read the same value as "key present"
     # would suppress the explanation in exactly the case the user most needs it,
     # because they believe they have a working key.
-    _nvd_key="${NVD_API_KEY:-}"
+    # Both spellings, matching _nvd_api_key() in the scanner. Only the
+    # HOMEBREW_-prefixed one survives `brew`'s env scrub, so reading just
+    # NVD_API_KEY here would print "no key configured" at a user whose key is
+    # in fact working — the same wrapper/scanner disagreement, inverted.
+    _nvd_key="${NVD_API_KEY:-}${HOMEBREW_NVD_API_KEY:-}"
     _nvd_key="${_nvd_key//[[:space:]]/}"
     [ -n "$_nvd_key" ] && return 0
     # At most once per run. There is a call site after the top-level skip
@@ -804,7 +1024,8 @@ note_rate_limit() {
     echo ""
     echo "  Note: NIST NVD rate-limited this run (5 requests / 30s without a key)."
     echo "        Packages above were HELD because nothing could vet them, not because"
-    echo "        they are known-bad. Set NVD_API_KEY for 50/30s — free, no approval wait:"
+    echo "        they are known-bad. Set HOMEBREW_NVD_API_KEY (NVD_API_KEY works"
+    echo "        outside \`brew\`, which scrubs it) for 50/30s — free, no wait:"
     echo "        https://nvd.nist.gov/developers/request-an-api-key"
 }
 SKIPPED_PKGS=""

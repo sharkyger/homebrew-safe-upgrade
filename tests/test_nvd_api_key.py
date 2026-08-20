@@ -95,6 +95,7 @@ def test_api_key_never_appears_in_the_url(monkeypatch):
 
 def test_no_api_key_means_no_header(monkeypatch):
     monkeypatch.delenv("NVD_API_KEY", raising=False)
+    monkeypatch.delenv("HOMEBREW_NVD_API_KEY", raising=False)
     seen = []
 
     def fake(req, timeout=15):
@@ -112,6 +113,7 @@ def test_no_api_key_means_no_header(monkeypatch):
 def test_blank_api_key_is_ignored(monkeypatch):
     """An exported-but-empty variable must not become an empty header."""
     monkeypatch.setenv("NVD_API_KEY", "   ")
+    monkeypatch.delenv("HOMEBREW_NVD_API_KEY", raising=False)
     seen = []
 
     with patch.object(
@@ -236,3 +238,80 @@ def test_scanner_output_never_contains_the_key(monkeypatch):
     combined = out.getvalue() + err.getvalue()
     assert SECRET not in combined, "the API key leaked into program output"
     assert json.loads(out.getvalue())["status"] == "unknown"
+
+
+# --------------- Homebrew environment scrub (HOMEBREW_NVD_API_KEY) ---------------
+#
+# `brew` re-execs external commands through `env -i` with an allowlist
+# (bin/brew keeps HOME SHELL PATH TERM ... and every HOMEBREW_* variable, and
+# drops the rest). A plain `export NVD_API_KEY=...` therefore never reaches
+# `brew safe-upgrade`, and the run is throttled to 5 requests/30s while the user
+# believes their key is in effect. HOMEBREW_NVD_API_KEY passes the filter.
+
+
+def test_homebrew_prefixed_key_is_used(monkeypatch):
+    """The HOMEBREW_-prefixed spelling must work — it is the only one that
+    survives the scrub when invoked as `brew safe-upgrade`."""
+    monkeypatch.delenv("NVD_API_KEY", raising=False)
+    monkeypatch.setenv("HOMEBREW_NVD_API_KEY", SECRET)
+    seen = []
+
+    with patch.object(
+        dsc, "_urlopen", side_effect=lambda req, timeout=15: seen.append(req) or _Resp()
+    ):
+        dsc.query_nvd("wget", "brew", "1.25.0")
+
+    assert seen, "no request was made"
+    for req in seen:
+        headers = {k.lower(): v for k, v in dict(req.header_items()).items()}
+        assert headers.get("apikey") == SECRET
+        assert SECRET not in req.full_url, "key must never reach the URL"
+
+
+def test_unprefixed_key_wins_over_homebrew_prefixed(monkeypatch):
+    """Both set: the explicit NVD_API_KEY is the more specific intent."""
+    monkeypatch.setenv("NVD_API_KEY", SECRET)
+    monkeypatch.setenv("HOMEBREW_NVD_API_KEY", "99999999-8888-7777-6666-555555555555")
+    seen = []
+
+    with patch.object(
+        dsc, "_urlopen", side_effect=lambda req, timeout=15: seen.append(req) or _Resp()
+    ):
+        dsc.query_nvd("wget", "brew", "1.25.0")
+
+    for req in seen:
+        headers = {k.lower(): v for k, v in dict(req.header_items()).items()}
+        assert headers.get("apikey") == SECRET
+
+
+def test_blank_homebrew_key_falls_through_to_no_header(monkeypatch):
+    monkeypatch.delenv("NVD_API_KEY", raising=False)
+    monkeypatch.setenv("HOMEBREW_NVD_API_KEY", "   ")
+    seen = []
+
+    with patch.object(
+        dsc, "_urlopen", side_effect=lambda req, timeout=15: seen.append(req) or _Resp()
+    ):
+        dsc.query_nvd("wget", "brew", "1.25.0")
+
+    for req in seen:
+        assert "apikey" not in {k.lower() for k in dict(req.header_items())}
+
+
+def test_blank_primary_key_falls_back_to_homebrew_spelling(monkeypatch):
+    """`NVD_API_KEY="   "` next to a real HOMEBREW_NVD_API_KEY must use the real
+    one. An `or` evaluated before `.strip()` returned the blank string and the
+    scanner silently dropped the header (CodeRabbit, PR #120)."""
+    monkeypatch.setenv("NVD_API_KEY", "   ")
+    monkeypatch.setenv("HOMEBREW_NVD_API_KEY", SECRET)
+    seen = []
+
+    with patch.object(
+        dsc, "_urlopen", side_effect=lambda req, timeout=15: seen.append(req) or _Resp()
+    ):
+        dsc.query_nvd("wget", "brew", "1.25.0")
+
+    assert seen, "expected a request"
+    for req in seen:
+        header_values = {k.lower(): v for k, v in req.header_items()}
+        assert header_values.get("apikey") == SECRET

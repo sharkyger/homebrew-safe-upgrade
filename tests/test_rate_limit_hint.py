@@ -34,6 +34,7 @@ SAFE_INSTALL = REPO_ROOT / "brew-safe-install"
 def run_main(exc, api_key=None):
     """Run main() with every NVD request raising `exc`. Returns (code, json, stderr)."""
     saved = os.environ.pop("NVD_API_KEY", None)
+    saved_hb = os.environ.pop("HOMEBREW_NVD_API_KEY", None)
     if api_key:
         os.environ["NVD_API_KEY"] = api_key
     out, err = io.StringIO(), io.StringIO()
@@ -53,6 +54,8 @@ def run_main(exc, api_key=None):
         os.environ.pop("NVD_API_KEY", None)
         if saved is not None:
             os.environ["NVD_API_KEY"] = saved
+        if saved_hb is not None:
+            os.environ["HOMEBREW_NVD_API_KEY"] = saved_hb
     return exc_info.value.code, json.loads(out.getvalue()), err.getvalue()
 
 
@@ -153,7 +156,11 @@ def brew_env(tmp_path, monkeypatch):
         "PATH", f"{Path(__file__).parent / 'fixtures' / 'mock_brew'}:{os.environ['PATH']}"
     )
     monkeypatch.setenv("GH_TOKEN", "test-token")
+    # Both spellings: the wrapper accepts either, so leaving HOMEBREW_NVD_API_KEY
+    # set would suppress the very note these tests assert on. It is set on any
+    # machine configured the way the README now recommends.
     monkeypatch.delenv("NVD_API_KEY", raising=False)
+    monkeypatch.delenv("HOMEBREW_NVD_API_KEY", raising=False)
     api = tmp_path / "api"
     api.mkdir()
     monkeypatch.setenv("MOCK_FORMULAE_API_DIR", str(api))
@@ -343,3 +350,51 @@ def test_install_notes_a_dependency_only_throttle(brew_env, tmp_path):
     assert result.stdout.count("rate-limited this run") == 1, (
         f"a dependency-only throttle must still be explained:\n{result.stdout}"
     )
+
+
+# ------------- the HOMEBREW_-prefixed spelling and the env scrub -------------
+#
+# `brew` re-execs external commands through `env -i` with an allowlist that
+# keeps HOMEBREW_* and drops the rest, so NVD_API_KEY never arrives on the
+# `brew safe-upgrade` route. The wrapper's "is a key configured?" test has to
+# agree with the scanner's, which reads both spellings — otherwise a user whose
+# key IS working reads a note telling them to configure one.
+
+
+def test_upgrade_stays_quiet_when_only_the_homebrew_key_is_set(brew_env, tmp_path):
+    """The inverse of the whitespace case: the key works, so the note must not fire."""
+    result = run_wrapper(
+        SAFE_UPGRADE,
+        [],
+        make_stub(tmp_path, "True"),
+        env_extra={"HOMEBREW_NVD_API_KEY": "abc"},
+    )
+    assert "rate-limited this run" not in result.stdout
+
+
+def test_install_stays_quiet_when_only_the_homebrew_key_is_set(brew_env, tmp_path):
+    result = run_wrapper(
+        SAFE_INSTALL,
+        ["wget"],
+        make_stub(tmp_path, "True"),
+        env_extra={"HOMEBREW_NVD_API_KEY": "abc"},
+    )
+    assert "rate-limited this run" not in result.stdout
+
+
+def test_whitespace_only_homebrew_key_still_gets_the_note(brew_env, tmp_path):
+    result = run_wrapper(
+        SAFE_UPGRADE,
+        [],
+        make_stub(tmp_path, "True"),
+        env_extra={"HOMEBREW_NVD_API_KEY": "   "},
+    )
+    assert "rate-limited this run" in result.stdout
+
+
+def test_note_recommends_a_spelling_that_survives_brew(brew_env, tmp_path):
+    """Advice the user cannot act on is worse than no advice: plain NVD_API_KEY
+    is discarded before the script starts on the `brew` route."""
+    result = run_wrapper(SAFE_UPGRADE, [], make_stub(tmp_path, "True"))
+    assert "rate-limited this run" in result.stdout
+    assert "HOMEBREW_NVD_API_KEY" in result.stdout
