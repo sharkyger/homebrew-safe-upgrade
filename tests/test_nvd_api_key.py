@@ -201,18 +201,24 @@ def test_persistent_throttling_still_fails_closed(monkeypatch):
 
 
 def test_non_rate_limit_http_error_is_not_retried(monkeypatch):
-    """A 404 is not a throttle — retrying it just wastes the rate budget."""
+    """A 404 is not a throttle — retrying it just wastes the rate budget.
+
+    A 404 on the CPE candidate legitimately moves on to the keyword query (a
+    different URL — NVD 404s on CPE strings it cannot parse), so the contract
+    is "each URL is requested exactly once", not "one request per query".
+    """
     monkeypatch.delenv("NVD_API_KEY", raising=False)
-    calls = {"n": 0}
+    urls = []
 
     def fake(req, timeout=15):
-        calls["n"] += 1
+        urls.append(req.full_url)
         raise _http_error(404)
 
     with patch.object(dsc, "_urlopen", side_effect=fake), patch.object(dsc.time, "sleep"):
         findings = dsc.query_nvd("wget", "brew", "1.25.0")
 
-    assert calls["n"] == 1, f"a 404 must not be retried, was called {calls['n']}x"
+    assert len(urls) == len(set(urls)), f"a 404 must not be retried: {urls}"
+    assert len(urls) == 2, urls  # one CPE candidate, then the keyword fallback
     assert [f for f in findings if f["id"] == "ERROR"]
 
 
