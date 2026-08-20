@@ -452,7 +452,9 @@ except Exception:
 " 2>/dev/null)
     # A malformed annotation is "no bottle metadata", not a date: fall through to
     # the commit-date path rather than caching something that never parses.
-    [ -n "$created" ] && valid_iso "$created" || true
+    if [ -n "$created" ]; then
+        valid_iso "$created" || true
+    fi
 }
 
 # Resolve the release age (in days) of a package's current formula/cask file by
