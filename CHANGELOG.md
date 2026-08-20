@@ -20,6 +20,10 @@ The project is pre-1.0; expect minor breaking changes between 0.x releases until
 
 ### Added
 
+- **Runtime hints now recommend a variable that survives `brew`.** `rate_limit_abort` told the user to `export GH_TOKEN=<token>` and the NVD throttle note told them to set `NVD_API_KEY` — neither reaches the script on the `brew safe-upgrade` route. Both now name `gh auth login` / `HOMEBREW_GITHUB_API_TOKEN` and `HOMEBREW_NVD_API_KEY`, with the unprefixed spellings marked as direct-invocation only. The wrapper's "is a key configured?" check reads both spellings too, so a user whose key is working via `HOMEBREW_NVD_API_KEY` no longer gets told to configure one.
+
+- **`docs/age-check-rate-limit-degrade.md`** — written-up proposal for turning the all-or-nothing rate-limit abort into a per-package hold, with the call sites, the six tests that pin the current contract, and the open questions. Deliberately not implemented here: it changes fail-closed semantics and deserves its own review.
+
 - **`scripts/dogfood-age-check`** — a container harness that runs the real age-resolution path over a real outdated-package list and reports how many GitHub calls it actually spends, cold and warm. Runs without a `gh` CLI, without tokens and without a cache, because a host with any of those hides the failure being measured.
 
 ## [0.3.0] — 2026-08-18

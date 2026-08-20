@@ -374,7 +374,9 @@ print(' (resets ' + d.datetime.fromtimestamp(e).strftime('%H:%M local time') + '
     echo ""
     echo "ERROR: GitHub API rate limit reached during age check${2:-}${when}."
     echo "Authenticated requests allow 5000/hour (anonymous: 60). To continue:"
-    echo "  • export GH_TOKEN=<token> (or GITHUB_TOKEN), or run: gh auth login"
+    echo "  • run: gh auth login   (works under \`brew\`: the token is read from disk)"
+    echo "  • or export HOMEBREW_GITHUB_API_TOKEN=<token>   (survives \`brew\`)"
+    echo "  • GH_TOKEN / GITHUB_TOKEN work only outside \`brew\`, which scrubs them"
     echo "  • or re-run with --allow-unknown-age to skip age verification"
     exit 1
 }
@@ -400,7 +402,11 @@ note_rate_limit() {
     # IS throttled — and a wrapper that read the same value as "key present"
     # would suppress the explanation in exactly the case the user most needs it,
     # because they believe they have a working key.
-    _nvd_key="${NVD_API_KEY:-}"
+    # Both spellings, matching _nvd_api_key() in the scanner. Only the
+    # HOMEBREW_-prefixed one survives `brew`'s env scrub, so reading just
+    # NVD_API_KEY here would print "no key configured" at a user whose key is
+    # in fact working — the same wrapper/scanner disagreement, inverted.
+    _nvd_key="${NVD_API_KEY:-}${HOMEBREW_NVD_API_KEY:-}"
     _nvd_key="${_nvd_key//[[:space:]]/}"
     [ -n "$_nvd_key" ] && return 0
     # At most once per run. There is a call site after the top-level skip
@@ -412,7 +418,8 @@ note_rate_limit() {
     echo ""
     echo "  Note: NIST NVD rate-limited this run (5 requests / 30s without a key)."
     echo "        Packages above were HELD because nothing could vet them, not because"
-    echo "        they are known-bad. Set NVD_API_KEY for 50/30s — free, no approval wait:"
+    echo "        they are known-bad. Set HOMEBREW_NVD_API_KEY (NVD_API_KEY works"
+    echo "        outside \`brew\`, which scrubs it) for 50/30s — free, no wait:"
     echo "        https://nvd.nist.gov/developers/request-an-api-key"
 }
 HELD_PKGS=""
