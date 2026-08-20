@@ -198,3 +198,41 @@ def test_cache_is_off_by_default_under_mock_mode(age_env):
     result = run_upgrade(["--no-deps", "--min-age", "3"])
 
     assert "[HOLD] pandoc 3.10.2 — released 0 day(s) ago" in result.stdout
+
+
+def test_cache_key_is_injective_across_separator_collisions(age_env, cache_dir):
+    """`core:zlib@1.3_1` and `core:zlib_1.3@1` folded to the same filename under
+    the old tr-based key. A 400-day-old date cached under the first must not
+    wave the brand-new second package past --min-age (CodeRabbit, PR #120)."""
+    write_outdated(age_env["brew"], formulae=[outdated_formula("zlib", "1.3", "1.3_1")])
+    set_commits(age_env["commits"], "zlib", commit_json_days_ago(400))
+    first = run_upgrade(["--no-deps", "--min-age", "3"])
+    assert "[ok] zlib 1.3_1 — released 400 day(s) ago" in first.stdout
+
+    write_outdated(age_env["brew"], formulae=[outdated_formula("zlib_1.3", "0", "1")])
+    set_commits(age_env["commits"], "zlib_1.3", commit_json_days_ago(0))
+    second = run_upgrade(["--no-deps", "--min-age", "3"])
+
+    assert "[HOLD] zlib_1.3 1 — released 0 day(s) ago" in second.stdout
+    assert "released 400 day(s) ago" not in second.stdout
+    assert len(list(cache_dir.iterdir())) == 2, "the two identities must not share a file"
+
+
+def test_malformed_manifest_date_falls_back_to_commit_date(age_env, ghcr_dir, cache_dir):
+    """A created annotation that starts like a date but does not parse must be
+    treated as 'no bottle metadata' — otherwise it is cached and every later run
+    reports '-1 unknown' without ever consulting GitHub (CodeRabbit, PR #120)."""
+    write_outdated(age_env["brew"], formulae=[outdated_formula("pandoc", "3.10", "3.10.2")])
+    set_commits(age_env["commits"], "pandoc", commit_json_days_ago(0))
+    set_manifest(
+        ghcr_dir,
+        "pandoc",
+        "3.10.2",
+        json.dumps({"annotations": {"org.opencontainers.image.created": "2026-01-01Tinvalid"}}),
+    )
+
+    result = run_upgrade(["--no-deps", "--min-age", "3"])
+
+    assert "[HOLD] pandoc 3.10.2 — released 0 day(s) ago" in result.stdout
+    for entry in cache_dir.iterdir():
+        assert "invalid" not in entry.read_text()

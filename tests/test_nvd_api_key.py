@@ -296,3 +296,22 @@ def test_blank_homebrew_key_falls_through_to_no_header(monkeypatch):
 
     for req in seen:
         assert "apikey" not in {k.lower() for k in dict(req.header_items())}
+
+
+def test_blank_primary_key_falls_back_to_homebrew_spelling(monkeypatch):
+    """`NVD_API_KEY="   "` next to a real HOMEBREW_NVD_API_KEY must use the real
+    one. An `or` evaluated before `.strip()` returned the blank string and the
+    scanner silently dropped the header (CodeRabbit, PR #120)."""
+    monkeypatch.setenv("NVD_API_KEY", "   ")
+    monkeypatch.setenv("HOMEBREW_NVD_API_KEY", SECRET)
+    seen = []
+
+    with patch.object(
+        dsc, "_urlopen", side_effect=lambda req, timeout=15: seen.append(req) or _Resp()
+    ):
+        dsc.query_nvd("wget", "brew", "1.25.0")
+
+    assert seen, "expected a request"
+    for req in seen:
+        header_values = {k.lower(): v for k, v in req.header_items()}
+        assert header_values.get("apikey") == SECRET

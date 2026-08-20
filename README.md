@@ -257,7 +257,7 @@ For core formulae the bottle timestamp is the more faithful measure. `homebrew-c
 
 Casks and tap formulae stay on the commit date deliberately. A commit date is attested by GitHub, whereas a third-party tap owner controls their own manifest annotations and could backdate one to slip past `--min-age`. Only `homebrew-core`, whose manifests are pushed by Homebrew's CI alone, is read from the registry.
 
-Resolved dates are **cached on disk** keyed by package and version. A released version's date never changes, so repeat runs re-resolve nothing — which is what keeps a machine with a large upgrade backlog under GitHub's anonymous 60-requests/hour ceiling. Clear the cache by deleting `~/Library/Caches/homebrew-safe-upgrade/age` (or `$HOMEBREW_CACHE/safe-upgrade-age`); `BREW_SAFE_AGE_CACHE_DIR` overrides the location.
+Resolved dates are **cached on disk** keyed by package and version. A released version's date never changes, so repeat runs re-resolve nothing — which is what keeps a machine with a large upgrade backlog under GitHub's anonymous 60-requests/hour ceiling. Clear the cache by deleting it — `$HOMEBREW_CACHE/safe-upgrade-age` when `HOMEBREW_CACHE` is set, otherwise `~/Library/Caches/homebrew-safe-upgrade/age` on macOS and `$XDG_CACHE_HOME/homebrew-safe-upgrade/age` (or `~/.cache/homebrew-safe-upgrade/age`) on Linux; `BREW_SAFE_AGE_CACHE_DIR` overrides the location.
 
 ```bash
 brew safe-upgrade             # uses default --min-age 3

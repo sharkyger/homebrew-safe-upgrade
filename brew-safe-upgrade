@@ -345,10 +345,31 @@ else
     AGE_CACHE_DIR=""
 fi
 
-# Cache key for one resolved package version. ':' '/' and '@' all appear in tap
-# paths and versioned formulae; fold them so the key is a single safe filename.
+# Cache key for one resolved package version. Folding separators into '_' is
+# NOT injective — `core:zlib@1.3_1` and `core:zlib_1.3@1` would share a file, and
+# a stale date under a shared key could wave a brand-new package past --min-age.
+# Hash the three fields with a delimiter that cannot appear in any of them.
 age_cache_key() {
-    printf '%s' "${1}:${2}@${3}" | tr '/@:' '___'
+    printf '%s\n%s\n%s\n' "$1" "$2" "$3" | python3 -c "
+import sys, hashlib
+print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())
+" 2>/dev/null
+}
+
+# Echo the timestamp if it parses as a complete ISO-8601 datetime, else return 1.
+# Shared by every path that admits a date into the cache or a decision, so a
+# malformed registry annotation or cache file cannot become a persistent
+# "-1 unknown" hold — it degrades to the next resolver instead.
+valid_iso() {
+    python3 -c "
+import sys, datetime
+v = sys.argv[1]
+try:
+    datetime.datetime.fromisoformat(v.replace('Z', '+00:00'))
+except Exception:
+    sys.exit(1)
+print(v)
+" "$1" 2>/dev/null
 }
 
 # Echo the cached ISO timestamp for a key, or return 1. The stored value is
@@ -359,10 +380,7 @@ age_cache_get() {
     [ "$AGE_CACHE_ENABLED" = true ] || return 1
     [ -f "$f" ] || return 1
     v=$(cat "$f" 2>/dev/null) || return 1
-    case "$v" in
-        [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T*) printf '%s' "$v" ;;
-        *) return 1 ;;
-    esac
+    valid_iso "$v"
 }
 
 # Store a resolved ISO timestamp. Best-effort: a read-only or full cache dir
@@ -424,14 +442,17 @@ fetch_ghcr_date() {
             "${BOTTLE_REGISTRY}/v2/${repo}/manifests/${ver}" 2>/dev/null) || return 0
     fi
 
-    printf '%s' "$mf" | python3 -c "
+    local created
+    created=$(printf '%s' "$mf" | python3 -c "
 import sys, json
 try:
-    d = json.load(sys.stdin).get('annotations', {}).get('org.opencontainers.image.created', '')
-    print(d if d[:2] == '20' else '')
+    print(json.load(sys.stdin).get('annotations', {}).get('org.opencontainers.image.created', ''))
 except Exception:
     print('')
-" 2>/dev/null
+" 2>/dev/null)
+    # A malformed annotation is "no bottle metadata", not a date: fall through to
+    # the commit-date path rather than caching something that never parses.
+    [ -n "$created" ] && valid_iso "$created" || true
 }
 
 # Resolve the release age (in days) of a package's current formula/cask file by
@@ -557,7 +578,7 @@ except Exception:
     print('')
 " 2>/dev/null)
 
-    if [ -n "$iso" ]; then
+    if [ -n "$iso" ] && iso=$(valid_iso "$iso"); then
         age_cache_put "$ckey" "$iso"
         age_from_iso "$iso"
     else

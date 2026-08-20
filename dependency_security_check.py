@@ -503,7 +503,8 @@ def _nvd_api_key() -> str:
     anonymous 5-requests/30s budget. HOMEBREW_NVD_API_KEY survives that filter
     by construction, so it is accepted as an equivalent spelling.
     """
-    return (os.environ.get("NVD_API_KEY", "") or os.environ.get("HOMEBREW_NVD_API_KEY", "")).strip()
+    api_key = os.environ.get("NVD_API_KEY", "").strip()
+    return api_key or os.environ.get("HOMEBREW_NVD_API_KEY", "").strip()
 
 
 def _nvd_headers():

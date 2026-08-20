@@ -58,7 +58,9 @@ the `--allow-unknown-age` workaround the current design pushes people toward.
 1. **It changes fail-closed semantics**, which is the security property of the
    tool. It deserves its own commit and its own review, not a footnote in a
    performance fix.
-2. **It rewrites a deliberate, tested contract.** Six tests assert the abort:
+2. **It rewrites a deliberate, tested contract.** Six tests pin the current
+   behaviour — four assert the abort itself, two assert the `--allow-unknown-age`
+   escape hatch continues the run instead:
    - `test_age_check.py::test_upgrade_rate_limit_aborts_unless_allow_unknown_age`
    - `test_age_check.py::test_install_rate_limit_aborts_unless_allow_unknown_age`
    - `test_age_check.py::test_rate_limit_abort_reports_reset_time`
