@@ -209,6 +209,26 @@ export NVD_API_KEY="your-key-here"
 
 Put it in `~/.zshenv` rather than `~/.zshrc` if you want non-interactive tools and scripts to see it — zsh only reads `.zshrc` for interactive shells. The key is sent as a request header, never in the URL, so it won't appear in logs or error output.
 
+> **If you run this as `brew safe-upgrade`, export `HOMEBREW_NVD_API_KEY` instead.**
+> Homebrew does not pass your environment to external commands. `bin/brew` rebuilds it:
+>
+> ```bash
+> ENV_VAR_NAMES=(HOME SHELL PATH TERM ... http_proxy https_proxy ...)
+> for VAR in "${ENV_VAR_NAMES[@]}" "${!HOMEBREW_@}"; do FILTERED_ENV+=(...); done
+> exec /usr/bin/env -i "${FILTERED_ENV[@]}" ... brew.sh "$@"
+> ```
+>
+> Only that allowlist plus every `HOMEBREW_*` variable survives, so a plain
+> `export NVD_API_KEY=...` is dropped before the script starts and the run is
+> throttled to 5 requests/30s while you believe the key is active. Both spellings
+> are accepted; `NVD_API_KEY` alone is enough when you invoke `brew-safe-upgrade`
+> directly or from CI.
+>
+> ```bash
+> export HOMEBREW_NVD_API_KEY="your-key-here"   # survives `brew`
+> export NVD_API_KEY="your-key-here"            # direct invocation / CI
+> ```
+
 If you do get throttled, the run tells you — once, at the end:
 
 ```
@@ -226,7 +246,18 @@ That distinction matters: a held package is one nothing could check, which is no
 
 Hold back **formulae, casks, and tap formulae** published less than N days ago. Protects against supply chain attacks where a compromised version is published minutes after credential theft — before any CVE database knows about it. Worm-class npm compromises (Shai-Hulud, Mini Shai-Hulud) have repeatedly shown live windows of 1–6 hours between malicious publish and registry takedown; a multi-day freshness hold trades a small lag against the entire attack window.
 
-"Age" here is the **Homebrew metadata age** — the date of the last commit that touched the package's formula/cask file, read via the GitHub API from `homebrew-core` for core formulae, `homebrew-cask` for casks, and the tap's own repo for tap formulae. That's when the new version reached Homebrew users, which is the window a freshness hold needs to cover; it is not the upstream project's own release timestamp (a formula bump can lag or be backported).
+"Age" here is the **Homebrew metadata age** — when the new version reached Homebrew users, which is the window a freshness hold needs to cover. It is not the upstream project's own release timestamp (a formula bump can lag or be backported). Two sources answer it:
+
+| Package type | Source | Why |
+|---|---|---|
+| core formula | `org.opencontainers.image.created` on the bottle manifest in the Homebrew registry | The moment the artifact you would actually download became public |
+| cask, tap formula | last commit touching the `.rb` file, via the GitHub API | Casks have no bottles; tap manifests are self-reported by the tap owner |
+
+For core formulae the bottle timestamp is the more faithful measure. `homebrew-core` lands a version bump and its bottle hashes as two separate commits — `python@3.14 3.14.7` on 2026-08-09, then `python@3.14: update 3.14.7 bottle.` on 2026-08-13 — and unrelated maintenance commits move the file too, so "last commit" can report days after the release it is meant to date.
+
+Casks and tap formulae stay on the commit date deliberately. A commit date is attested by GitHub, whereas a third-party tap owner controls their own manifest annotations and could backdate one to slip past `--min-age`. Only `homebrew-core`, whose manifests are pushed by Homebrew's CI alone, is read from the registry.
+
+Resolved dates are **cached on disk** keyed by package and version. A released version's date never changes, so repeat runs re-resolve nothing — which is what keeps a machine with a large upgrade backlog under GitHub's anonymous 60-requests/hour ceiling. Clear the cache by deleting `~/Library/Caches/homebrew-safe-upgrade/age` (or `$HOMEBREW_CACHE/safe-upgrade-age`); `BREW_SAFE_AGE_CACHE_DIR` overrides the location.
 
 ```bash
 brew safe-upgrade             # uses default --min-age 3
@@ -249,14 +280,26 @@ Use `--min-age 0` to disable the freshness hold entirely.
 
 #### GitHub API authentication (rate limits)
 
-The age check queries the GitHub API. Unauthenticated requests are limited to **60 per hour per IP**, so on a machine with many outdated packages — or across repeated runs — the quota runs out and the age check can no longer verify packages. Authenticate to raise the limit to **5,000 per hour**:
+The age check falls back to the GitHub API for casks and tap formulae. Unauthenticated requests are limited to **60 per hour per IP**. Core formulae resolve from the bottle registry and resolved dates are cached, so a typical run now spends only a handful of requests — but a machine with many outdated casks or tap formulae, or repeated runs against an uncached set, can still reach the ceiling. Authenticate to raise it to **5,000 per hour**:
 
 ```bash
-export GH_TOKEN=ghp_...      # a Personal Access Token (no scopes needed), or
-gh auth login                # the gh CLI token is picked up automatically
+gh auth login                       # simplest: survives `brew`, token read from disk
+export HOMEBREW_GITHUB_API_TOKEN=ghp_...   # Homebrew's own variable, also survives
+export GH_TOKEN=ghp_...             # direct invocation / CI only — see below
 ```
 
-The token is read from `GH_TOKEN`, then `GITHUB_TOKEN`, then an authenticated [`gh`](https://cli.github.com/) CLI — whichever is found first. In GitHub Actions, pass the built-in token:
+The token is read from `GH_TOKEN`, then `GITHUB_TOKEN`, then
+`HOMEBREW_GITHUB_API_TOKEN`, then an authenticated
+[`gh`](https://cli.github.com/) CLI — whichever is found first.
+
+> **`GH_TOKEN` does not reach the script when you run `brew safe-upgrade`.**
+> Homebrew re-execs external commands through `env -i` with an allowlist that
+> keeps `HOMEBREW_*` and drops everything else (see the `bin/brew` excerpt in the
+> `NVD_API_KEY` section). The two options that do work on that route are
+> `gh auth login`, because the token is read from `~/.config/gh/hosts.yml` rather
+> than the environment, and `HOMEBREW_GITHUB_API_TOKEN`, which passes the filter
+> by construction. `GH_TOKEN` and `GITHUB_TOKEN` still work for direct invocation
+> and in CI. In GitHub Actions, pass the built-in token:
 
 ```yaml
 - run: brew safe-upgrade

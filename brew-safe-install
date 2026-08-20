@@ -237,6 +237,14 @@ resolve_gh_token() {
         printf '%s' "$GH_TOKEN"
     elif [ -n "${GITHUB_TOKEN:-}" ]; then
         printf '%s' "$GITHUB_TOKEN"
+    elif [ -n "${HOMEBREW_GITHUB_API_TOKEN:-}" ]; then
+        # The only spelling that survives `brew`. Homebrew re-execs external
+        # commands through `env -i` with an allowlist (bin/brew) that keeps
+        # HOMEBREW_* and drops everything else — so GH_TOKEN and GITHUB_TOKEN
+        # exported in a shell profile never reach us when invoked as
+        # `brew safe-upgrade`. This is Homebrew's own documented token variable
+        # (Library/Homebrew/env_config.rb), so most users who need it have it.
+        printf '%s' "$HOMEBREW_GITHUB_API_TOKEN"
     elif command -v gh >/dev/null 2>&1; then
         # stderr suppressed: never prompt, never fail the run if gh is unauthed.
         gh auth token 2>/dev/null || true

@@ -493,6 +493,19 @@ NVD_KEY_HINT = (
 )
 
 
+def _nvd_api_key() -> str:
+    """The NVD key, tolerating Homebrew's environment scrub.
+
+    `brew` re-execs external commands through `env -i` with an allowlist
+    (bin/brew: HOME SHELL PATH TERM ... plus every HOMEBREW_* variable), so a
+    plain `export NVD_API_KEY=...` in a shell profile is dropped before
+    `brew safe-upgrade` ever starts and the run is silently throttled to the
+    anonymous 5-requests/30s budget. HOMEBREW_NVD_API_KEY survives that filter
+    by construction, so it is accepted as an equivalent spelling.
+    """
+    return (os.environ.get("NVD_API_KEY", "") or os.environ.get("HOMEBREW_NVD_API_KEY", "")).strip()
+
+
 def _nvd_headers():
     """Request headers for NVD, including the API key when one is configured.
 
@@ -502,7 +515,7 @@ def _nvd_headers():
     headers.
     """
     headers = {"User-Agent": USER_AGENT}
-    api_key = os.environ.get("NVD_API_KEY", "").strip()
+    api_key = _nvd_api_key()
     if api_key:
         headers["apiKey"] = api_key
     return headers
@@ -1049,7 +1062,7 @@ def main():
             f"({', '.join(failed_sources)}). Not reporting this package as clean.",
             file=sys.stderr,
         )
-        if rate_limited and not os.environ.get("NVD_API_KEY", "").strip():
+        if rate_limited and not _nvd_api_key():
             print(f"  -> {NVD_KEY_HINT}", file=sys.stderr)
         json.dump(
             {
