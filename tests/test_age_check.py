@@ -441,3 +441,56 @@ def test_rate_limit_abort_reports_reset_time(age_env):
 
     assert result.returncode != 0
     assert f"(resets {expected})" in result.stdout
+
+
+# ----------------------- tap layout discovery via `brew formula` -----------------------
+
+
+def test_upgrade_tap_formula_uses_the_path_brew_knows(age_env):
+    """shopify/homebrew-shopify keeps its formulae at the REPO ROOT, not under
+    Formula/. Asking GitHub for Formula/shopify-cli.rb returned [] → "age could
+    not be verified" on every run (live, 2026-08-21). brew already knows the
+    real path — the tap is cloned locally — so the commits query uses it. No
+    extra GitHub call, no guessing among the layouts Homebrew permits."""
+    write_outdated(
+        age_env["brew"],
+        formulae=[
+            {
+                "name": "shopify/shopify/shopify-cli",
+                "installed_versions": ["4.1.0"],
+                "current_version": "4.7.0",
+            }
+        ],
+    )
+    (age_env["brew"] / "formula_shopify_shopify_shopify-cli.txt").write_text(
+        "/usr/local/Homebrew/Library/Taps/shopify/homebrew-shopify/shopify-cli.rb\n"
+    )
+    set_commits(age_env["commits"], "shopify/shopify/shopify-cli", commit_json_days_ago(40))
+    url_log = age_env["tmp"] / "urls.log"
+
+    result = run_upgrade(["--no-deps"], env_extra={"MOCK_COMMITS_API_LOG": str(url_log)})
+
+    log_text = url_log.read_text()
+    assert "shopify/homebrew-shopify/commits?path=shopify-cli.rb" in log_text, log_text
+    assert "path=Formula/shopify-cli.rb" not in log_text, log_text
+    assert "[ok] shopify/shopify/shopify-cli 4.7.0 — released 40 day(s) ago" in result.stdout
+
+
+def test_upgrade_tap_formula_falls_back_to_canonical_layout_when_brew_cannot_resolve(age_env):
+    """No local clone (or brew cannot answer) → the canonical Formula/<name>.rb."""
+    write_outdated(
+        age_env["brew"],
+        formulae=[
+            {
+                "name": "sharkyger/tap/safe-fetch",
+                "installed_versions": ["0.2.1"],
+                "current_version": "0.3.0",
+            }
+        ],
+    )
+    set_commits(age_env["commits"], "sharkyger/tap/safe-fetch", commit_json_days_ago(40))
+    url_log = age_env["tmp"] / "urls.log"
+
+    run_upgrade(["--no-deps"], env_extra={"MOCK_COMMITS_API_LOG": str(url_log)})
+
+    assert "sharkyger/homebrew-tap/commits?path=Formula/safe-fetch.rb" in url_log.read_text()

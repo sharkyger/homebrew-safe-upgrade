@@ -502,13 +502,32 @@ fetch_pkg_age() {
             url="https://api.github.com/repos/Homebrew/homebrew-cask/commits?path=Casks/${first}/${name}.rb&per_page=1"
             ;;
         tap)
-            # user/tap/name -> repo <user>/homebrew-<tap>, canonical Formula/<name>.rb layout.
-            # Non-standard tap layouts resolve to [] -> unknown -> held (fail closed).
+            # user/tap/name -> repo <user>/homebrew-<tap>. The formula's path
+            # INSIDE that repo is whatever the tap chose: Homebrew permits
+            # Formula/, HomebrewFormula/ and the repo root (shopify/homebrew-
+            # shopify keeps shopify-cli.rb at the root). Guessing Formula/
+            # returned [] for such taps -> "age could not be verified" on every
+            # run. brew already knows the real path because the tap is cloned
+            # locally: `brew formula user/tap/name` prints it. Strip the local
+            # prefix through Taps/<user>/homebrew-<tap>/ and what remains is the
+            # repo-relative path — derived from brew's OUTPUT, never rebuilt
+            # from the spec, because the prefix differs per machine
+            # (/usr/local vs /opt/homebrew). Canonical layout stays the fallback
+            # when brew cannot answer (no local clone); an unknown layout still
+            # resolves to [] -> unknown -> held (fail closed).
             user="${name%%/*}"
             tap="${name#*/}"
             tap="${tap%%/*}"
             token="${name##*/}"
-            url="https://api.github.com/repos/${user}/homebrew-${tap}/commits?path=Formula/${token}.rb&per_page=1"
+            rel="Formula/${token}.rb"
+            if fpath=$(brew formula "$name" 2>/dev/null) && [ -n "$fpath" ]; then
+                case "$fpath" in
+                    */Taps/"${user}"/homebrew-"${tap}"/*)
+                        rel="${fpath#*/Taps/"${user}"/homebrew-"${tap}"/}"
+                        ;;
+                esac
+            fi
+            url="https://api.github.com/repos/${user}/homebrew-${tap}/commits?path=${rel}&per_page=1"
             ;;
         *)
             # homebrew-core shards by first letter, EXCEPT formulae whose name
