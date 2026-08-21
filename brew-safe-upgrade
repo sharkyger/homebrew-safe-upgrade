@@ -638,15 +638,44 @@ print_vuln_lines() {
 import sys, json
 try:
     data = json.load(sys.stdin)
-    for v in data.get('vulnerabilities', [])[:5]:
+    vulns = data.get('vulnerabilities', [])
+    # Highest score first, id as tie-break. The scanner's order follows the
+    # source's, and NVD's is not stable run to run: with more than five CVEs a
+    # different five showed each time, so a vanished id read as 'fixed'.
+    vulns = sorted(vulns, key=lambda v: (-(v.get('score') or 0), v.get('id', '')))
+    for v in vulns[:5]:
         sev = v.get('severity', '?')
         vid = v.get('id', '?')
         score = v.get('score', 0)
         src = v.get('source', '?')
         score_str = f' (CVSS {score})' if score > 0 else ''
         print(f'    [{sev}] {vid}{score_str} — {src}')
+    if len(vulns) > 5:
+        print(f'    … and {len(vulns) - 5} more ({len(vulns)} total)')
 except Exception:
     pass
+" 2>/dev/null || true
+}
+
+# Elapsed-time reporter: phase_took <label> <start_seconds>. Uses bash's SECONDS
+# so a 10-minute run shows where the time went — the age phase, the security
+# phase and the dependency phase have very different cost profiles and the
+# output gave no way to tell them apart.
+phase_took() {
+    echo "  ($1 took $((SECONDS - $2))s)"
+}
+
+# First failure reason from a scanner verdict ($1), or nothing. Lets the [skip]
+# line say WHICH failure — a 404, a truncated read, a throttle and a
+# 1,000-record overflow used to print identically as \"check failed\".
+first_failure_reason() {
+    echo "$1" | python3 -c "
+import sys, json
+try:
+    r = json.load(sys.stdin).get('failure_reasons') or []
+    print(r[0][:120] if r else '')
+except Exception:
+    print('')
 " 2>/dev/null || true
 }
 
@@ -900,6 +929,7 @@ if [ "$MIN_AGE" -gt 0 ] 2>/dev/null; then
     echo ""
     echo "Checking package age (min-age: $MIN_AGE days)..."
     echo ""
+    _phase_start=$SECONDS
 
     FILTERED_OUTDATED=""
     while read -r name installed current; do
@@ -971,6 +1001,7 @@ if [ "$MIN_AGE" -gt 0 ] 2>/dev/null; then
             fi
         fi
     done <<<"$OUTDATED"
+    phase_took "age check" "$_phase_start"
 
     # Replace OUTDATED with filtered list (remove trailing newline)
     OUTDATED=$(echo "$FILTERED_OUTDATED" | sed '/^$/d')
@@ -990,6 +1021,7 @@ fi
 echo ""
 echo "Running security checks..."
 echo ""
+_phase_start=$SECONDS
 
 BLOCKED_PKGS=""
 TAMPERED_PKGS=""
@@ -1143,7 +1175,8 @@ except Exception:
             print_vuln_lines "$RESULT_JSON"
             BLOCKED_PKGS="$BLOCKED_PKGS $name"
         else
-            echo "  [skip] $name $current -- check failed, will not upgrade"
+            _why=$(first_failure_reason "$RESULT_JSON")
+            echo "  [skip] $name $current -- check failed${_why:+ ($_why)}, will not upgrade"
             SKIPPED_PKGS="$SKIPPED_PKGS $name"
             if echo "$RESULT_JSON" | grep -q '"rate_limited": *true'; then
                 RATE_LIMIT_SEEN=true
@@ -1204,6 +1237,8 @@ if [ -n "$SHA_API_ERROR_PKGS" ]; then
     fi
 fi
 
+phase_took "security checks" "$_phase_start"
+
 # Summary
 echo ""
 echo "Results: $CLEAN_COUNT clean"
@@ -1248,6 +1283,7 @@ DEP_NAME_RE='^[a-zA-Z0-9@._/-]+$'
 if [ "$CHECK_DEPS" = true ] && [ -n "$CLEAN_PKGS" ]; then
     echo ""
     echo "Checking transitive dependencies (deduped across batch)..."
+    _phase_start=$SECONDS
 
     INCOMING_DEPS_ARR=()
     # "<dep>|<pkg>" ownership entries. INCOMING_DEPS_ARR is deduped across the
@@ -1382,13 +1418,15 @@ except Exception:
                 DEP_BLOCKED_VULN="$DEP_BLOCKED_VULN $DEP"
                 DEP_BLOCKED_VULN_REASONS="${DEP_BLOCKED_VULN_REASONS}    $DEP $DEP_VER: ${SUMMARY:-vulnerabilities reported}"$'\n'
             else
-                echo "    [skip-dep] $DEP $DEP_VER -- check failed (network or DB error)"
+                _why=$(first_failure_reason "$DEP_RESULT")
+                echo "    [skip-dep] $DEP $DEP_VER -- check failed (${_why:-network or DB error})"
                 DEP_SKIPPED="$DEP_SKIPPED $DEP"
                 if echo "$DEP_RESULT" | grep -q '"rate_limited": *true'; then
                     RATE_LIMIT_SEEN=true
                 fi
             fi
         done
+        phase_took "dependency checks" "$_phase_start"
 
         if [ -n "$DEP_SKIPPED" ]; then
             echo ""

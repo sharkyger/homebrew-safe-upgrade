@@ -316,10 +316,6 @@ def test_warp_cask_does_not_inherit_cloudflare_warp_cves():
     the candidate version, so the upgrade could never pass. The override must
     keep a Cloudflare-shaped keyword result out and a genuine Warp Terminal
     result (CVE-2024-41997) in."""
-    import json
-    from unittest.mock import patch
-
-    import dependency_security_check as dsc
     from tests.test_nvd_cpe_filtering import _FakeResponse
 
     def record(cve_id, desc):

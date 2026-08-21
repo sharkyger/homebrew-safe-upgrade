@@ -14,6 +14,13 @@ The project is pre-1.0; expect minor breaking changes between 0.x releases until
 
 - **A dependency whose check could not be completed no longer rides in under a clean parent.** The dependency pass printed "These will upgrade unchecked" for a dep the scanner could not answer for, and left its dependents in "Unaffected and safe to upgrade now" — while the main pass fails closed for the very same package. An unverifiable dependency is now a flagged dependency: it taints its dependents, gets its own line in the confirmation, and under `[s]` / `--skip-unsafe` it is `brew pin`-ed like a vulnerable or too-fresh one. Same contract in `brew safe-install`. Seen on a live 50-package run, where `node` failed its check and `[skip]`-ed in the main pass but was waved through as an incoming dependency.
 
+- **`[skip]` lines now say why.** "check failed" covered a 404, a truncated read, a rate limit and a 1,000-record overflow identically — which is how three distinct bugs looked like one. The scanner's unknown verdict now carries `failure_reasons`, and `[skip]` / `[skip-dep]` print the first one.
+
+### Changed
+
+- **CVE detail lines are sorted by CVSS score, and a list longer than five ends with "… and N more (M total)".** They used to be the first five in the scanner's order, which follows NVD's — and NVD's order is not stable run to run, so a package with more than five CVEs showed a different five each time and a vanished id read as "fixed".
+- **Each phase reports its elapsed time** (age check, security checks, dependency checks), so a long run shows where the time went.
+
 - **The `warp` cask no longer inherits Cloudflare WARP's CVEs.** Brew's name for the Warp terminal cask is "Warp", which NVD resolves to `cloudflare:warp` — the WARP VPN client — so the terminal carried five Windows-only CVEs (CVE-2022-2225, CVE-2022-4428, CVE-2023-0652, CVE-2023-1412, CVE-2023-1862) on both the installed and the candidate version: the freshness hold was waived *because* the installed build was "vulnerable", then the upgrade was blocked because the candidate carried the same list, and no future release could ever pass. The cask map now sends "Warp Terminal", NVD's own wording for the product (CVE-2024-41997).
 
 ## [0.3.2] — 2026-08-21

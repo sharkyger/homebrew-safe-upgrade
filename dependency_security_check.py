@@ -1139,6 +1139,10 @@ def main():
                 "sources_ok": 0,
                 "sources_total": len(applicable),
                 "sources_failed": failed_sources,
+                # Why each source failed, for the wrapper's [skip] line. A 404,
+                # a truncated read, a throttle and a 1,000-record overflow used
+                # to print identically as "check failed".
+                "failure_reasons": [f"{e['source']}: {e['summary']}" for e in errors],
                 "rate_limited": rate_limited,
                 "vulnerabilities": [],
             },

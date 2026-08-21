@@ -232,6 +232,19 @@ fi
 # $GITHUB_TOKEN, then an authenticated `gh` CLI. Empty when none are available
 # (requests stay anonymous and still work, just rate-limited). Resolved here,
 # before the per-package loop, so `gh auth token` runs at most once.
+# First failure reason from a scanner verdict ($1), or nothing — so a [skip]
+# line says WHICH failure (404 / truncated read / throttle / record overflow).
+first_failure_reason() {
+    echo "$1" | python3 -c "
+import sys, json
+try:
+    r = json.load(sys.stdin).get('failure_reasons') or []
+    print(r[0][:120] if r else '')
+except Exception:
+    print('')
+" 2>/dev/null || true
+}
+
 resolve_gh_token() {
     if [ -n "${GH_TOKEN:-}" ]; then
         printf '%s' "$GH_TOKEN"
@@ -654,7 +667,8 @@ except Exception:
         echo "$RESULT" | grep -E 'CRITICAL|HIGH|MEDIUM' | head -3 || true
         BLOCKED_PKGS="$BLOCKED_PKGS $pkg"
     else
-        echo "  [skip] $pkg $VERSION -- check failed, will not install"
+        _why=$(first_failure_reason "$RESULT")
+        echo "  [skip] $pkg $VERSION -- check failed${_why:+ ($_why)}, will not install"
         SKIPPED_PKGS="$SKIPPED_PKGS $pkg"
         if echo "$RESULT" | grep -q '"rate_limited": *true'; then
             RATE_LIMIT_SEEN=true
@@ -867,7 +881,8 @@ except Exception:
                 DEP_BLOCKED_VULN="$DEP_BLOCKED_VULN $DEP"
                 DEP_BLOCKED_VULN_REASONS="${DEP_BLOCKED_VULN_REASONS}    $DEP $DEP_VER: ${SUMMARY:-vulnerabilities reported}"$'\n'
             else
-                echo "    [skip-dep] $DEP $DEP_VER -- check failed (network or DB error)"
+                _why=$(first_failure_reason "$DEP_RESULT")
+                echo "    [skip-dep] $DEP $DEP_VER -- check failed (${_why:-network or DB error})"
                 DEP_SKIPPED="$DEP_SKIPPED $DEP"
                 if echo "$DEP_RESULT" | grep -q '"rate_limited": *true'; then
                     RATE_LIMIT_SEEN=true
