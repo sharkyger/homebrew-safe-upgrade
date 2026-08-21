@@ -96,6 +96,7 @@ def test_validator_rejects_empty_keyword():
         ("visual-studio-code", "Visual Studio Code"),  # strip "Microsoft" prefix
         ("intellij-idea", "IntelliJ IDEA"),  # strip "Ultimate" suffix
         ("intellij-idea-ce", "IntelliJ IDEA"),  # strip prefix + edition
+        ("warp", "Warp Terminal"),  # brew "Warp" collides with cloudflare:warp
     ],
 )
 def test_known_cask_mapping(cask, expected_keyword):
@@ -305,3 +306,70 @@ def test_short_formula_name_is_still_queried():
 
     assert captured, "a short formula name must still reach NVD"
     assert any("xz" in u for u in captured)
+
+
+def test_warp_cask_does_not_inherit_cloudflare_warp_cves():
+    """The Warp terminal cask (warp.dev) and the Cloudflare WARP VPN client share
+    the NVD product name `warp`. With brew's name[0] ("Warp") as the keyword the
+    cask inherited five Cloudflare Windows CVEs (CVE-2022-2225, CVE-2022-4428,
+    CVE-2023-1412, CVE-2023-0652, CVE-2023-1862) — on both the installed and
+    the candidate version, so the upgrade could never pass. The override must
+    keep a Cloudflare-shaped keyword result out and a genuine Warp Terminal
+    result (CVE-2024-41997) in."""
+    import json
+    from unittest.mock import patch
+
+    import dependency_security_check as dsc
+    from tests.test_nvd_cpe_filtering import _FakeResponse
+
+    def record(cve_id, desc):
+        return {
+            "cve": {
+                "id": cve_id,
+                "vulnStatus": "Analyzed",
+                "descriptions": [{"lang": "en", "value": desc}],
+                "metrics": {
+                    "cvssMetricV31": [{"cvssData": {"baseSeverity": "HIGH", "baseScore": 7.8}}]
+                },
+                "configurations": [],
+            }
+        }
+
+    body = json.dumps(
+        {
+            "totalResults": 2,
+            "vulnerabilities": [
+                record(
+                    "CVE-2023-1862",
+                    "Cloudflare WARP client for Windows (up to v2023.3.381.0) allowed a "
+                    "malicious actor to remotely access the warp-svc.exe binary.",
+                ),
+                record(
+                    "CVE-2024-41997",
+                    "An issue was discovered in version of Warp Terminal prior to "
+                    "2024.07.18 (v0.2024.07.16.08.02). A command injection vulnerability "
+                    "exists in the Docker integration functionality.",
+                ),
+            ],
+        }
+    ).encode()
+    seen = []
+
+    empty = json.dumps({"totalResults": 0, "vulnerabilities": []}).encode()
+
+    def fake(req, timeout=15):
+        seen.append(req.full_url)
+        # No CPE exists for the terminal; only the keyword query has results.
+        return _FakeResponse(body if "keywordSearch=" in req.full_url else empty)
+
+    with patch.object(dsc, "_urlopen", side_effect=fake):
+        findings = dsc.query_nvd("warp", "brew", version=None)
+
+    assert any("keywordSearch=Warp%20Terminal" in u for u in seen), seen
+    assert "CVE-2023-1862" not in {f["id"] for f in findings}, findings
+    # Known limitation, NOT asserted here: CVE-2024-41997's real description opens
+    # "An issue was discovered in version of Warp Terminal ...", which the
+    # keyword-path subject heuristic (_desc_names_this_package) rejects because
+    # the product is not the first words of the sentence. That MITRE phrasing is
+    # common, so the heuristic is a false-negative class of its own — tracked
+    # separately; this test is only about the Cloudflare collision.

@@ -8,6 +8,14 @@ The project is pre-1.0; expect minor breaking changes between 0.x releases until
 
 ## [Unreleased]
 
+### Fixed
+
+- **The `warp` cask no longer inherits Cloudflare WARP's CVEs.** Brew's name for the Warp terminal cask is "Warp", which NVD resolves to `cloudflare:warp` — the WARP VPN client — so the terminal carried five Windows-only CVEs (CVE-2022-2225, CVE-2022-4428, CVE-2023-0652, CVE-2023-1412, CVE-2023-1862) on both the installed and the candidate version: the freshness hold was waived *because* the installed build was "vulnerable", then the upgrade was blocked because the candidate carried the same list, and no future release could ever pass. The cask map now sends "Warp Terminal", NVD's own wording for the product (CVE-2024-41997).
+
+### Known
+
+- The keyword-path relevance heuristic requires the product to be the subject of the description's first sentence. The common MITRE phrasing "An issue was discovered in <product> …" fails that test, so genuine keyword-only CVEs (CVE-2024-41997 is one) can be dropped. Tracked for a follow-up.
+
 ## [0.3.2] — 2026-08-21
 
 ### Fixed
