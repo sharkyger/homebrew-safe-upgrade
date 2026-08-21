@@ -182,7 +182,7 @@ Continue upgrade?
   [N] no  — cancel the whole upgrade (default)
 ```
 
-`[s]` upgrades the packages that don't touch the flagged dependency and holds back the ones that do. Use `--skip-unsafe` to take that branch non-interactively:
+`[s]` upgrades the packages that don't touch the flagged dependency and holds back the ones that do. A dependency is *flagged* when it has known CVEs, when it is younger than `--min-age`, **or when its check could not be completed** — an unverifiable dependency is an unknown one level down, not a pass, so it holds its dependents exactly like a vulnerable one. Use `--skip-unsafe` to take that branch non-interactively:
 
 ```
 brew safe-upgrade --skip-unsafe

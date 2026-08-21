@@ -877,14 +877,17 @@ except Exception:
 
         if [ -n "$DEP_SKIPPED" ]; then
             echo ""
-            echo "  Note: dep checks failed for:$DEP_SKIPPED"
-            echo "  These will install unchecked. Re-run later or use --no-deps to suppress."
+            echo "  Note: dep checks could not be completed for:$DEP_SKIPPED"
+            echo "  An unverifiable dependency is treated like a flagged one."
+            echo "  Re-run later, or use --no-deps to skip dependency checks."
             note_rate_limit
         fi
 
-        # Distinct sections for vulnerable vs. too-fresh: they are different
-        # risk signals and the previous combined header conflated them.
-        if [ -n "$DEP_BLOCKED_VULN" ] || [ -n "$DEP_BLOCKED_HOLD" ]; then
+        # Distinct sections for vulnerable vs. too-fresh vs. unverifiable: they
+        # are different risk signals, and all three require the confirmation —
+        # a dependency the scanner could not answer for used to install
+        # unchecked under a "clean" parent.
+        if [ -n "$DEP_BLOCKED_VULN" ] || [ -n "$DEP_BLOCKED_HOLD" ] || [ -n "$DEP_SKIPPED" ]; then
             echo ""
             if [ -n "$DEP_BLOCKED_VULN" ]; then
                 echo "WARNING: incoming dependencies have known CVEs:"
@@ -893,6 +896,9 @@ except Exception:
             if [ -n "$DEP_BLOCKED_HOLD" ]; then
                 echo "Incoming dependencies are below --min-age:"
                 printf "%s" "$DEP_BLOCKED_HOLD_REASONS"
+            fi
+            if [ -n "$DEP_SKIPPED" ]; then
+                echo "Incoming dependencies could not be checked:$DEP_SKIPPED"
             fi
             echo "Proceeding will let brew install them anyway."
             read -rp "Continue install of $CLEAN_PKGS? [y/N] " DEP_CONFIRM

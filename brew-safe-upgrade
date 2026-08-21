@@ -1392,14 +1392,18 @@ except Exception:
 
         if [ -n "$DEP_SKIPPED" ]; then
             echo ""
-            echo "  Note: dep checks failed for:$DEP_SKIPPED"
-            echo "  These will upgrade unchecked. Re-run later or use --no-deps to suppress."
+            echo "  Note: dep checks could not be completed for:$DEP_SKIPPED"
+            echo "  An unverifiable dependency is treated like a flagged one: its dependents"
+            echo "  are held. Re-run later, or use --no-deps to skip dependency checks."
             note_rate_limit
         fi
 
-        # Distinct sections for vulnerable vs. too-fresh: they are different
-        # risk signals and the previous combined header conflated them.
-        if [ -n "$DEP_BLOCKED_VULN" ] || [ -n "$DEP_BLOCKED_HOLD" ]; then
+        # Distinct sections for vulnerable vs. too-fresh vs. unverifiable: they
+        # are different risk signals. All three taint their dependents — the
+        # main pass already fails closed on a package whose own check failed,
+        # and a dependency the scanner could not answer for is the same
+        # unknown, one level down. It used to ride in under a "clean" parent.
+        if [ -n "$DEP_BLOCKED_VULN" ] || [ -n "$DEP_BLOCKED_HOLD" ] || [ -n "$DEP_SKIPPED" ]; then
             # Which top-level packages depend on a flagged dep? Only those have
             # to be held; the rest of the batch is unaffected and upgradable.
             #
@@ -1415,7 +1419,7 @@ except Exception:
             # tainted package could be judged safe and handed to brew. `case`
             # patterns match literally here, so a package can only match itself.
             DEP_TAINTED_PKGS=""
-            for _bad in $DEP_BLOCKED_VULN $DEP_BLOCKED_HOLD; do
+            for _bad in $DEP_BLOCKED_VULN $DEP_BLOCKED_HOLD $DEP_SKIPPED; do
                 for _own in ${DEP_OWNERS_ARR[@]+"${DEP_OWNERS_ARR[@]}"}; do
                     _own_dep=${_own%|*}
                     _own_pkg=${_own##*|}
@@ -1444,6 +1448,9 @@ except Exception:
             if [ -n "$DEP_BLOCKED_HOLD" ]; then
                 echo "Incoming dependencies are below --min-age:"
                 printf "%s" "$DEP_BLOCKED_HOLD_REASONS"
+            fi
+            if [ -n "$DEP_SKIPPED" ]; then
+                echo "Incoming dependencies could not be checked:$DEP_SKIPPED"
             fi
             echo "Proceeding will let brew upgrade them anyway."
             if [ -n "$DEP_TAINTED_PKGS" ]; then
@@ -1511,7 +1518,7 @@ except Exception:
                 # dependent from brew's cmdline is not enough on its own, because
                 # some other package's closure could still drag the dep in. The
                 # pin makes brew refuse to touch it either way.
-                EXCLUDE_PKGS="$EXCLUDE_PKGS $DEP_TAINTED_PKGS $DEP_BLOCKED_VULN $DEP_BLOCKED_HOLD"
+                EXCLUDE_PKGS="$EXCLUDE_PKGS $DEP_TAINTED_PKGS $DEP_BLOCKED_VULN $DEP_BLOCKED_HOLD $DEP_SKIPPED"
             fi
         fi
     fi
