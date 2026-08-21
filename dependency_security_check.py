@@ -19,6 +19,7 @@ NVD's rate limit from 5 to 50 requests per rolling 30 seconds, which matters on
 large batches: a package no source could answer for is HELD, not passed.
 """
 
+import http.client
 import json
 import os
 import re
@@ -113,6 +114,14 @@ ECOSYSTEM_TARGET_SW = {
 }
 _ALL_ECOSYSTEM_TARGET_SW = set().union(*ECOSYSTEM_TARGET_SW.values())
 
+# target_sw values that scope an advisory to an editor/IDE extension platform.
+# `cpe:2.3:a:microsoft:python:*:*:*:*:*:visual_studio_code:*:*` is the VS Code
+# *Python extension* (CVE-2020-1171, CVE-2024-49050, ...), not CPython — yet a
+# vendor-wildcard CPE query for product `python` returns both. An extension
+# marketplace is not a package ecosystem we ever check, so these are foreign
+# for EVERY ecosystem, brew included.
+PLATFORM_TARGET_SW = {"visual_studio_code", "visual_studio"}
+
 
 def _foreign_target_sw(target_sw, ecosystem):
     """True if a CPE's target_sw pins it to a DIFFERENT language ecosystem.
@@ -123,6 +132,8 @@ def _foreign_target_sw(target_sw, ecosystem):
     """
     if target_sw in ("*", "-", ""):
         return False
+    if target_sw in PLATFORM_TARGET_SW:
+        return True
     own = ECOSYSTEM_TARGET_SW.get(ecosystem, set())
     return target_sw in _ALL_ECOSYSTEM_TARGET_SW and target_sw not in own
 
@@ -522,26 +533,48 @@ def _nvd_headers():
     return headers
 
 
+# Characters NVD accepts in a CPE 2.3 product component. '@' and '/' are not
+# among them: NVD answers HTTP 404 to a virtualMatchString containing either,
+# and a 404 raised out of the candidate loop used to abort the whole query.
+_CPE_PRODUCT_RE = re.compile(r"^[a-z0-9][a-z0-9._\-]*$")
+
+
+def _formula_name(package_name, ecosystem):
+    """The formula's own name, without a tap prefix.
+
+    `sharkyger/tap/pip-cve-gate` is how brew addresses a third-party formula,
+    but the product NVD might know is `pip-cve-gate`. Sent verbatim the slashes
+    404'd the CPE query and matched nothing as a keyword, so every tap formula
+    came back "unknown" — a permanent blind spot on the least-reviewed software
+    on the machine. Casks and non-brew ecosystems have no tap prefix; their
+    names already contain '/' legitimately (npm scopes) and are left alone.
+    """
+    if ecosystem == "brew" and "/" in package_name:
+        return package_name.rsplit("/", 1)[1]
+    return package_name
+
+
 def _nvd_cpe_products(package_name, ecosystem):
-    """CPE product-name candidates for a package, most specific first.
+    """CPE product-name candidates for a package.
 
     Homebrew versioned formulae (`openssl@3`, `python@3.11`, `node@20`) carry a
-    suffix that appears in no CPE and in no CVE description, so the raw name
-    matched nothing and the package came back clean. The base name is tried
-    after the literal one so `openssl@3` still resolves via `openssl`.
+    suffix that appears in no CPE and in no CVE description. The literal name
+    used to be tried first — but '@' is not a CPE character, NVD 404s on it,
+    and the HTTPError escaped the loop before the base product was reached.
+    Only CPE-safe candidates are returned now, so `python@3.12` resolves
+    through `python` and `sharkyger/tap/pip-cve-gate` through `pip-cve-gate`.
     """
     if ecosystem == "brew" and package_name in CASK_NVD_KEYWORDS:
         # A curated cask mapping is authoritative: the slug (`brave-browser`)
         # is exactly what does NOT identify the product, so trying it as a CPE
         # product name is a wasted request against a rate-limited API.
         return [CASK_NVD_KEYWORDS[package_name].lower().replace(" ", "_")]
-    candidates = [package_name.lower()]
-    base = package_name.split("@", 1)[0].lower()
-    candidates.append(base)
+    name = _formula_name(package_name, ecosystem).lower()
+    candidates = [name, name.split("@", 1)[0]]
     seen = set()
     ordered = []
     for c in candidates:
-        if c and c not in seen:
+        if c and c not in seen and _CPE_PRODUCT_RE.match(c):
             seen.add(c)
             ordered.append(c)
     return ordered
@@ -563,6 +596,16 @@ def _nvd_get(url):
         try:
             with _urlopen(req) as resp:
                 return json.loads(resp.read())
+        except (http.client.HTTPException, ConnectionError, TimeoutError) as e:
+            # A body that truncates mid-read (IncompleteRead on a ~600 KB page),
+            # a reset connection, a socket timeout. None of these is a URLError,
+            # so they used to surface as a raw traceback instead of the handled
+            # "source failed" path. Retry; if it keeps happening hand the caller
+            # a URLError so it fails closed like any other unreachable source.
+            if attempt == NVD_MAX_RETRIES - 1:
+                raise urllib.error.URLError(f"{type(e).__name__}: {e}") from e
+            time.sleep(min(NVD_RETRY_BASE_SECONDS * (attempt + 1), 30))
+            continue
         except urllib.error.HTTPError as e:
             if e.code not in (403, 429) or attempt == NVD_MAX_RETRIES - 1:
                 raise
@@ -867,15 +910,18 @@ def query_nvd(package_name, ecosystem, version=None):
     # `match_terms` is what the keyword-path description filter accepts as
     # proof the CVE is about this package. Original `package_name` stays for
     # logging.
-    search_name = package_name
-    match_terms = [package_name.lower()]
+    # The keyword path gets the formula's own name (tap prefix stripped) but
+    # deliberately NOT the '@'-stripped base — neither as the search term nor
+    # in the description filter: bare `python` drags in the VS Code
+    # Python-extension CVEs, whose descriptions name "Python" without ever
+    # naming python@3.12. Base-name matching is a CPE-path concern only.
+    formula = _formula_name(package_name, ecosystem)
+    search_name = formula
+    match_terms = [formula.lower()]
     if ecosystem == "brew" and package_name in CASK_NVD_KEYWORDS:
         mapped_keyword = CASK_NVD_KEYWORDS[package_name]
         search_name = mapped_keyword
         match_terms = [mapped_keyword.lower(), package_name.lower()]
-    base_name = package_name.split("@", 1)[0]
-    if base_name.lower() != package_name.lower():
-        match_terms.append(base_name.lower())
 
     products = _nvd_cpe_products(package_name, ecosystem)
 
@@ -890,7 +936,15 @@ def query_nvd(package_name, ecosystem, version=None):
             else:
                 vm = f"cpe:2.3:a:*:{product}"
             params = f"virtualMatchString={urllib.parse.quote(vm)}"
-            records, total, truncated = _nvd_fetch(params)
+            try:
+                records, total, truncated = _nvd_fetch(params)
+            except urllib.error.HTTPError as e:
+                # NVD's answer to a CPE string it cannot parse is 404. That is
+                # "no match for this candidate", not "the source is down" —
+                # try the next candidate, then the keyword path.
+                if e.code != 404:
+                    raise
+                continue
             if total:
                 matched_via_cpe = True
                 break

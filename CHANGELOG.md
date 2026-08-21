@@ -8,6 +8,18 @@ The project is pre-1.0; expect minor breaking changes between 0.x releases until
 
 ## [Unreleased]
 
+### Fixed
+
+- **Tap-qualified and `@`-versioned formulae were never actually checked against NVD.** `sharkyger/tap/pip-cve-gate` and `python@3.12` went into the CPE query verbatim; `/` and `@` are not CPE characters, NVD answers HTTP 404, and that error escaped the candidate loop before the base product was tried — so every third-party tap formula and every versioned formula came back `unknown` (a fail-closed hold that no re-run could clear). The tap prefix is now stripped and only CPE-safe candidates are queried, a 404 on one candidate moves on to the next, and the keyword fallback receives the formula's own name. Found on a real 50-package run of 0.3.1.
+
+- **A response that truncated mid-body crashed the scanner.** `http.client.IncompleteRead` (seen on a ~600 KB NVD page), connection resets and socket timeouts are not `URLError`s and surfaced as a raw traceback. They are retried and, if persistent, reported as a normal source failure so the package fails closed like any other unreachable source.
+
+- **VS Code extension CVEs no longer count against the formula.** A vendor-wildcard CPE query for product `python` returns CPython's CVEs *and* five for the VS Code Python extension (`cpe:2.3:a:microsoft:python:*:…:visual_studio_code`). CPEs whose `target_sw` is an editor-extension platform are now foreign for every ecosystem. This is why the fix above does not simply search the bare name as a keyword — that trades a 404 for false positives.
+
+### Known
+
+- A keyword fallback on a very generic name (`certifi`) can exceed NVD's 1,000-record window; the scanner reports "coverage incomplete" and fails closed. Honest, but a blind spot — tracked for a follow-up.
+
 ## [0.3.1] — 2026-08-20
 
 ### Fixed
