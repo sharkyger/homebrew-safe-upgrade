@@ -36,9 +36,11 @@ names = dsc._desc_names_this_package
     "desc",
     [
         # CVE-2024-41997, verbatim opening
-        "An issue was discovered in version of Warp Terminal prior to 2024.07.18 "
-        "(v0.2024.07.16.08.02). A command injection vulnerability exists in the "
-        "Docker integration functionality.",
+        (
+            "An issue was discovered in version of Warp Terminal prior to 2024.07.18 "
+            "(v0.2024.07.16.08.02). A command injection vulnerability exists in the "
+            "Docker integration functionality."
+        ),
         "A vulnerability in Warp Terminal allows command injection via a crafted link.",
         "Multiple issues were found in the Warp Terminal 0.2024.x.",
     ],
@@ -65,12 +67,18 @@ def test_one_vendor_word_before_the_subject_is_accepted():
     "desc",
     [
         # records that flagged the live fixture wget@99.99.0 under "anywhere in sentence"
-        "Applications that use Wget to access a remote resource using shorthand URLs "
-        "and pass arbitrary user credentials in the URL are vulnerable.",
-        "DEEBOT PRO M1 and DEEBOT PRO K1VAC use wget command with server certificate "
-        "validation disabled.",
-        "An improper certificate validation vulnerability exists in AVTECH IP cameras, "
-        "DVRs, and NVRs due to the use of wget with --no-check-certificate.",
+        (
+            "Applications that use Wget to access a remote resource using shorthand URLs "
+            "and pass arbitrary user credentials in the URL are vulnerable."
+        ),
+        (
+            "DEEBOT PRO M1 and DEEBOT PRO K1VAC use wget command with server certificate "
+            "validation disabled."
+        ),
+        (
+            "An improper certificate validation vulnerability exists in AVTECH IP cameras, "
+            "DVRs, and NVRs due to the use of wget with --no-check-certificate."
+        ),
     ],
 )
 def test_product_as_object_of_use_is_rejected(desc):
