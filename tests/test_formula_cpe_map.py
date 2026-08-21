@@ -157,3 +157,37 @@ def test_recent_sweep_is_skipped_above_the_cap(capsys):
     _, findings = _run("php", "8.5.9", {"pubStartDate=": json.dumps(body).encode()})
     assert findings == [], findings
     assert "too generic to attribute" in capsys.readouterr().err
+
+
+# ----- CodeRabbit CLI on the batch (2026-08-21): three fail-open holes in the map -----
+
+
+def test_mapped_formula_strips_homebrew_revision_from_the_cpe_version():
+    """ruby 4.0.6_1 answered "clean" because ruby-lang:ruby:4.0.6_1 is a
+    version NVD has never heard of — the authoritative query must carry the
+    upstream version."""
+    seen, _ = _run("ruby", "4.0.6_1", {})
+    assert any("cpe:2.3:a:ruby-lang:ruby:4.0.6:" in u for u in seen), seen
+    assert not any("4.0.6_1" in u for u in seen), seen
+
+
+def test_tap_formula_sharing_a_mapped_name_is_not_mapped():
+    """someone/tap/php is not php:php. It keeps the default (wildcard CPE +
+    keyword) path instead of an authoritative answer for another product."""
+    seen, _ = _run("someone/tap/php", "1.0", {})
+    assert any("cpe:2.3:a:*:php:1.0" in u for u in seen), seen
+    assert not any("cpe:2.3:a:php:php" in u for u in seen), seen
+    assert any("keywordSearch=php&" in u for u in seen), seen
+
+
+def test_recent_sweep_that_overflows_is_treated_as_too_generic(monkeypatch, capsys):
+    monkeypatch.setattr(dsc, "NVD_MAX_PAGES", 1)
+    monkeypatch.setattr(dsc, "NVD_PAGE_SIZE", 2)
+    records = []
+    for i in range(2):
+        r = json.loads(_nvd_response(f"CVE-2026-{i:05d}", f"PHP issue in SomeApp{i}.", []))
+        records.extend(r["vulnerabilities"])
+    body = {"totalResults": 500, "vulnerabilities": records}
+    _, findings = _run("php", "8.5.9", {"pubStartDate=": json.dumps(body).encode()})
+    assert findings == [], findings
+    assert "more than 500" in capsys.readouterr().err

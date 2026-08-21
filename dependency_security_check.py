@@ -270,6 +270,12 @@ def parse_version(v):
         portmark = re.match(r"^p(\d+)$", tail)
         if portmark:
             return _Version(release, None, int(portmark.group(1)))
+        # Release-channel marker, the opposite of a pre-release: Warp's cask
+        # versions read "0.2026.08.19.08.15.stable_01". Unparseable, every
+        # comparison failed and the one CVE that names Warp (fixed 2024.07.18)
+        # stuck to every later build — a permanent block (2026-08-21).
+        if re.match(r"^[-_.]?stable$", tail, re.IGNORECASE):
+            return _Version(release, None, 0)
         pm = re.match(
             r"[-_.]?(dev|alpha|beta|preview|pre|rc|a|b|c)[-_.]?(\d*)",
             tail,
@@ -654,11 +660,14 @@ def _nvd_recent_unanalysed(search_name):
         f"&pubStartDate={urllib.parse.quote(start.strftime(fmt))}"
         f"&pubEndDate={urllib.parse.quote(end.strftime(fmt))}"
     )
-    records, _total, _truncated = _nvd_fetch(params)
+    records, total, truncated = _nvd_fetch(params)
     fresh = [r for r in records if not _has_cpe_data(r.get("cve", {}))]
-    if len(fresh) > NVD_RECENT_SWEEP_CAP:
+    if truncated or len(fresh) > NVD_RECENT_SWEEP_CAP:
+        # A window we could not even page to the end of is the same verdict,
+        # stated explicitly rather than silently dropping the tail.
+        count = f"more than {total}" if truncated else str(len(fresh))
         print(
-            f"  Note: {len(fresh)} unanalysed NVD records from the last "
+            f"  Note: {count} unanalysed NVD records from the last "
             f"{NVD_RECENT_WINDOW_DAYS} days mention '{search_name}' — too generic to "
             "attribute by text; relying on CPE-analysed records only.",
             file=sys.stderr,
@@ -842,15 +851,23 @@ def _desc_says_not_affected(version, desc):
     out; ambiguity returns False (fail closed — the CVE stays).
     """
     v_re = r"(?:version\s+)?v?([\d]+(?:\.[\d]+)*)"
+    # An advisory may restate the bound in the product's own version scheme
+    # right after it: "prior to 2024.07.18 (v0.2024.07.16.08.02)" — Warp's
+    # cask versions carry a leading "0." the date-style bound lacks, so only
+    # the parenthesised form compares against "0.2026.08.19...". That form
+    # names the last AFFECTED build, so it is an inclusive bound.
+    alt_re = r"(?:\s*\(v?([\d]+(?:\.[\d]+)*)[^)]*\))?"
 
     # Exclusive upper bound: fixed at the matched version
     end_exc = re.search(
-        rf"(?:before|prior to|fixed in|patched in)\s+{v_re}",
+        rf"(?:before|prior to|fixed in|patched in)\s+{v_re}{alt_re}",
         desc,
         re.IGNORECASE,
     )
     if end_exc and _ver_ge(version, end_exc.group(1)):
         return True  # version is at or above the fix — not affected
+    if end_exc and end_exc.group(2) and _ver_gt(version, end_exc.group(2)):
+        return True  # above the last affected build in the product's own scheme
 
     # Inclusive upper bound: last affected version
     end_inc = re.search(rf"\bthrough\s+{v_re}", desc, re.IGNORECASE)
@@ -1063,7 +1080,17 @@ def query_nvd(package_name, ecosystem, version=None):
     # fallback, built for products NVD has no CPE for, is skipped. For `php`,
     # `ruby`, `node`, `certifi` that fallback is what produced the
     # 1,000-record overflow and the 2003-era blocks on other PHP software.
-    verified = _formula_cpe_lookup(formula) if ecosystem == "brew" else None
+    # Core formulae only: a tap formula that happens to share a mapped name
+    # (someone/tap/php) is a different product, and a mapped cask slug is
+    # already handled by CASK_NVD_KEYWORDS. Either would otherwise get an
+    # authoritative "clean" for something the map was never verified against.
+    verified = None
+    if ecosystem == "brew" and "/" not in package_name and package_name not in CASK_NVD_KEYWORDS:
+        verified = _formula_cpe_lookup(formula)
+    # The CPE version must be the upstream version: Homebrew's revision (_N)
+    # and build metadata (+meta) appear in no CPE, and an authoritative query
+    # for ruby-lang:ruby:4.0.6_1 answers 0 — which read as "clean".
+    cpe_version = version.split("+", 1)[0].split("_", 1)[0] if version else version
     if verified:
         vendor, product = verified
         products = [product]
@@ -1077,8 +1104,8 @@ def query_nvd(package_name, ecosystem, version=None):
         truncated = False
 
         for vendor, product in cpe_candidates:
-            if version:
-                vm = f"cpe:2.3:a:{vendor}:{product}:{version}:*:*:*:*:*:*:*"
+            if cpe_version:
+                vm = f"cpe:2.3:a:{vendor}:{product}:{cpe_version}:*:*:*:*:*:*:*"
             else:
                 vm = f"cpe:2.3:a:{vendor}:{product}"
             params = f"virtualMatchString={urllib.parse.quote(vm)}"
