@@ -251,4 +251,7 @@ def test_keyword_result_naming_only_the_bare_product_is_rejected():
     with patch.object(dsc, "_urlopen", side_effect=server):
         findings = dsc.query_nvd("python@3.12", "brew", version=None)
 
+    # The keyword fallback must have been exercised — otherwise an empty result
+    # would prove nothing about the description filter.
+    assert any("keywordSearch=python@3.12&" in u for u in seen), seen
     assert findings == [], findings
