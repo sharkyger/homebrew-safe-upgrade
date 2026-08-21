@@ -814,21 +814,24 @@ def _desc_names_this_package(desc, match_terms):
     if matched_term is None:
         return False
 
-    # Reject if the first sentence names a different product as the subject.
+    # Accept if the first sentence names this package at all. The original rule
+    # required the package to be the first words of the sentence ("the
+    # subject"), which silently rejected MITRE's boilerplate "An issue was
+    # discovered in <product> ..." and "A vulnerability in <product> ..." —
+    # CVE-2024-41997 for the Warp terminal is one such record. On the keyword
+    # path there is no CPE query underneath to catch what this drops, so a
+    # rejection here is a terminal false negative: a real CVE reported as
+    # clean, which is the one outcome a fail-closed gate exists to prevent.
+    # A term that occurs only in later sentences ("X, which bundles <term>")
+    # is still treated as noise. None of the pinned false-positive cases
+    # (tests/test_reported_false_positives.py) depend on the stricter rule.
     first_sentence = (
         desc.split(". ")[0].split(" is ")[0].split(" before ")[0].split(" through ")[0].strip()
-    )
-    sentence_words = first_sentence.split()
-    term_word_count = len(matched_term.split())
-    first_chunk = " ".join(sentence_words[:term_word_count]).lower()
+    ).lower()
     matched_nodash = matched_term.replace("-", "")
     matched_re = re.compile(r"(?<![a-z0-9\-])" + re.escape(matched_term) + r"(?![a-z0-9\-])")
     matched_nodash_re = re.compile(r"(?<![a-z0-9])" + re.escape(matched_nodash) + r"(?![a-z0-9])")
-    return (
-        first_chunk in (matched_term, matched_nodash)
-        or bool(matched_re.search(first_chunk))
-        or bool(matched_nodash_re.search(first_chunk))
-    )
+    return bool(matched_re.search(first_sentence)) or bool(matched_nodash_re.search(first_sentence))
 
 
 def _nvd_cve_to_finding(vuln, ecosystem, version, match_terms, require_desc_match, products=()):
@@ -919,9 +922,17 @@ def query_nvd(package_name, ecosystem, version=None):
     search_name = formula
     match_terms = [formula.lower()]
     if ecosystem == "brew" and package_name in CASK_NVD_KEYWORDS:
+        # A curated mapping is authoritative for the description filter too.
+        # The slug stays as a secondary term only when it is a compound
+        # ("claude-code", "brave-browser") that could appear verbatim in a
+        # description. A bare single-word slug is exactly the ambiguous token
+        # the mapping exists to replace: "warp" would re-admit "Cloudflare WARP
+        # client ..." for the Warp terminal.
         mapped_keyword = CASK_NVD_KEYWORDS[package_name]
         search_name = mapped_keyword
-        match_terms = [mapped_keyword.lower(), package_name.lower()]
+        match_terms = [mapped_keyword.lower()]
+        if "-" in package_name:
+            match_terms.append(package_name.lower())
 
     products = _nvd_cpe_products(package_name, ecosystem)
 

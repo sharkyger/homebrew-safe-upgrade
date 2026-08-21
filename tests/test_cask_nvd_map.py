@@ -366,10 +366,9 @@ def test_warp_cask_does_not_inherit_cloudflare_warp_cves():
         findings = dsc.query_nvd("warp", "brew", version=None)
 
     assert any("keywordSearch=Warp%20Terminal" in u for u in seen), seen
-    assert "CVE-2023-1862" not in {f["id"] for f in findings}, findings
-    # Known limitation, NOT asserted here: CVE-2024-41997's real description opens
-    # "An issue was discovered in version of Warp Terminal ...", which the
-    # keyword-path subject heuristic (_desc_names_this_package) rejects because
-    # the product is not the first words of the sentence. That MITRE phrasing is
-    # common, so the heuristic is a false-negative class of its own — tracked
-    # separately; this test is only about the Cloudflare collision.
+    # Cloudflare out, the genuine Warp Terminal record in. The second half
+    # depends on the first-sentence relevance rule (CVE-2024-41997 opens "An
+    # issue was discovered in version of Warp Terminal ..."), and the first
+    # half on the bare slug "warp" NOT being a match term for a mapped cask —
+    # "Cloudflare WARP client" would otherwise re-admit it.
+    assert {f["id"] for f in findings} == {"CVE-2024-41997"}, findings
