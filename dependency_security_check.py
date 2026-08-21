@@ -19,6 +19,7 @@ NVD's rate limit from 5 to 50 requests per rolling 30 seconds, which matters on
 large batches: a package no source could answer for is HELD, not passed.
 """
 
+import datetime
 import http.client
 import json
 import os
@@ -49,6 +50,15 @@ try:
     from cask_nvd_map import CASK_NVD_KEYWORDS
 except ImportError:
     CASK_NVD_KEYWORDS = {}
+
+# Formula → verified NVD (vendor, product). For a mapped formula the CPE query
+# is authoritative and the keyword fallback is not run — see formula_cpe_map.py.
+try:
+    from formula_cpe_map import lookup as _formula_cpe_lookup
+except ImportError:
+
+    def _formula_cpe_lookup(formula_name: str) -> tuple[str, str] | None:
+        return None
 
 
 def _urlopen(req, timeout=15):
@@ -622,6 +632,50 @@ def _nvd_get(url):
     raise last_error if last_error else urllib.error.URLError("NVD request failed")
 
 
+NVD_RECENT_WINDOW_DAYS = 120  # NVD's maximum pubStartDate..pubEndDate span
+# Above this many unanalysed recent mentions the name is too generic for prose
+# to attribute a record to the product (`php` → ~140 records about other PHP
+# software in one window); the sweep is skipped and NVD's CPE assignment,
+# which lands within days, covers them through the authoritative path.
+NVD_RECENT_SWEEP_CAP = 10
+
+
+def _nvd_recent_unanalysed(search_name):
+    """Keyword records published in the last NVD_RECENT_WINDOW_DAYS that carry
+    no CPE data yet. Used next to an authoritative CPE answer so a brand-new
+    CVE is not invisible until NVD analyses it. Returns [] (with a note on
+    stderr) when more than NVD_RECENT_SWEEP_CAP such records mention the
+    name — see the cap's comment."""
+    end = datetime.datetime.now(datetime.UTC)
+    start = end - datetime.timedelta(days=NVD_RECENT_WINDOW_DAYS)
+    fmt = "%Y-%m-%dT%H:%M:%S.000"
+    params = (
+        f"keywordSearch={urllib.parse.quote(search_name)}&keywordExactMatch"
+        f"&pubStartDate={urllib.parse.quote(start.strftime(fmt))}"
+        f"&pubEndDate={urllib.parse.quote(end.strftime(fmt))}"
+    )
+    records, _total, _truncated = _nvd_fetch(params)
+    fresh = [r for r in records if not _has_cpe_data(r.get("cve", {}))]
+    if len(fresh) > NVD_RECENT_SWEEP_CAP:
+        print(
+            f"  Note: {len(fresh)} unanalysed NVD records from the last "
+            f"{NVD_RECENT_WINDOW_DAYS} days mention '{search_name}' — too generic to "
+            "attribute by text; relying on CPE-analysed records only.",
+            file=sys.stderr,
+        )
+        return []
+    return fresh
+
+
+def _has_cpe_data(cve):
+    """True if the record carries at least one cpeMatch entry."""
+    return any(
+        node.get("cpeMatch")
+        for config in cve.get("configurations", [])
+        for node in config.get("nodes", [])
+    )
+
+
 def _nvd_fetch(params):
     """Fetch all pages for an NVD query.
 
@@ -693,6 +747,30 @@ def _nvd_applicable_cpes(cve, ecosystem, products=()):
     if own_product_cpes:
         return own_product_cpes, has_any_cpe
     return relevant_cpes, has_any_cpe
+
+
+def _cpe_data_names_product(cve, products):
+    """Does any vulnerable CPE on this record name one of `products`?
+
+    Exact product match, or the product as a token of a compound name split
+    on '.', '_' and '-' — `node` in `node.js`, `openldap` in
+    `openldap-servers`. Token matching errs toward keeping a record.
+    """
+    wanted = {p.lower() for p in products}
+    for config in cve.get("configurations", []):
+        for node in config.get("nodes", []):
+            for cpe in node.get("cpeMatch", []):
+                if not cpe.get("vulnerable", False):
+                    continue
+                parts = cpe.get("criteria", "").split(":")
+                if len(parts) < 5:
+                    continue
+                product = parts[4].lower()
+                if product in wanted:
+                    return True
+                if wanted & set(re.split(r"[._-]", product)):
+                    return True
+    return False
 
 
 def _cpe_version_affected(version, relevant_cpes):
@@ -814,21 +892,45 @@ def _desc_names_this_package(desc, match_terms):
     if matched_term is None:
         return False
 
-    # Reject if the first sentence names a different product as the subject.
+    # Where in the first sentence the package is named decides relevance.
+    # Real reports name the product as the SUBJECT — optionally behind one
+    # vendor word ("GNU Wget does not validate ...", "Cloudflare WARP client")
+    # — or right after "in", MITRE's boilerplate ("An issue was discovered in
+    # version of Warp Terminal ...", "A vulnerability in wget before ..."). Noise
+    # names it as an object of use: "Applications that use Wget ...", "DEEBOT
+    # PRO M1 use wget command with ...", "AVTECH ... due to the use of wget".
+    #
+    # The original rule accepted only the first words, which dropped both
+    # MITRE boilerplate (CVE-2024-41997) and vendor-prefixed subjects
+    # (CVE-2026-15146 "GNU Wget ..."): terminal false negatives on the keyword
+    # path, where no CPE query sits underneath. Accepting anywhere in the
+    # sentence re-admitted the object-of-use noise (wget@99.99.0 picked up
+    # four IoT-vendor records). This is the narrowest rule that keeps every
+    # pinned case on the right side.
     first_sentence = (
         desc.split(". ")[0].split(" is ")[0].split(" before ")[0].split(" through ")[0].strip()
-    )
-    sentence_words = first_sentence.split()
+    ).lower()
+    words = first_sentence.split()
     term_word_count = len(matched_term.split())
-    first_chunk = " ".join(sentence_words[:term_word_count]).lower()
+    # subject position: within the first (term words + 1) words, so one
+    # vendor/brand word may precede the product.
+    head = " ".join(words[: term_word_count + 1])
     matched_nodash = matched_term.replace("-", "")
     matched_re = re.compile(r"(?<![a-z0-9\-])" + re.escape(matched_term) + r"(?![a-z0-9\-])")
     matched_nodash_re = re.compile(r"(?<![a-z0-9])" + re.escape(matched_nodash) + r"(?![a-z0-9])")
-    return (
-        first_chunk in (matched_term, matched_nodash)
-        or bool(matched_re.search(first_chunk))
-        or bool(matched_nodash_re.search(first_chunk))
+    if matched_re.search(head) or matched_nodash_re.search(head):
+        return True
+    # "in [the] [version(s) of] <product>" — the product is what the issue is in.
+    in_re = re.compile(
+        r"\bin (?:the )?(?:versions? of )?(?:the )?"
+        + "(?:"
+        + re.escape(matched_term)
+        + "|"
+        + re.escape(matched_nodash)
+        + ")"
+        + r"(?![a-z0-9\-])"
     )
+    return bool(in_re.search(first_sentence))
 
 
 def _nvd_cve_to_finding(vuln, ecosystem, version, match_terms, require_desc_match, products=()):
@@ -869,6 +971,23 @@ def _nvd_cve_to_finding(vuln, ecosystem, version, match_terms, require_desc_matc
     if has_any_cpe and not relevant_cpes:
         return None
 
+    # Keyword path only: the record's own CPE list is NVD's authoritative
+    # statement of what is affected. When it exists and nothing in it names
+    # our product — exactly or as a token of a compound (node.js,
+    # openldap-servers, bibtex-ruby) — the CVE is about something else, no
+    # matter how the prose opens. php 8.5.9 was blocked on five 2003/2004
+    # "PHP remote file inclusion in <some PHP app>" records whose CPEs name
+    # pmachine and ezcontents; ruby on ruby-saml records whose CPEs name
+    # omniauth_saml. CPE-matched results never reach this branch, and records
+    # with no CPE data at all are untouched (nothing to reason from).
+    if (
+        require_desc_match
+        and has_any_cpe
+        and products
+        and not _cpe_data_names_product(cve, products)
+    ):
+        return None
+
     if version:
         if relevant_cpes and not _cpe_version_affected(version, relevant_cpes):
             return None
@@ -881,6 +1000,11 @@ def _nvd_cve_to_finding(vuln, ecosystem, version, match_terms, require_desc_matc
         "severity": severity,
         "score": score,
         "summary": desc[:200],
+        # False when NVD has no applicability data for the record yet (typically
+        # "Awaiting Analysis") and the text names no version bound: the CVE is
+        # reported against every version because nothing says it is fixed, not
+        # because this version is known to be affected.
+        "scoped": bool(relevant_cpes),
     }
 
 
@@ -919,22 +1043,44 @@ def query_nvd(package_name, ecosystem, version=None):
     search_name = formula
     match_terms = [formula.lower()]
     if ecosystem == "brew" and package_name in CASK_NVD_KEYWORDS:
+        # A curated mapping is authoritative for the description filter too.
+        # The slug stays as a secondary term only when it is a compound
+        # ("claude-code", "brave-browser") that could appear verbatim in a
+        # description. A bare single-word slug is exactly the ambiguous token
+        # the mapping exists to replace: "warp" would re-admit "Cloudflare WARP
+        # client ..." for the Warp terminal.
         mapped_keyword = CASK_NVD_KEYWORDS[package_name]
         search_name = mapped_keyword
-        match_terms = [mapped_keyword.lower(), package_name.lower()]
+        match_terms = [mapped_keyword.lower()]
+        if "-" in package_name:
+            match_terms.append(package_name.lower())
 
     products = _nvd_cpe_products(package_name, ecosystem)
+
+    # A verified (vendor, product) makes the CPE query authoritative: the
+    # vendor is pinned (no `*:python` → VS Code extension surprises) and zero
+    # results means "NVD lists no CVE for this version" — so the keyword
+    # fallback, built for products NVD has no CPE for, is skipped. For `php`,
+    # `ruby`, `node`, `certifi` that fallback is what produced the
+    # 1,000-record overflow and the 2003-era blocks on other PHP software.
+    verified = _formula_cpe_lookup(formula) if ecosystem == "brew" else None
+    if verified:
+        vendor, product = verified
+        products = [product]
+        cpe_candidates = [(vendor, product)]
+    else:
+        cpe_candidates = [("*", p) for p in products]
 
     try:
         records = []
         matched_via_cpe = False
         truncated = False
 
-        for product in products:
+        for vendor, product in cpe_candidates:
             if version:
-                vm = f"cpe:2.3:a:*:{product}:{version}:*:*:*:*:*:*:*"
+                vm = f"cpe:2.3:a:{vendor}:{product}:{version}:*:*:*:*:*:*:*"
             else:
-                vm = f"cpe:2.3:a:*:{product}"
+                vm = f"cpe:2.3:a:{vendor}:{product}"
             params = f"virtualMatchString={urllib.parse.quote(vm)}"
             try:
                 records, total, truncated = _nvd_fetch(params)
@@ -949,7 +1095,22 @@ def query_nvd(package_name, ecosystem, version=None):
                 matched_via_cpe = True
                 break
 
-        if not matched_via_cpe:
+        unanalysed = []
+        if verified:
+            # The CPE answer is authoritative for every record NVD has
+            # analysed. It cannot see a record NVD has NOT analysed yet
+            # ("Received" / "Awaiting Analysis": no CPE for days to weeks after
+            # publication) — and on the keyword path that is exactly what the
+            # full search would have found, buried in thousands of records
+            # about other software. Sweep only the recent publication window
+            # (NVD caps it at 120 days) and keep only records that still have
+            # no CPE data: a bounded result set, fresh CVEs still caught.
+            unanalysed = _nvd_recent_unanalysed(search_name)
+        if not matched_via_cpe and verified:
+            # Authoritative answer: NVD knows this product and lists nothing
+            # for this version. Nothing to fall back to.
+            records = []
+        elif not matched_via_cpe:
             # No CPE for this product+version. Fall back to keyword search.
             # The <4-character guard that used to sit here skipped the query
             # outright for xz, git, vim, php and zsh — for `brew`, where NVD is
@@ -969,6 +1130,14 @@ def query_nvd(package_name, ecosystem, version=None):
                 products=products,
             )
             if finding is not None:
+                findings.append(finding)
+
+        seen_ids = {f["id"] for f in findings}
+        for vuln in unanalysed:
+            finding = _nvd_cve_to_finding(
+                vuln, ecosystem, version, match_terms, require_desc_match=True, products=products
+            )
+            if finding is not None and finding["id"] not in seen_ids:
                 findings.append(finding)
 
         if truncated:
@@ -1128,6 +1297,10 @@ def main():
                 "sources_ok": 0,
                 "sources_total": len(applicable),
                 "sources_failed": failed_sources,
+                # Why each source failed, for the wrapper's [skip] line. A 404,
+                # a truncated read, a throttle and a 1,000-record overflow used
+                # to print identically as "check failed".
+                "failure_reasons": [f"{e['source']}: {e['summary']}" for e in errors],
                 "rate_limited": rate_limited,
                 "vulnerabilities": [],
             },

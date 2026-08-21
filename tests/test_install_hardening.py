@@ -23,7 +23,12 @@ from pathlib import Path
 REPO = Path(__file__).parent.parent
 SAFE_UPGRADE = REPO / "brew-safe-upgrade"
 SAFE_UPDATE = REPO / "brew-safe-update"
-HELPERS = ["dependency_security_check.py", "bottle_resolver.py", "cask_nvd_map.py"]
+HELPERS = [
+    "dependency_security_check.py",
+    "bottle_resolver.py",
+    "cask_nvd_map.py",
+    "formula_cpe_map.py",
+]
 
 
 def _install_script(dst_dir: Path, *, with_helpers: bool = True, version: str = "9.9.9") -> Path:
@@ -103,6 +108,7 @@ def _make_full_source(src: Path):
         "dependency_security_check.py",
         "bottle_resolver.py",
         "cask_nvd_map.py",
+        "formula_cpe_map.py",
     ):
         (src / name).write_text(f"# latest {name}\n")
     (src / "VERSION").write_text("9.9.9\n")
@@ -116,6 +122,7 @@ def _make_full_source(src: Path):
         "brew-safe-update",
         "brew-safe-upgrade",
         "cask_nvd_map.py",
+        "formula_cpe_map.py",
         "dependency_security_check.py",
     ]
     lines = [f"{hashlib.sha256((src / n).read_bytes()).hexdigest()}  {n}\n" for n in names]

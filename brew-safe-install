@@ -81,7 +81,7 @@ print_version() {
         *) echo "install route: script ($SCRIPT_DIR)" ;;
     esac
     local missing=""
-    for h in dependency_security_check.py bottle_resolver.py cask_nvd_map.py; do
+    for h in dependency_security_check.py bottle_resolver.py cask_nvd_map.py formula_cpe_map.py; do
         [ -f "$SCRIPT_DIR/$h" ] || missing="$missing $h"
     done
     if [ -n "$missing" ]; then
@@ -232,6 +232,19 @@ fi
 # $GITHUB_TOKEN, then an authenticated `gh` CLI. Empty when none are available
 # (requests stay anonymous and still work, just rate-limited). Resolved here,
 # before the per-package loop, so `gh auth token` runs at most once.
+# First failure reason from a scanner verdict ($1), or nothing — so a [skip]
+# line says WHICH failure (404 / truncated read / throttle / record overflow).
+first_failure_reason() {
+    echo "$1" | python3 -c "
+import sys, json
+try:
+    r = json.load(sys.stdin).get('failure_reasons') or []
+    print(r[0][:120] if r else '')
+except Exception:
+    print('')
+" 2>/dev/null || true
+}
+
 resolve_gh_token() {
     if [ -n "${GH_TOKEN:-}" ]; then
         printf '%s' "$GH_TOKEN"
@@ -277,13 +290,32 @@ fetch_pkg_age() {
             url="https://api.github.com/repos/Homebrew/homebrew-cask/commits?path=Casks/${first}/${name}.rb&per_page=1"
             ;;
         tap)
-            # user/tap/name -> repo <user>/homebrew-<tap>, canonical Formula/<name>.rb layout.
-            # Non-standard tap layouts resolve to [] -> unknown -> held (fail closed).
+            # user/tap/name -> repo <user>/homebrew-<tap>. The formula's path
+            # INSIDE that repo is whatever the tap chose: Homebrew permits
+            # Formula/, HomebrewFormula/ and the repo root (shopify/homebrew-
+            # shopify keeps shopify-cli.rb at the root). Guessing Formula/
+            # returned [] for such taps -> "age could not be verified" on every
+            # run. brew already knows the real path because the tap is cloned
+            # locally: `brew formula user/tap/name` prints it. Strip the local
+            # prefix through Taps/<user>/homebrew-<tap>/ and what remains is the
+            # repo-relative path — derived from brew's OUTPUT, never rebuilt
+            # from the spec, because the prefix differs per machine
+            # (/usr/local vs /opt/homebrew). Canonical layout stays the fallback
+            # when brew cannot answer (no local clone); an unknown layout still
+            # resolves to [] -> unknown -> held (fail closed).
             user="${name%%/*}"
             tap="${name#*/}"
             tap="${tap%%/*}"
             token="${name##*/}"
-            url="https://api.github.com/repos/${user}/homebrew-${tap}/commits?path=Formula/${token}.rb&per_page=1"
+            rel="Formula/${token}.rb"
+            if fpath=$(brew formula "$name" 2>/dev/null) && [ -n "$fpath" ]; then
+                case "$fpath" in
+                    */Taps/"${user}"/homebrew-"${tap}"/*)
+                        rel="${fpath#*/Taps/"${user}"/homebrew-"${tap}"/}"
+                        ;;
+                esac
+            fi
+            url="https://api.github.com/repos/${user}/homebrew-${tap}/commits?path=${rel}&per_page=1"
             ;;
         *)
             # homebrew-core shards by first letter, EXCEPT formulae whose name
@@ -654,7 +686,8 @@ except Exception:
         echo "$RESULT" | grep -E 'CRITICAL|HIGH|MEDIUM' | head -3 || true
         BLOCKED_PKGS="$BLOCKED_PKGS $pkg"
     else
-        echo "  [skip] $pkg $VERSION -- check failed, will not install"
+        _why=$(first_failure_reason "$RESULT")
+        echo "  [skip] $pkg $VERSION -- check failed${_why:+ ($_why)}, will not install"
         SKIPPED_PKGS="$SKIPPED_PKGS $pkg"
         if echo "$RESULT" | grep -q '"rate_limited": *true'; then
             RATE_LIMIT_SEEN=true
@@ -867,7 +900,8 @@ except Exception:
                 DEP_BLOCKED_VULN="$DEP_BLOCKED_VULN $DEP"
                 DEP_BLOCKED_VULN_REASONS="${DEP_BLOCKED_VULN_REASONS}    $DEP $DEP_VER: ${SUMMARY:-vulnerabilities reported}"$'\n'
             else
-                echo "    [skip-dep] $DEP $DEP_VER -- check failed (network or DB error)"
+                _why=$(first_failure_reason "$DEP_RESULT")
+                echo "    [skip-dep] $DEP $DEP_VER -- check failed (${_why:-network or DB error})"
                 DEP_SKIPPED="$DEP_SKIPPED $DEP"
                 if echo "$DEP_RESULT" | grep -q '"rate_limited": *true'; then
                     RATE_LIMIT_SEEN=true
@@ -877,14 +911,17 @@ except Exception:
 
         if [ -n "$DEP_SKIPPED" ]; then
             echo ""
-            echo "  Note: dep checks failed for:$DEP_SKIPPED"
-            echo "  These will install unchecked. Re-run later or use --no-deps to suppress."
+            echo "  Note: dep checks could not be completed for:$DEP_SKIPPED"
+            echo "  An unverifiable dependency is treated like a flagged one."
+            echo "  Re-run later, or use --no-deps to skip dependency checks."
             note_rate_limit
         fi
 
-        # Distinct sections for vulnerable vs. too-fresh: they are different
-        # risk signals and the previous combined header conflated them.
-        if [ -n "$DEP_BLOCKED_VULN" ] || [ -n "$DEP_BLOCKED_HOLD" ]; then
+        # Distinct sections for vulnerable vs. too-fresh vs. unverifiable: they
+        # are different risk signals, and all three require the confirmation —
+        # a dependency the scanner could not answer for used to install
+        # unchecked under a "clean" parent.
+        if [ -n "$DEP_BLOCKED_VULN" ] || [ -n "$DEP_BLOCKED_HOLD" ] || [ -n "$DEP_SKIPPED" ]; then
             echo ""
             if [ -n "$DEP_BLOCKED_VULN" ]; then
                 echo "WARNING: incoming dependencies have known CVEs:"
@@ -893,6 +930,9 @@ except Exception:
             if [ -n "$DEP_BLOCKED_HOLD" ]; then
                 echo "Incoming dependencies are below --min-age:"
                 printf "%s" "$DEP_BLOCKED_HOLD_REASONS"
+            fi
+            if [ -n "$DEP_SKIPPED" ]; then
+                echo "Incoming dependencies could not be checked:$DEP_SKIPPED"
             fi
             echo "Proceeding will let brew install them anyway."
             read -rp "Continue install of $CLEAN_PKGS? [y/N] " DEP_CONFIRM

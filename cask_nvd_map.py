@@ -58,6 +58,10 @@ OVERRIDES = {
     "vscodium": "Visual Studio Code",
     "telegram": "Telegram Desktop",
     "onedrive": "Microsoft OneDrive",
+    # brew name[0] is "Warp", which NVD resolves to cloudflare:warp (the WARP VPN
+    # client, five Windows CVEs). NVD's own wording for the terminal is "Warp
+    # Terminal" (CVE-2024-41997), so the override is precise in both directions.
+    "warp": "Warp Terminal",
 }
 
 CASK_NVD_KEYWORDS = {
@@ -112,6 +116,7 @@ CASK_NVD_KEYWORDS = {
     "vlc": "VLC media player",
     "vmware-fusion": "VMware Fusion",
     "vscodium": "Visual Studio Code",
+    "warp": "Warp Terminal",
     "webstorm": "WebStorm",
     "whatsapp": "WhatsApp",
     "zoom": "Zoom",

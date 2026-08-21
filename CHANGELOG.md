@@ -8,6 +8,29 @@ The project is pre-1.0; expect minor breaking changes between 0.x releases until
 
 ## [Unreleased]
 
+### Fixed
+
+- **Keyword-path relevance now reads the sentence, not just its first words.** The heuristic required the package to be the first words of the description's first sentence, which silently dropped MITRE boilerplate ("An issue was discovered in version of Warp Terminal …", CVE-2024-41997) *and* vendor-prefixed subjects ("GNU Wget does not validate …", CVE-2026-15146). On the keyword path — the only path for casks, tap formulae and any product whose CPE query answers nothing — there is no CPE query underneath, so each rejection was a terminal false negative: a real CVE reported as clean. The product now counts when it is the subject (optionally behind one vendor word) or follows "in"; mentions as an object of use ("Applications that use Wget …", "DEEBOT … use wget command") and in later sentences stay rejected.
+
+- **Verified CPE map for generic-name formulae (`formula_cpe_map.py`).** `php`, `ruby`, `node`, `python`, `certifi`, `git`, `curl`, `openssl`, `sqlite`, `glib`, `imagemagick`, `openldap`, `libssh2`, `hugo`, `pandoc` now query NVD with their verified `vendor:product` (each checked against NVD's CPE dictionary), and that answer is authoritative: zero results means NVD lists no CVE for the version, and the keyword fallback — built for products NVD has no CPE for — is not run. That fallback is what produced the 1,000-record overflow ("coverage incomplete", a permanent hold) on `certifi` and `node`, the 2003-era blocks on `php`, and the VS Code Python-extension CVEs on `python`. Live after the change: php 8.5.9, ruby 4.0.6_1, certifi 2026.7.22, node 26.7.0, imagemagick 7.1.2-29, openldap 2.7.0, glib 2.88.3 → clean; python@3.12 3.12.14 → genuine CPython CVEs only. To keep brand-new CVEs visible while NVD has not assigned a CPE yet, a bounded sweep of the last 120 days keeps keyword records that carry no CPE data — unless more than 10 such records mention the name, in which case the name is too generic for text attribution and the scanner says so (`php`: 603 in one window). Versioned formulae resolve through the base entry. The new module ships with the other helpers.
+
+- **On the keyword path, a record's own CPE data decides what it is about.** php 8.5.9 was blocked on five 2003/2004 "PHP remote file inclusion in <some PHP app>" records whose CPEs name pMachine and ezContents; ruby 4.0.6 on ruby-saml records whose CPEs name omniauth_saml. NVD's CPE list is the authoritative applicability statement: when it exists and nothing in it names our product (exactly, or as a token of a compound like `node.js`), the CVE is about something else regardless of how the prose opens. Records with no CPE data at all are untouched.
+
+- **Findings carry a `scoped` flag.** False when NVD has no applicability data for the record yet and the text names no version bound — the CVE is reported against every version because nothing says it is fixed, not because this version is known affected.
+
+- **A dependency whose check could not be completed no longer rides in under a clean parent.** The dependency pass printed "These will upgrade unchecked" for a dep the scanner could not answer for, and left its dependents in "Unaffected and safe to upgrade now" — while the main pass fails closed for the very same package. An unverifiable dependency is now a flagged dependency: it taints its dependents, gets its own line in the confirmation, and under `[s]` / `--skip-unsafe` it is `brew pin`-ed like a vulnerable or too-fresh one. Same contract in `brew safe-install`. Seen on a live 50-package run, where `node` failed its check and `[skip]`-ed in the main pass but was waved through as an incoming dependency.
+
+- **`[skip]` lines now say why.** "check failed" covered a 404, a truncated read, a rate limit and a 1,000-record overflow identically — which is how three distinct bugs looked like one. The scanner's unknown verdict now carries `failure_reasons`, and `[skip]` / `[skip-dep]` print the first one.
+
+### Changed
+
+- **CVE detail lines are sorted by CVSS score, and a list longer than five ends with "… and N more (M total)".** They used to be the first five in the scanner's order, which follows NVD's — and NVD's order is not stable run to run, so a package with more than five CVEs showed a different five each time and a vanished id read as "fixed".
+- **Each phase reports its elapsed time** (age check, security checks, dependency checks), so a long run shows where the time went.
+
+- **Tap formulae outside the `Formula/` layout get a real release date.** The age check asked GitHub for `Formula/<name>.rb` in the tap repo; Homebrew also permits `HomebrewFormula/` and the repo root (`shopify/homebrew-shopify` keeps `shopify-cli.rb` at the root), and for those the query returned nothing → "age could not be verified" on every run. brew already knows the real path because the tap is cloned locally: `brew formula user/tap/name` prints it, and everything after `Taps/<user>/homebrew-<tap>/` is the repo-relative path. No extra GitHub call, no guessing among layouts; the canonical path remains the fallback when brew cannot answer. Live: `shopify/shopify/shopify-cli 4.7.0` → released 2026-08-19.
+
+- **The `warp` cask no longer inherits Cloudflare WARP's CVEs.** Brew's name for the Warp terminal cask is "Warp", which NVD resolves to `cloudflare:warp` — the WARP VPN client — so the terminal carried five Windows-only CVEs (CVE-2022-2225, CVE-2022-4428, CVE-2023-0652, CVE-2023-1412, CVE-2023-1862) on both the installed and the candidate version: the freshness hold was waived *because* the installed build was "vulnerable", then the upgrade was blocked because the candidate carried the same list, and no future release could ever pass. The cask map now sends "Warp Terminal", NVD's own wording for the product (CVE-2024-41997).
+
 ## [0.3.2] — 2026-08-21
 
 ### Fixed

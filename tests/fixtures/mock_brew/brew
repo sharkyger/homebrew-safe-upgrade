@@ -49,6 +49,17 @@ case "$1" in
         F="$DIR/deps_${NAME_NORM}.txt"
         if [ -f "$F" ]; then cat "$F"; fi
         ;;
+    formula)
+        # `brew formula <user/tap/name>` → absolute path of the formula file in
+        # the local tap clone. Canned in formula_<name with / → _>.txt; absent
+        # means brew cannot resolve it (exit 1), and the wrapper falls back to
+        # the canonical Formula/<name>.rb layout.
+        for arg in "$@"; do :; done
+        NAME="$arg"
+        NAME_NORM="$(printf '%s' "$NAME" | tr '/' '_')"
+        F="$DIR/formula_${NAME_NORM}.txt"
+        if [ -f "$F" ]; then cat "$F"; else exit 1; fi
+        ;;
     list)
         # `brew list --versions --formula <name>` → installed versions
         for arg in "$@"; do :; done

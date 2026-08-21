@@ -31,7 +31,7 @@
       "ecosystem": "brew",
       "package": "wget",
       "version": "99.99.0",
-      "reason": "Unreleased version, above every published wget CVE range — asserts the version filter EXCLUDES out-of-range CVEs. Cannot decay: a future CVE cannot bound a version that does not exist yet."
+      "reason": "Unreleased version, above every published wget CVE range — asserts the version filter EXCLUDES out-of-range CVEs. A future CVE cannot bound a version that does not exist yet; an UNSCOPED record (Awaiting Analysis, no CPE, no version in the text — CVE-2026-15146 since 2026-07) legitimately applies to every version and is tolerated by the test."
     }
   ]
 }

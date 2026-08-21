@@ -24,6 +24,7 @@ FILES=(
     brew-safe-update
     brew-safe-upgrade
     cask_nvd_map.py
+    formula_cpe_map.py
     dependency_security_check.py
 )
 

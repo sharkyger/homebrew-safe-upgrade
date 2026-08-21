@@ -101,23 +101,23 @@ def test_versioned_formula_resolves_via_base_cpe_when_literal_would_404():
     body = json.loads(
         _nvd_response(
             "CVE-2025-0001",
-            "Python 3.12.14 has an issue in tarfile.",
-            ["cpe:2.3:a:python_software_foundation:python:3.12.14:*:*:*:*:*:*:*"],
+            "Lua 5.4.7 has an issue in the string library.",
+            ["cpe:2.3:a:lua:lua:5.4.7:*:*:*:*:*:*:*"],
         )
     )
     body["totalResults"] = 1
     seen, server = _nvd_server(
         {
-            "virtualMatchString=cpe:2.3:a:*:python@3.12": _http_error(404),
-            "cpe:2.3:a:*:python:3.12.14": json.dumps(body).encode(),
+            "virtualMatchString=cpe:2.3:a:*:lua@5.4": _http_error(404),
+            "cpe:2.3:a:*:lua:5.4.7": json.dumps(body).encode(),
         }
     )
     with patch.object(dsc, "_urlopen", side_effect=server):
-        findings = dsc.query_nvd("python@3.12", "brew", version="3.12.14")
+        findings = dsc.query_nvd("lua@5.4", "brew", version="5.4.7")
 
     ids = {f["id"] for f in findings}
     assert ids == {"CVE-2025-0001"}, findings
-    assert not any("python@3.12" in u for u in seen), seen
+    assert not any("lua@5.4" in u for u in seen), seen
 
 
 def test_keyword_fallback_is_not_widened_to_the_base_name():
@@ -126,11 +126,11 @@ def test_keyword_fallback_is_not_widened_to_the_base_name():
     formula name, never the '@'-stripped base."""
     seen, server = _nvd_server({})
     with patch.object(dsc, "_urlopen", side_effect=server):
-        dsc.query_nvd("python@3.12", "brew", version="3.12.14")
+        dsc.query_nvd("lua@5.4", "brew", version="5.4.7")
 
     kw = [u for u in seen if "keywordSearch=" in u]
     assert kw, seen
-    assert all("keywordSearch=python@3.12&" in u for u in kw), kw
+    assert all("keywordSearch=lua@5.4&" in u for u in kw), kw
 
 
 def test_a_404_on_one_cpe_candidate_does_not_abort_the_query():
@@ -225,7 +225,7 @@ def test_genuine_cpython_cpe_still_flags():
         )
     )
     body["totalResults"] = 1
-    seen, server = _nvd_server({"cpe:2.3:a:*:python:3.12.14": json.dumps(body).encode()})
+    seen, server = _nvd_server({"cpe:2.3:a:python:python:3.12.14": json.dumps(body).encode()})
     with patch.object(dsc, "_urlopen", side_effect=server):
         findings = dsc.query_nvd("python@3.12", "brew", version="3.12.14")
 
@@ -239,19 +239,19 @@ def test_keyword_result_naming_only_the_bare_product_is_rejected():
     body = json.loads(
         _nvd_response(
             "CVE-2020-1192",
-            "Python extension for Visual Studio Code allows remote code execution "
-            "when it loads a Jupyter notebook file.",
+            "Lua extension for Visual Studio Code allows remote code execution "
+            "when it loads a workspace file.",
             [],
         )
     )
     body["totalResults"] = 1
-    seen, server = _nvd_server({"keywordSearch=python@3.12": json.dumps(body).encode()})
+    seen, server = _nvd_server({"keywordSearch=lua@5.4": json.dumps(body).encode()})
     # No version: without CPE data a versioned lookup is dropped before the
     # description filter runs, which would mask what this test is about.
     with patch.object(dsc, "_urlopen", side_effect=server):
-        findings = dsc.query_nvd("python@3.12", "brew", version=None)
+        findings = dsc.query_nvd("lua@5.4", "brew", version=None)
 
     # The keyword fallback must have been exercised — otherwise an empty result
     # would prove nothing about the description filter.
-    assert any("keywordSearch=python@3.12&" in u for u in seen), seen
+    assert any("keywordSearch=lua@5.4&" in u for u in seen), seen
     assert findings == [], findings

@@ -182,7 +182,7 @@ Continue upgrade?
   [N] no  — cancel the whole upgrade (default)
 ```
 
-`[s]` upgrades the packages that don't touch the flagged dependency and holds back the ones that do. Use `--skip-unsafe` to take that branch non-interactively:
+`[s]` upgrades the packages that don't touch the flagged dependency and holds back the ones that do. A dependency is *flagged* when it has known CVEs, when it is younger than `--min-age`, **or when its check could not be completed** — an unverifiable dependency is an unknown one level down, not a pass, so it holds its dependents exactly like a vulnerable one. Use `--skip-unsafe` to take that branch non-interactively:
 
 ```
 brew safe-upgrade --skip-unsafe
@@ -313,6 +313,7 @@ If the rate limit is reached, the run **stops and reports when the limit resets*
 
 Casks **are** checked against NVD for known CVEs, but the coverage is uneven and worth being explicit about:
 
+- For a set of formulae whose bare name collides or overflows on NVD (`php`, `ruby`, `node`, `python`, `certifi`, …) the scanner ships a **verified CPE map** (`formula_cpe_map.py`, formula → NVD `vendor:product`, each checked against NVD's CPE dictionary). For a mapped formula the CPE query is authoritative — zero results means NVD lists no CVE for that version — and the keyword fallback is not run. Without it, `php` as a keyword matched thousands of records about other PHP software (a permanent "coverage incomplete" hold, or blocks on 2003-era CVEs), and `*:python` matched the VS Code Python extension. To add a formula, verify the pair first; a guessed vendor silently turns a real product into "no CVEs".
 - The scanner ships with a curated map (`cask_nvd_map.py`) of ~55 common cask slugs → canonical product names. Keywords are sourced from Homebrew's own cask metadata (`formulae.brew.sh/api/cask/<token>.json` → `name[0]`), with a small set of documented overrides where brew's name is bad for NVD search (verbose vendor prefixes, edition suffixes, or names shorter than the scanner's 4-character minimum).
 - **Mapped casks** get accurate hits — covering the browser/IDE/communication tools most people install.
 - **Unmapped casks** fall back to a naive lookup using the cask slug, which rarely matches NVD descriptions. They will usually show as clean even when CVEs exist.
@@ -582,7 +583,7 @@ replacement for it; the tap route above remains the strongest path.)
 git clone https://github.com/sharkyger/homebrew-safe-upgrade.git
 cd homebrew-safe-upgrade
 BIN="$(brew --prefix)/bin"   # /opt/homebrew/bin on Apple Silicon, /usr/local/bin on Intel
-cp brew-safe-upgrade brew-safe-install brew-safe-update dependency_security_check.py bottle_resolver.py cask_nvd_map.py VERSION "$BIN/"
+cp brew-safe-upgrade brew-safe-install brew-safe-update dependency_security_check.py bottle_resolver.py cask_nvd_map.py formula_cpe_map.py VERSION "$BIN/"
 chmod +x "$BIN"/brew-safe-upgrade "$BIN"/brew-safe-install "$BIN"/brew-safe-update
 ```
 

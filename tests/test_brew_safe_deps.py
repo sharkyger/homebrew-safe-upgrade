@@ -368,7 +368,7 @@ def test_dep_check_failure_is_surfaced_in_summary(mock_env, tmp_path):
         input_text="n\n",
     )
     assert "[skip-dep] libfoo 1.2.3" in result.stdout
-    assert "dep checks failed for:" in result.stdout
+    assert "dep checks could not be completed for:" in result.stdout
     assert "libfoo" in result.stdout
 
 
@@ -700,6 +700,65 @@ def test_dep_scan_shows_per_dependency_progress(mock_env, tmp_path):
     assert "Found 2 incoming dependency version(s) to check" in result.stdout
     assert "[1/2] checking" in result.stdout
     assert "[2/2] checking" in result.stdout
+
+
+# ------------- unverifiable dep fails CLOSED (live 50-package run, 2026-08-21) -------------
+
+
+def test_upgrade_dep_whose_check_failed_taints_its_parent(mock_env, tmp_path):
+    """
+    A dep whose CVE check FAILED used to print "These will upgrade unchecked" and
+    leave its parent in "Unaffected and safe to upgrade now" — the dependency pass
+    failed open while the main pass fails closed for the very same package. An
+    unverifiable dependency is a flagged dependency: its dependents are held and,
+    under [s], the dep is pinned like a vulnerable or too-fresh one.
+    """
+    write_outdated(
+        mock_env,
+        [
+            {"name": "curl", "installed_versions": ["8.0.0"], "current_version": "8.1.0"},
+            {"name": "jq", "installed_versions": ["1.6"], "current_version": "1.7"},
+        ],
+    )
+    write_formula_info(mock_env, "curl", "8.1.0")
+    write_formula_info(mock_env, "jq", "1.7")
+    write_formula_info(mock_env, "libfoo", "1.2.3")
+    write_deps(mock_env, "curl", ["libfoo"])
+    write_deps(mock_env, "jq", [])
+
+    stub = make_cve_stub(tmp_path, per_package={"libfoo": (2, "", "network error")})
+
+    result = run_safe_upgrade(
+        [],
+        env_extra={"DEPENDENCY_SECURITY_CHECK": str(stub)},
+        input_text="n\n",
+    )
+    out = result.stdout
+    assert "[skip-dep] libfoo 1.2.3" in out
+    assert "unchecked" not in out, out
+    assert "could not be checked" in out
+    assert "Depends on a flagged dependency: curl" in out
+    # jq does not depend on libfoo and stays upgradable; curl must not be listed safe.
+    safe_line = next((line for line in out.splitlines() if "Unaffected and safe" in line), "")
+    assert "jq" in safe_line, out
+    assert " curl" not in safe_line, out
+
+
+def test_install_dep_whose_check_failed_taints_its_parent(mock_env, tmp_path):
+    """Same contract for brew safe-install."""
+    write_formula_info(mock_env, "curl", "8.1.0")
+    write_formula_info(mock_env, "libfoo", "1.2.3")
+    write_deps(mock_env, "curl", ["libfoo"])
+    stub = make_cve_stub(tmp_path, per_package={"libfoo": (2, "", "network error")})
+
+    result = run_safe_install(
+        ["curl"],
+        env_extra={"DEPENDENCY_SECURITY_CHECK": str(stub)},
+        input_text="n\n",
+    )
+    assert "[skip-dep] libfoo 1.2.3" in result.stdout
+    assert "unchecked" not in result.stdout, result.stdout
+    assert "could not be checked" in result.stdout
 
 
 # ----------------------- helpers -----------------------
