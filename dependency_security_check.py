@@ -911,9 +911,10 @@ def query_nvd(package_name, ecosystem, version=None):
     # proof the CVE is about this package. Original `package_name` stays for
     # logging.
     # The keyword path gets the formula's own name (tap prefix stripped) but
-    # deliberately NOT the '@'-stripped base: bare `python` as a keyword drags
-    # in the VS Code Python-extension CVEs. Base-name matching is a CPE-path
-    # concern; here it only widens the description filter.
+    # deliberately NOT the '@'-stripped base — neither as the search term nor
+    # in the description filter: bare `python` drags in the VS Code
+    # Python-extension CVEs, whose descriptions name "Python" without ever
+    # naming python@3.12. Base-name matching is a CPE-path concern only.
     formula = _formula_name(package_name, ecosystem)
     search_name = formula
     match_terms = [formula.lower()]
@@ -921,9 +922,6 @@ def query_nvd(package_name, ecosystem, version=None):
         mapped_keyword = CASK_NVD_KEYWORDS[package_name]
         search_name = mapped_keyword
         match_terms = [mapped_keyword.lower(), package_name.lower()]
-    base_name = formula.split("@", 1)[0]
-    if base_name.lower() != formula.lower():
-        match_terms.append(base_name.lower())
 
     products = _nvd_cpe_products(package_name, ecosystem)
 

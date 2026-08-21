@@ -230,3 +230,25 @@ def test_genuine_cpython_cpe_still_flags():
         findings = dsc.query_nvd("python@3.12", "brew", version="3.12.14")
 
     assert {f["id"] for f in findings} == {"CVE-2025-0001"}
+
+
+def test_keyword_result_naming_only_the_bare_product_is_rejected():
+    """Keyword fallback for `python@3.12`: a record whose description names
+    only "Python" (the extension-shaped noise) must not be accepted via the
+    '@'-stripped base name in the description filter (CodeRabbit, PR #122)."""
+    body = json.loads(
+        _nvd_response(
+            "CVE-2020-1192",
+            "Python extension for Visual Studio Code allows remote code execution "
+            "when it loads a Jupyter notebook file.",
+            [],
+        )
+    )
+    body["totalResults"] = 1
+    seen, server = _nvd_server({"keywordSearch=python@3.12": json.dumps(body).encode()})
+    # No version: without CPE data a versioned lookup is dropped before the
+    # description filter runs, which would mask what this test is about.
+    with patch.object(dsc, "_urlopen", side_effect=server):
+        findings = dsc.query_nvd("python@3.12", "brew", version=None)
+
+    assert findings == [], findings
