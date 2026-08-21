@@ -8,6 +8,8 @@ The project is pre-1.0; expect minor breaking changes between 0.x releases until
 
 ## [Unreleased]
 
+## [0.3.3] — 2026-08-21
+
 ### Fixed
 
 - **Keyword-path relevance now reads the sentence, not just its first words.** The heuristic required the package to be the first words of the description's first sentence, which silently dropped MITRE boilerplate ("An issue was discovered in version of Warp Terminal …", CVE-2024-41997) *and* vendor-prefixed subjects ("GNU Wget does not validate …", CVE-2026-15146). On the keyword path — the only path for casks, tap formulae and any product whose CPE query answers nothing — there is no CPE query underneath, so each rejection was a terminal false negative: a real CVE reported as clean. The product now counts when it is the subject (optionally behind one vendor word) or follows "in"; mentions as an object of use ("Applications that use Wget …", "DEEBOT … use wget command") and in later sentences stay rejected.
@@ -305,7 +307,8 @@ pre-tag history by theme rather than by release. Full detail is in `git log`.
 - CodeQL, gitleaks, and dependabot wired up.
 - Community health files: issue templates (bug, false-positive, feature), discussion link from README on the open `--min-age` default question.
 
-[Unreleased]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.3.2...HEAD
+[Unreleased]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.3.3...HEAD
+[0.3.3]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.2.9...v0.3.0
