@@ -368,3 +368,28 @@ def test_warp_cask_does_not_inherit_cloudflare_warp_cves():
     # half on the bare slug "warp" NOT being a match term for a mapped cask —
     # "Cloudflare WARP client" would otherwise re-admit it.
     assert {f["id"] for f in findings} == {"CVE-2024-41997"}, findings
+
+
+def test_warp_cask_version_scheme_parses_and_clears_the_fixed_cve():
+    """Warp versions read "0.2026.08.19.08.15.stable_01". The ".stable" channel
+    marker used to be an unrecognised suffix → unparseable → every comparison
+    False → CVE-2024-41997 (fixed 2024.07.18) stuck to every later build. The
+    advisory restates its bound in Warp's own scheme — "(v0.2024.07.16.08.02)",
+    the last affected build — which is what the version filter compares."""
+    import dependency_security_check as dsc
+
+    assert dsc.parse_version("0.2026.08.19.08.15.stable_01") is not None
+    desc = (
+        "An issue was discovered in version of Warp Terminal prior to 2024.07.18 "
+        "(v0.2024.07.16.08.02). A command injection vulnerability exists."
+    )
+    assert dsc._desc_says_not_affected("0.2026.08.19.08.15.stable_01", desc)
+    assert dsc._desc_says_not_affected("0.2024.07.18.10.00.stable_01", desc)
+    assert not dsc._desc_says_not_affected("0.2024.07.16.08.02", desc)
+    assert not dsc._desc_says_not_affected("0.2024.06.01.00.00.stable_01", desc)
+    # A version in the PRIMARY bound's own scheme compares with the primary
+    # bound, never the restated one: 2024.07.17 is below the 2024.07.18 fix.
+    assert not dsc._desc_says_not_affected("2024.07.17", desc)
+    assert dsc._desc_says_not_affected("2024.07.18", desc)
+    # And a restated bound in the same scheme as the primary never widens it.
+    assert not dsc._desc_says_not_affected("1.8.5", "Foo prior to 1.9 (v1.8.2) is vulnerable.")
