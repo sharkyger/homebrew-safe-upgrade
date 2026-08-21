@@ -695,6 +695,30 @@ def _nvd_applicable_cpes(cve, ecosystem, products=()):
     return relevant_cpes, has_any_cpe
 
 
+def _cpe_data_names_product(cve, products):
+    """Does any vulnerable CPE on this record name one of `products`?
+
+    Exact product match, or the product as a token of a compound name split
+    on '.', '_' and '-' — `node` in `node.js`, `openldap` in
+    `openldap-servers`. Token matching errs toward keeping a record.
+    """
+    wanted = {p.lower() for p in products}
+    for config in cve.get("configurations", []):
+        for node in config.get("nodes", []):
+            for cpe in node.get("cpeMatch", []):
+                if not cpe.get("vulnerable", False):
+                    continue
+                parts = cpe.get("criteria", "").split(":")
+                if len(parts) < 5:
+                    continue
+                product = parts[4].lower()
+                if product in wanted:
+                    return True
+                if wanted & set(re.split(r"[._-]", product)):
+                    return True
+    return False
+
+
 def _cpe_version_affected(version, relevant_cpes):
     """Is `version` inside any vulnerable range of these CPE matches?"""
     affected = False
@@ -814,24 +838,45 @@ def _desc_names_this_package(desc, match_terms):
     if matched_term is None:
         return False
 
-    # Accept if the first sentence names this package at all. The original rule
-    # required the package to be the first words of the sentence ("the
-    # subject"), which silently rejected MITRE's boilerplate "An issue was
-    # discovered in <product> ..." and "A vulnerability in <product> ..." —
-    # CVE-2024-41997 for the Warp terminal is one such record. On the keyword
-    # path there is no CPE query underneath to catch what this drops, so a
-    # rejection here is a terminal false negative: a real CVE reported as
-    # clean, which is the one outcome a fail-closed gate exists to prevent.
-    # A term that occurs only in later sentences ("X, which bundles <term>")
-    # is still treated as noise. None of the pinned false-positive cases
-    # (tests/test_reported_false_positives.py) depend on the stricter rule.
+    # Where in the first sentence the package is named decides relevance.
+    # Real reports name the product as the SUBJECT — optionally behind one
+    # vendor word ("GNU Wget does not validate ...", "Cloudflare WARP client")
+    # — or right after "in", MITRE's boilerplate ("An issue was discovered in
+    # version of Warp Terminal ...", "A vulnerability in wget before ..."). Noise
+    # names it as an object of use: "Applications that use Wget ...", "DEEBOT
+    # PRO M1 use wget command with ...", "AVTECH ... due to the use of wget".
+    #
+    # The original rule accepted only the first words, which dropped both
+    # MITRE boilerplate (CVE-2024-41997) and vendor-prefixed subjects
+    # (CVE-2026-15146 "GNU Wget ..."): terminal false negatives on the keyword
+    # path, where no CPE query sits underneath. Accepting anywhere in the
+    # sentence re-admitted the object-of-use noise (wget@99.99.0 picked up
+    # four IoT-vendor records). This is the narrowest rule that keeps every
+    # pinned case on the right side.
     first_sentence = (
         desc.split(". ")[0].split(" is ")[0].split(" before ")[0].split(" through ")[0].strip()
     ).lower()
+    words = first_sentence.split()
+    term_word_count = len(matched_term.split())
+    # subject position: within the first (term words + 1) words, so one
+    # vendor/brand word may precede the product.
+    head = " ".join(words[: term_word_count + 1])
     matched_nodash = matched_term.replace("-", "")
     matched_re = re.compile(r"(?<![a-z0-9\-])" + re.escape(matched_term) + r"(?![a-z0-9\-])")
     matched_nodash_re = re.compile(r"(?<![a-z0-9])" + re.escape(matched_nodash) + r"(?![a-z0-9])")
-    return bool(matched_re.search(first_sentence)) or bool(matched_nodash_re.search(first_sentence))
+    if matched_re.search(head) or matched_nodash_re.search(head):
+        return True
+    # "in [the] [version(s) of] <product>" — the product is what the issue is in.
+    in_re = re.compile(
+        r"\bin (?:the )?(?:versions? of )?(?:the )?"
+        + "(?:"
+        + re.escape(matched_term)
+        + "|"
+        + re.escape(matched_nodash)
+        + ")"
+        + r"(?![a-z0-9\-])"
+    )
+    return bool(in_re.search(first_sentence))
 
 
 def _nvd_cve_to_finding(vuln, ecosystem, version, match_terms, require_desc_match, products=()):
@@ -872,6 +917,23 @@ def _nvd_cve_to_finding(vuln, ecosystem, version, match_terms, require_desc_matc
     if has_any_cpe and not relevant_cpes:
         return None
 
+    # Keyword path only: the record's own CPE list is NVD's authoritative
+    # statement of what is affected. When it exists and nothing in it names
+    # our product — exactly or as a token of a compound (node.js,
+    # openldap-servers, bibtex-ruby) — the CVE is about something else, no
+    # matter how the prose opens. php 8.5.9 was blocked on five 2003/2004
+    # "PHP remote file inclusion in <some PHP app>" records whose CPEs name
+    # pmachine and ezcontents; ruby on ruby-saml records whose CPEs name
+    # omniauth_saml. CPE-matched results never reach this branch, and records
+    # with no CPE data at all are untouched (nothing to reason from).
+    if (
+        require_desc_match
+        and has_any_cpe
+        and products
+        and not _cpe_data_names_product(cve, products)
+    ):
+        return None
+
     if version:
         if relevant_cpes and not _cpe_version_affected(version, relevant_cpes):
             return None
@@ -884,6 +946,11 @@ def _nvd_cve_to_finding(vuln, ecosystem, version, match_terms, require_desc_matc
         "severity": severity,
         "score": score,
         "summary": desc[:200],
+        # False when NVD has no applicability data for the record yet (typically
+        # "Awaiting Analysis") and the text names no version bound: the CVE is
+        # reported against every version because nothing says it is fixed, not
+        # because this version is known to be affected.
+        "scoped": bool(relevant_cpes),
     }
 
 
