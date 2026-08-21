@@ -190,4 +190,4 @@ def test_recent_sweep_that_overflows_is_treated_as_too_generic(monkeypatch, caps
     body = {"totalResults": 500, "vulnerabilities": records}
     _, findings = _run("php", "8.5.9", {"pubStartDate=": json.dumps(body).encode()})
     assert findings == [], findings
-    assert "window truncated at 500" in capsys.readouterr().err
+    assert "fetched 2 of 500 records" in capsys.readouterr().err

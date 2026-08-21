@@ -666,7 +666,9 @@ def _nvd_recent_unanalysed(search_name):
         # A window we could not even page to the end of is the same verdict,
         # stated explicitly rather than silently dropping the tail.
         count = (
-            f"{len(fresh)}+ (window truncated at {total} records)" if truncated else str(len(fresh))
+            f"{len(fresh)}+ (fetched {len(records)} of {total} records)"
+            if truncated
+            else str(len(fresh))
         )
         print(
             f"  Note: {count} unanalysed NVD records from the last "
