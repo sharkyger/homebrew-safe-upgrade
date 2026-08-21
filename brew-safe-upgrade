@@ -91,7 +91,7 @@ print_version() {
         *) echo "install route: script ($SCRIPT_DIR)" ;;
     esac
     local missing=""
-    for h in dependency_security_check.py bottle_resolver.py cask_nvd_map.py; do
+    for h in dependency_security_check.py bottle_resolver.py cask_nvd_map.py formula_cpe_map.py; do
         [ -f "$SCRIPT_DIR/$h" ] || missing="$missing $h"
     done
     if [ -n "$missing" ]; then

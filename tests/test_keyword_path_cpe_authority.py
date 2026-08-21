@@ -75,26 +75,28 @@ def test_ruby_cve_whose_cpes_name_omniauth_saml_is_rejected():
 
 
 def test_compound_product_naming_ours_is_kept():
-    """`node` vs `node.js`, `openldap` vs `openldap-servers`: the product names
-    ours as a token, so the record stays (over-block direction)."""
+    """`gdk` vs `gdk-pixbuf`, `openldap` vs `openldap-servers`: the product names
+    ours as a token, so the record stays (over-block direction). (`node` vs
+    `node.js` is the same shape but node is now CPE-mapped and never reaches
+    the keyword path.)"""
     assert _keyword_only(
-        "node",
+        "gdk",
         None,
         "CVE-2099-0001",
-        "Node.js allows an attacker to bypass permissions.",
-        ["cpe:2.3:a:nodejs:node.js:*:*:*:*:*:*:*:*"],
+        "gdk-pixbuf allows an attacker to overflow a buffer.",
+        ["cpe:2.3:a:gnome:gdk-pixbuf:*:*:*:*:*:*:*:*"],
     ) == {"CVE-2099-0001"}
 
 
 def test_record_without_any_cpe_data_is_untouched():
     """Deferred/Received records carry no CPE data — nothing to reason from."""
     assert _keyword_only(
-        "hugo",
+        "zola",
         None,
-        "CVE-2026-75926",
-        "Hugo 0.161.0 placed the Node asset pipelines behind the permission model.",
+        "CVE-2099-0003",
+        "Zola 0.19.0 placed the asset pipelines behind the permission model.",
         [],
-    ) == {"CVE-2026-75926"}
+    ) == {"CVE-2099-0003"}
 
 
 def test_record_with_own_product_cpe_is_kept():

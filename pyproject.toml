@@ -40,7 +40,7 @@ no_implicit_optional = true
 strict_equality = true
 # The scanner core + helpers ship to users; keep them type-clean. Tests are
 # exercised by pytest, not the type gate.
-files = ["dependency_security_check.py", "bottle_resolver.py", "cask_nvd_map.py"]
+files = ["dependency_security_check.py", "bottle_resolver.py", "cask_nvd_map.py", "formula_cpe_map.py"]
 
 # certifi is an OPTIONAL runtime import (guarded by try/except ImportError — the
 # scanner stays stdlib-only and falls back to the system trust store without it),

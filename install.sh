@@ -57,7 +57,7 @@ echo "Installing brew-safe-upgrade (release ${REF})..."
 if [ ! -w "$INSTALL_DIR" ]; then
     echo "Error: No write permission to $INSTALL_DIR"
     echo "Try: sudo bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/sharkyger/homebrew-safe-upgrade/main/install.sh)\""
-    echo "Or:  git clone https://github.com/sharkyger/homebrew-safe-upgrade.git && cd homebrew-safe-upgrade && sudo cp brew-safe-upgrade brew-safe-install brew-safe-update dependency_security_check.py bottle_resolver.py cask_nvd_map.py VERSION $INSTALL_DIR/"
+    echo "Or:  git clone https://github.com/sharkyger/homebrew-safe-upgrade.git && cd homebrew-safe-upgrade && sudo cp brew-safe-upgrade brew-safe-install brew-safe-update dependency_security_check.py bottle_resolver.py cask_nvd_map.py formula_cpe_map.py VERSION $INSTALL_DIR/"
     exit 1
 fi
 

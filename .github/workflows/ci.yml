@@ -125,7 +125,7 @@ jobs:
           BIN="$RUNNER_TEMP/safebin"
           mkdir -p "$BIN"
           cp brew-safe-upgrade brew-safe-install brew-safe-update \
-             dependency_security_check.py bottle_resolver.py cask_nvd_map.py VERSION "$BIN/"
+             dependency_security_check.py bottle_resolver.py cask_nvd_map.py formula_cpe_map.py VERSION "$BIN/"
           chmod +x "$BIN"/brew-safe-upgrade "$BIN"/brew-safe-install "$BIN"/brew-safe-update
           echo "--- brew-safe-upgrade --version (resolves real helpers on this arch) ---"
           out="$("$BIN/brew-safe-upgrade" --version)"
