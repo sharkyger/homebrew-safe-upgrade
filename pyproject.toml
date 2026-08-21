@@ -1,6 +1,6 @@
 [project]
 name = "homebrew-safe-upgrade"
-version = "0.3.1"
+version = "0.3.2"
 description = "Security-first brew upgrade — checks packages against NIST NVD, OSV.dev, and GitHub Advisory before upgrading"
 readme = "README.md"
 requires-python = ">=3.11"

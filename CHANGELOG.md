@@ -8,6 +8,8 @@ The project is pre-1.0; expect minor breaking changes between 0.x releases until
 
 ## [Unreleased]
 
+## [0.3.2] — 2026-08-21
+
 ### Fixed
 
 - **Tap-qualified and `@`-versioned formulae were never actually checked against NVD.** `sharkyger/tap/pip-cve-gate` and `python@3.12` went into the CPE query verbatim; `/` and `@` are not CPE characters, NVD answers HTTP 404, and that error escaped the candidate loop before the base product was tried — so every third-party tap formula and every versioned formula came back `unknown` (a fail-closed hold that no re-run could clear). The tap prefix is now stripped and only CPE-safe candidates are queried, a 404 on one candidate moves on to the next, and the keyword fallback receives the formula's own name. Found on a real 50-package run of 0.3.1.
@@ -280,7 +282,8 @@ pre-tag history by theme rather than by release. Full detail is in `git log`.
 - CodeQL, gitleaks, and dependabot wired up.
 - Community health files: issue templates (bug, false-positive, feature), discussion link from README on the open `--min-age` default question.
 
-[Unreleased]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.3.2...HEAD
+[0.3.2]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.2.9...v0.3.0
 [0.2.9]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.2.8...v0.2.9
