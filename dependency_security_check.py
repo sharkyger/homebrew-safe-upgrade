@@ -665,7 +665,9 @@ def _nvd_recent_unanalysed(search_name):
     if truncated or len(fresh) > NVD_RECENT_SWEEP_CAP:
         # A window we could not even page to the end of is the same verdict,
         # stated explicitly rather than silently dropping the tail.
-        count = f"more than {total}" if truncated else str(len(fresh))
+        count = (
+            f"{len(fresh)}+ (window truncated at {total} records)" if truncated else str(len(fresh))
+        )
         print(
             f"  Note: {count} unanalysed NVD records from the last "
             f"{NVD_RECENT_WINDOW_DAYS} days mention '{search_name}' — too generic to "
@@ -866,8 +868,18 @@ def _desc_says_not_affected(version, desc):
     )
     if end_exc and _ver_ge(version, end_exc.group(1)):
         return True  # version is at or above the fix — not affected
-    if end_exc and end_exc.group(2) and _ver_gt(version, end_exc.group(2)):
-        return True  # above the last affected build in the product's own scheme
+    if (
+        end_exc
+        and end_exc.group(2)
+        and _same_scheme(version, end_exc.group(2))
+        and not _same_scheme(version, end_exc.group(1))
+        and _ver_gt(version, end_exc.group(2))
+    ):
+        # Above the last affected build, in the product's own scheme — used
+        # only when the primary bound is NOT in our scheme. "2024.07.17"
+        # against "prior to 2024.07.18 (v0.2024.07.16...)" must compare with
+        # the primary bound and stay affected.
+        return True
 
     # Inclusive upper bound: last affected version
     end_inc = re.search(rf"\bthrough\s+{v_re}", desc, re.IGNORECASE)
@@ -881,6 +893,14 @@ def _desc_says_not_affected(version, desc):
         re.IGNORECASE,
     )
     return bool(start_inc and _ver_lt(version, start_inc.group(1)))
+
+
+def _same_scheme(a, b):
+    """Do two version strings share a leading component? A cheap proxy for
+    "same versioning scheme": Warp's cask `0.2026.08.19...` and the advisory's
+    `(v0.2024.07.16...)` both start with 0; the date-style `2024.07.18` does not."""
+    pa, pb = parse_version(a), parse_version(b)
+    return bool(pa and pb and pa._key[0][0] == pb._key[0][0])
 
 
 def _desc_names_this_package(desc, match_terms):

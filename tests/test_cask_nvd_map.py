@@ -387,3 +387,9 @@ def test_warp_cask_version_scheme_parses_and_clears_the_fixed_cve():
     assert dsc._desc_says_not_affected("0.2024.07.18.10.00.stable_01", desc)
     assert not dsc._desc_says_not_affected("0.2024.07.16.08.02", desc)
     assert not dsc._desc_says_not_affected("0.2024.06.01.00.00.stable_01", desc)
+    # A version in the PRIMARY bound's own scheme compares with the primary
+    # bound, never the restated one: 2024.07.17 is below the 2024.07.18 fix.
+    assert not dsc._desc_says_not_affected("2024.07.17", desc)
+    assert dsc._desc_says_not_affected("2024.07.18", desc)
+    # And a restated bound in the same scheme as the primary never widens it.
+    assert not dsc._desc_says_not_affected("1.8.5", "Foo prior to 1.9 (v1.8.2) is vulnerable.")
