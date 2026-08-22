@@ -905,6 +905,13 @@ def _same_scheme(a, b):
     return bool(pa and pb and pa._key[0][0] == pb._key[0][0])
 
 
+# How many words may precede the sentence-leading "in" for it to still count as
+# boilerplate: "An issue was discovered in" / "Multiple issues were found in"
+# put four words before it, "A command injection vulnerability exists in" five.
+# An "in" further down the sentence is a later clause.
+_IN_HEAD_MAX_WORDS = 5
+
+
 def _desc_names_this_package(desc, match_terms):
     """Keyword-path relevance heuristic: is the CVE really about this package?
 
@@ -959,9 +966,21 @@ def _desc_names_this_package(desc, match_terms):
     matched_nodash_re = re.compile(r"(?<![a-z0-9])" + re.escape(matched_nodash) + r"(?![a-z0-9])")
     if matched_re.search(head) or matched_nodash_re.search(head):
         return True
-    # "in [the] [version(s) of] <product>" — the product is what the issue is in.
+    # "in [the] [version(s) of] <product>" — the product is what the issue is
+    # in. Only the SENTENCE-LEADING "in" qualifies: the first "in" of the
+    # sentence, and it must sit in the boilerplate head ("In <product> ...",
+    # "A vulnerability in <product>", "An issue was discovered in <product>").
+    # Any later "in" names a component, a context or an environment, not the
+    # affected product: CVE-2026-14586 is an Unbound bug — "In NLnet Labs
+    # Unbound 1.22.0 ..., in DNS-over-QUIC environments, ..., an assertion in
+    # libngtcp2 ..." — and the old rule (any "in <product>") flagged libngtcp2.
+    first_in = re.search(r"\bin\b", first_sentence)
+    if first_in is None:
+        return False
+    if len(first_sentence[: first_in.start()].split()) > _IN_HEAD_MAX_WORDS:
+        return False
     in_re = re.compile(
-        r"\bin (?:the )?(?:versions? of )?(?:the )?"
+        r"in (?:the )?(?:versions? of )?(?:the )?"
         + "(?:"
         + re.escape(matched_term)
         + "|"
@@ -969,7 +988,7 @@ def _desc_names_this_package(desc, match_terms):
         + ")"
         + r"(?![a-z0-9\-])"
     )
-    return bool(in_re.search(first_sentence))
+    return bool(in_re.match(first_sentence, first_in.start()))
 
 
 def _nvd_cve_to_finding(vuln, ecosystem, version, match_terms, require_desc_match, products=()):

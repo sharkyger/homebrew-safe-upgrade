@@ -103,3 +103,31 @@ def test_two_leading_words_do_not_count_as_subject():
 def test_boundary_matching_is_preserved():
     """claude-code must not match claude-code-router."""
     assert not names("claude-code-router before 2.0 leaks tokens.", ["claude-code"])
+
+
+@pytest.mark.parametrize(
+    "desc",
+    [
+        # CVE-2026-14586, verbatim opening — an Unbound bug; the old rule matched
+        # the THIRD "in" ("an assertion in libngtcp2") and flagged libngtcp2.
+        (
+            "In NLnet Labs Unbound 1.22.0 up to and including 1.25.1, in DNS-over-QUIC "
+            "environments, with high concurrency and under pressure, an assertion in "
+            "libngtcp2 about monotonic timestamps could trigger and result in server "
+            "termination and thus denial of service."
+        ),
+        "A flaw in Foo Proxy allows a crash in libngtcp2 when handling a QUIC frame.",
+        "Foo Proxy mishandles a crafted QUIC packet received from a peer in libngtcp2.",
+    ],
+)
+def test_only_the_sentence_leading_in_counts(desc):
+    assert not names(desc, ["libngtcp2"])
+
+
+def test_sentence_leading_in_naming_the_product_is_still_accepted():
+    """The same shape, with the product in the leading position, stays a hit."""
+    assert names(
+        "In libngtcp2 before 1.15.0, in high-concurrency environments, an assertion "
+        "in the timestamp check could trigger.",
+        ["libngtcp2"],
+    )
