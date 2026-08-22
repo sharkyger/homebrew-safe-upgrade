@@ -1354,20 +1354,82 @@ if [ "$CHECK_DEPS" = true ] && [ -n "$CLEAN_PKGS" ]; then
     # without that we can only accept or reject the batch as a whole (#98).
     # `brew deps` is recursive by default, so this records the full closure.
     DEP_OWNERS_ARR=()
-    for pkg in $CLEAN_PKGS; do
-        DEPS_PARSED_ARR=()
-        while IFS= read -r line; do
-            [ -n "$line" ] && DEPS_PARSED_ARR+=("$line")
-        done < <(brew deps "$pkg" 2>/dev/null || true)
 
-        for dep in ${DEPS_PARSED_ARR[@]+"${DEPS_PARSED_ARR[@]}"}; do
-            [ -z "$dep" ] && continue
+    # Graph walk, BATCHED. The first version ran `brew deps` per package and
+    # then `brew info` + `brew list` per (package, dep) PAIR — closures overlap
+    # heavily, so a 34-package batch made several hundred brew invocations
+    # (each a Ruby start-up) to find two incoming deps: 378 s on the 2026-08-22
+    # acceptance run, ~67x the cost of actually checking them. Now: one
+    # `brew deps --for-each` for the whole batch, one `brew info` and one
+    # `brew list` for the UNIQUE dep set, and the decision loop runs once per
+    # unique dep. bash 3.2 has no associative arrays, so the lookups are
+    # newline tables ("name value") read with awk. Each batched call falls
+    # back to the per-item call if brew rejects the batch (one unknown name
+    # fails the whole `brew info` invocation), so the result is the same set
+    # the per-pair walk produced — only cheaper.
+    _graph_start=$SECONDS
+    # "<pkg> <dep>" lines, one per edge.
+    DEP_EDGES=""
+    # shellcheck disable=SC2086
+    _for_each=$(brew deps --for-each $CLEAN_PKGS 2>/dev/null) || _for_each=""
+    if [ -n "$_for_each" ]; then
+        DEP_EDGES=$(printf '%s\n' "$_for_each" | awk -F': ' 'NF>=2 { n=split($2, d, " "); for (i=1;i<=n;i++) if (d[i] != "") print $1, d[i] }')
+    else
+        for pkg in $CLEAN_PKGS; do
+            while IFS= read -r line; do
+                [ -n "$line" ] && DEP_EDGES="${DEP_EDGES}${pkg} ${line}"$'\n'
+            done < <(brew deps "$pkg" 2>/dev/null || true)
+        done
+    fi
+    UNIQUE_DEPS=$(printf '%s\n' "$DEP_EDGES" | awk 'NF==2 {print $2}' | sort -u)
 
-            if [[ ! "$dep" =~ $DEP_NAME_RE ]]; then
-                echo "    [skip-dep] $dep -- invalid name, refusing to query"
-                continue
-            fi
+    # Name-validate BEFORE anything from the graph reaches a brew command line.
+    QUERY_DEPS=""
+    for dep in $UNIQUE_DEPS; do
+        if [[ ! "$dep" =~ $DEP_NAME_RE ]]; then
+            echo "    [skip-dep] $dep -- invalid name, refusing to query"
+            continue
+        fi
+        QUERY_DEPS="$QUERY_DEPS $dep"
+    done
 
+    # "<name> <stable>" lines for every unique dep brew knows. Tap-qualified
+    # names are keyed by full_name as well as name so either form resolves.
+    DEP_LATEST_TABLE=""
+    if [ -n "$QUERY_DEPS" ]; then
+        # shellcheck disable=SC2086
+        DEP_LATEST_TABLE=$(brew info --json=v2 --formula $QUERY_DEPS 2>/dev/null | python3 -c "
+import sys, json
+try:
+    for f in json.load(sys.stdin).get('formulae', []):
+        v = f.get('versions', {}).get('stable', '') or ''
+        if not v:
+            continue
+        for key in {f.get('name', ''), f.get('full_name', '')}:
+            if key:
+                print(key, v)
+except Exception:
+    pass
+" 2>/dev/null) || DEP_LATEST_TABLE=""
+    fi
+    # "<name> <installed>" lines. awk '$NF' takes the LAST version when several
+    # kegs are installed; the revision suffix (_1, _2, …) is stripped so a
+    # revision bump of an already-current formula isn't classified as incoming.
+    DEP_INSTALLED_TABLE=""
+    if [ -n "$QUERY_DEPS" ]; then
+        # shellcheck disable=SC2086
+        DEP_INSTALLED_TABLE=$(brew list --versions --formula $QUERY_DEPS 2>/dev/null | awk 'NF>=2 {print $1, $NF}' | sed 's/_[0-9]*$//') || DEP_INSTALLED_TABLE=""
+    fi
+    table_get() {
+        # table_get <table> <key> → value of the first matching line
+        printf '%s\n' "$1" | awk -v k="$2" '$1 == k { print $2; exit }'
+    }
+
+    for dep in $QUERY_DEPS; do
+        LATEST=$(table_get "$DEP_LATEST_TABLE" "$dep")
+        if [ -z "$LATEST" ]; then
+            # Not in the batch answer (or the batch call failed): ask singly,
+            # exactly as before, so one unresolvable name costs one call.
             LATEST=$(brew info --json=v2 --formula "$dep" 2>/dev/null | python3 -c "
 import sys, json
 try:
@@ -1378,34 +1440,30 @@ try:
 except Exception:
     pass
 " 2>/dev/null)
-            # awk '$NF' grabs the LAST version when multiple kegs are installed.
-            # sed strips Homebrew revision suffix (`_1`, `_2`, …) so a revision
-            # bump of an already-current formula isn't classified as incoming.
+        fi
+        [ -z "$LATEST" ] && continue
+
+        INSTALLED_VER=$(table_get "$DEP_INSTALLED_TABLE" "$dep")
+        if [ -z "$INSTALLED_VER" ] && [ -z "$DEP_INSTALLED_TABLE" ]; then
             INSTALLED_VER=$(brew list --versions --formula "$dep" 2>/dev/null | awk '{print $NF}' | sed 's/_[0-9]*$//')
+        fi
 
-            [ -z "$LATEST" ] && continue
+        # Skip if dep is already part of the upgrade batch (checked above)
+        if echo " $CLEAN_PKGS " | grep -q " $dep "; then
+            continue
+        fi
 
-            # Skip if dep is already part of the upgrade batch (will be checked above)
-            if echo " $CLEAN_PKGS " | grep -q " $dep "; then
-                continue
-            fi
-
-            if [ -z "$INSTALLED_VER" ] || [ "$INSTALLED_VER" != "$LATEST" ]; then
-                # Array-based dedup — quoted iteration preserves whitespace
-                # in pathological dep names (taps); flat-string dedup did not.
-                _entry="${dep}|${LATEST}"
-                _seen=0
-                for _e in ${INCOMING_DEPS_ARR[@]+"${INCOMING_DEPS_ARR[@]}"}; do
-                    [ "$_e" = "$_entry" ] && _seen=1 && break
-                done
-                [ "$_seen" -eq 0 ] && INCOMING_DEPS_ARR+=("$_entry")
-                # Ownership is recorded per (dep, pkg) even when the dep itself
-                # is a duplicate: two packages can share one flagged dep and
-                # both have to be held.
-                DEP_OWNERS_ARR+=("${dep}|${pkg}")
-            fi
-        done
+        if [ -z "$INSTALLED_VER" ] || [ "$INSTALLED_VER" != "$LATEST" ]; then
+            INCOMING_DEPS_ARR+=("${dep}|${LATEST}")
+            # Ownership is recorded per (dep, pkg): two packages can share one
+            # flagged dep and both have to be held.
+            while IFS= read -r _owner; do
+                [ -n "$_owner" ] && DEP_OWNERS_ARR+=("${dep}|${_owner}")
+            done < <(printf '%s\n' "$DEP_EDGES" | awk -v d="$dep" '$2 == d { print $1 }' | sort -u)
+        fi
     done
+    phase_took "dependency graph" "$_graph_start"
+    _phase_start=$SECONDS
 
     DEP_COUNT=${#INCOMING_DEPS_ARR[@]}
 

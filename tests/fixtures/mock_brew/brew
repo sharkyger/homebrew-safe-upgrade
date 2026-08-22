@@ -42,8 +42,23 @@ case "$1" in
         fi
         ;;
     deps)
-        # last positional arg is the package name. Normalize slashes so a
-        # tap-qualified name (sharkyger/tap/safe-upgrade) maps to a flat filename.
+        # `brew deps --for-each a b` → "a: d1 d2" per line (same closure as the
+        # single-name form). Otherwise the last positional arg is the package
+        # name. Normalize slashes so a tap-qualified name
+        # (sharkyger/tap/safe-upgrade) maps to a flat filename.
+        if [ "${2:-}" = "--for-each" ]; then
+            shift 2
+            for NAME in "$@"; do
+                NAME_NORM="$(printf '%s' "$NAME" | tr '/' '_')"
+                F="$DIR/deps_${NAME_NORM}.txt"
+                if [ -f "$F" ]; then
+                    printf '%s: %s\n' "$NAME" "$(tr '\n' ' ' <"$F" | sed 's/ *$//')"
+                else
+                    printf '%s: \n' "$NAME"
+                fi
+            done
+            exit 0
+        fi
         for arg in "$@"; do :; done
         NAME="$arg"
         NAME_NORM="$(printf '%s' "$NAME" | tr '/' '_')"

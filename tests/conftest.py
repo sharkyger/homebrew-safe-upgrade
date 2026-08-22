@@ -53,3 +53,26 @@ def age_env(tmp_path, monkeypatch):
     monkeypatch.setenv("DEPENDENCY_SECURITY_CHECK", str(stub))
 
     return {"brew": brew_dir, "commits": commits_dir, "tmp": tmp_path}
+
+
+@pytest.fixture
+def brew_env(tmp_path, monkeypatch):
+    """Mock brew in interactive mode with a clean age baseline — the shape the
+    wrapper-level tests (pin bracket, [SAME], batched dep graph) need. Same
+    staging as test_partial_upgrade.mock_env, hosted here so those modules
+    can take it as a parameter without re-importing a fixture by name."""
+    fixture_dir = tmp_path / "brew_responses"
+    fixture_dir.mkdir()
+    monkeypatch.setenv("MOCK_BREW_DIR", str(fixture_dir))
+    monkeypatch.setenv("PATH", f"{MOCK_BREW_BIN}:{os.environ['PATH']}")
+    monkeypatch.delenv("BREW_SAFE_NO_DEPS", raising=False)
+    monkeypatch.setenv("GH_TOKEN", "test-token")
+    api_dir = tmp_path / "formulae_api_empty"
+    api_dir.mkdir()
+    monkeypatch.setenv("MOCK_FORMULAE_API_DIR", str(api_dir))
+    commits_dir = tmp_path / "commits_api"
+    commits_dir.mkdir()
+    (commits_dir / "_default.json").write_text(_commit_json_days_ago(3650))
+    monkeypatch.setenv("MOCK_COMMITS_API_DIR", str(commits_dir))
+    monkeypatch.setenv("MOCK_INTERACTIVE_MODE", "1")
+    return fixture_dir

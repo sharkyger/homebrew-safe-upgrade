@@ -22,9 +22,8 @@ import subprocess
 import time
 from pathlib import Path
 
-from tests.test_partial_upgrade import (  # noqa: F401 — fixture re-export
+from tests.test_partial_upgrade import (
     SAFE_UPGRADE,
-    mock_env,
     run_upgrade,
     scenario,
 )
@@ -66,9 +65,9 @@ def _interrupt_and_collect(proc: subprocess.Popen) -> tuple[str, str]:
     return out, err
 
 
-def test_clean_run_leaves_nothing_pinned(mock_env, tmp_path):
+def test_clean_run_leaves_nothing_pinned(brew_env, tmp_path):
     """Baseline: the happy path pins during and unpins after."""
-    stub = scenario(mock_env, tmp_path)
+    stub = scenario(brew_env, tmp_path)
     pin_log = tmp_path / "pin.log"
     result = run_upgrade(
         ["--skip-unsafe"],
@@ -77,16 +76,16 @@ def test_clean_run_leaves_nothing_pinned(mock_env, tmp_path):
     )
     assert result.returncode == 0, result.stderr
     assert "pin taglib" in pin_log.read_text()
-    assert pinned(mock_env) == set(), "a clean run must end with brew list --pinned empty"
+    assert pinned(brew_env) == set(), "a clean run must end with brew list --pinned empty"
     assert "Interrupted" not in result.stderr
 
 
-def test_preexisting_user_pin_is_left_alone(mock_env, tmp_path):
+def test_preexisting_user_pin_is_left_alone(brew_env, tmp_path):
     """Pins the user set themselves are not ours to release."""
-    stub = scenario(mock_env, tmp_path)
-    (mock_env / "pinned").mkdir()
-    (mock_env / "pinned" / "taglib").touch()  # user pinned the flagged dep already
-    (mock_env / "pinned" / "mine").touch()  # and something unrelated
+    stub = scenario(brew_env, tmp_path)
+    (brew_env / "pinned").mkdir()
+    (brew_env / "pinned" / "taglib").touch()  # user pinned the flagged dep already
+    (brew_env / "pinned" / "mine").touch()  # and something unrelated
     pin_log = tmp_path / "pin.log"
     result = run_upgrade(
         ["--skip-unsafe"],
@@ -98,17 +97,17 @@ def test_preexisting_user_pin_is_left_alone(mock_env, tmp_path):
     assert "pin player" in log and "unpin player" in log
     assert "pin taglib" not in log, "an already-pinned formula must not be re-pinned"
     assert "unpin taglib" not in log, "a user's pin must survive the run"
-    assert pinned(mock_env) == {"taglib", "mine"}
+    assert pinned(brew_env) == {"taglib", "mine"}
 
 
-def test_sigint_during_the_unpin_loop_releases_the_remainder(mock_env, tmp_path):
+def test_sigint_during_the_unpin_loop_releases_the_remainder(brew_env, tmp_path):
     """THE case from the acceptance run: interrupt while unpinning.
 
     Each mock unpin sleeps, so the signal lands after the first unpin has
     started and before the rest ran. Without the trap the remainder stayed
     pinned forever.
     """
-    stub = scenario(mock_env, tmp_path)
+    stub = scenario(brew_env, tmp_path)
     pin_log = tmp_path / "pin.log"
     proc = _start(
         {
@@ -122,19 +121,19 @@ def test_sigint_during_the_unpin_loop_releases_the_remainder(mock_env, tmp_path)
         proc.stdin.flush()
         _wait_for_log(pin_log, "unpin ")
         time.sleep(0.3)  # inside the first unpin's sleep
-        assert pinned(mock_env), "precondition: something must still be pinned mid-loop"
+        assert pinned(brew_env), "precondition: something must still be pinned mid-loop"
         out, err = _interrupt_and_collect(proc)
     finally:
         if proc.poll() is None:
             proc.kill()
     assert proc.returncode == 130, f"rc={proc.returncode}\n{out}\n{err}"
     assert "releasing the pins brew-safe-upgrade set" in err, err
-    assert pinned(mock_env) == set(), f"pins stranded after SIGINT: {pinned(mock_env)}\n{err}"
+    assert pinned(brew_env) == set(), f"pins stranded after SIGINT: {pinned(brew_env)}\n{err}"
 
 
-def test_sigint_during_the_upgrade_releases_every_pin(mock_env, tmp_path):
+def test_sigint_during_the_upgrade_releases_every_pin(brew_env, tmp_path):
     """Interrupt while brew upgrade is running: nothing was unpinned yet."""
-    stub = scenario(mock_env, tmp_path)
+    stub = scenario(brew_env, tmp_path)
     pin_log = tmp_path / "pin.log"
     proc = _start(
         {
@@ -148,7 +147,7 @@ def test_sigint_during_the_upgrade_releases_every_pin(mock_env, tmp_path):
         proc.stdin.flush()
         _wait_for_log(pin_log, "pin player")
         time.sleep(0.5)  # brew upgrade is now sleeping
-        assert {"player", "taglib"} <= pinned(mock_env)
+        assert {"player", "taglib"} <= pinned(brew_env)
         out, err = _interrupt_and_collect(proc)
     finally:
         if proc.poll() is None:
@@ -157,4 +156,4 @@ def test_sigint_during_the_upgrade_releases_every_pin(mock_env, tmp_path):
     assert "releasing the pins brew-safe-upgrade set: player taglib" in err.replace(
         "  ", " "
     ) or "releasing the pins brew-safe-upgrade set: taglib player" in err.replace("  ", " ")
-    assert pinned(mock_env) == set(), f"pins stranded after SIGINT: {pinned(mock_env)}\n{err}"
+    assert pinned(brew_env) == set(), f"pins stranded after SIGINT: {pinned(brew_env)}\n{err}"
