@@ -91,7 +91,7 @@ Results: 4 clean
 
 A finding only the candidate carries is a real regression and stays `[VULN]`. A `note: …` line under a verdict is a coverage note from the scanner (for example "N unanalysed NVD records … relying on CPE-analysed records only").
 
-Under `[s]` / `--skip-unsafe` the excluded formulae are `brew pin`-ed for the duration of the upgrade so brew cannot pull a flagged dependency in underneath something else. The pins are released on exit — including on Ctrl-C or a crash, in which case the wrapper prints the list it released. Pins you set yourself are never touched.
+Under `[s]` / `--skip-unsafe` the excluded formulae are `brew pin`-ed for the duration of the upgrade so brew cannot pull a flagged dependency in underneath something else. The pins are released on exit, including on Ctrl-C or a `kill` (the wrapper prints the list it released). A SIGKILL or a host crash cannot run the trap — after one of those, check `brew list --pinned`. Pins you set yourself are never touched.
 
 ### Getting help
 

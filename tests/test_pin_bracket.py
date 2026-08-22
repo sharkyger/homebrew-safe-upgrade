@@ -125,7 +125,10 @@ def test_sigint_during_the_unpin_loop_releases_the_remainder(brew_env, tmp_path)
         out, err = _interrupt_and_collect(proc)
     finally:
         if proc.poll() is None:
-            proc.kill()
+            # The whole group: proc.kill() reaches only bash, and a sleeping
+            # mock brew child would keep editing the shared pin store.
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.communicate(timeout=5)
     assert proc.returncode == 130, f"rc={proc.returncode}\n{out}\n{err}"
     assert "releasing the pins brew-safe-upgrade set" in err, err
     assert pinned(brew_env) == set(), f"pins stranded after SIGINT: {pinned(brew_env)}\n{err}"
@@ -151,7 +154,10 @@ def test_sigint_during_the_upgrade_releases_every_pin(brew_env, tmp_path):
         out, err = _interrupt_and_collect(proc)
     finally:
         if proc.poll() is None:
-            proc.kill()
+            # The whole group: proc.kill() reaches only bash, and a sleeping
+            # mock brew child would keep editing the shared pin store.
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.communicate(timeout=5)
     assert proc.returncode == 130, f"rc={proc.returncode}\n{out}\n{err}"
     assert "releasing the pins brew-safe-upgrade set: player taglib" in err.replace(
         "  ", " "
