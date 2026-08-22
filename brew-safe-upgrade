@@ -1628,10 +1628,53 @@ else
         fi
     fi
     if [ "$CONFIRM" = "y" ]; then
-        # Pin excluded formulae so brew can't upgrade them as dependencies
+        # Pin excluded formulae so brew can't upgrade them as dependencies.
+        #
+        # The pins are OURS for the duration of the upgrade and must never
+        # outlive it: a Ctrl-C or crash between pin and unpin used to leave every
+        # excluded formula pinned silently, and plain `brew upgrade` skips pinned
+        # formulae without a word — so a user sat on pinned VULNERABLE packages
+        # indefinitely, believing they upgrade normally. Hence:
+        #   - pre-existing pins are recorded first and left alone (they are the
+        #     user's, not ours — unpinning them would be a different bug);
+        #   - every pin we add goes into SAFE_PINNED_BY_US;
+        #   - a trap on EXIT/INT/TERM unpins whatever is still in that list, so
+        #     an interrupt anywhere in the bracket — during the upgrade OR during
+        #     the unpin loop itself — still ends with our pins gone, and says so.
+        PREEXISTING_PINS=" $(brew list --pinned 2>/dev/null | tr '\n' ' ') "
+        SAFE_PINNED_BY_US=""
+        _safe_unpin_ours() {
+            # Idempotent: the normal path empties the list before the EXIT trap
+            # fires, so a clean run never unpins twice. On an abnormal path the
+            # list still holds what is left and we release it here.
+            local _left="$SAFE_PINNED_BY_US" _p
+            [ -z "${_left// /}" ] && return 0
+            echo "" >&2
+            echo "Interrupted — releasing the pins brew-safe-upgrade set:$_left" >&2
+            for _p in $_left; do
+                if brew unpin "$_p" >/dev/null 2>&1; then
+                    SAFE_PINNED_BY_US="${SAFE_PINNED_BY_US// $_p / }"
+                else
+                    echo "  still pinned (unpin failed): $_p — run: brew unpin $_p" >&2
+                fi
+            done
+            SAFE_PINNED_BY_US=""
+        }
+        _safe_on_signal() {
+            _safe_unpin_ours
+            trap - EXIT
+            exit 130
+        }
+        trap _safe_unpin_ours EXIT
+        trap _safe_on_signal INT TERM
         for pkg in $EXCLUDE_PKGS; do
             if [ -n "$pkg" ]; then
-                brew pin "$pkg" 2>/dev/null || true
+                case "$PREEXISTING_PINS" in
+                    *" $pkg "*) continue ;;
+                esac
+                if brew pin "$pkg" 2>/dev/null; then
+                    SAFE_PINNED_BY_US="$SAFE_PINNED_BY_US $pkg "
+                fi
             fi
         done
 
@@ -1645,12 +1688,18 @@ else
             brew upgrade --cask $CLEAN_PKGS_CASKS </dev/null 2>&1 || true
         fi
 
-        # Unpin excluded packages
-        for pkg in $EXCLUDE_PKGS; do
-            if [ -n "$pkg" ]; then
-                brew unpin "$pkg" 2>/dev/null || true
+        # Unpin what WE pinned (pre-existing pins stay). Each success is struck
+        # from the list as it happens, so an interrupt mid-loop hands the trap
+        # exactly the remainder.
+        for pkg in $SAFE_PINNED_BY_US; do
+            if brew unpin "$pkg" 2>/dev/null; then
+                SAFE_PINNED_BY_US="${SAFE_PINNED_BY_US// $pkg / }"
+            else
+                echo "Warning: could not unpin $pkg — run: brew unpin $pkg" >&2
             fi
         done
+        SAFE_PINNED_BY_US=""
+        trap - EXIT INT TERM
     fi
 fi
 

@@ -16,7 +16,8 @@
 #                                      (the --self belt-and-suspenders re-check
 #                                      depends on this being stateful).
 #   brew outdated --json=v2          — returns outdated.json
-#   brew pin/unpin <name>            — no-op success
+#   brew pin/unpin <name>            — stateful (files under $DIR/pinned/)
+#   brew list --pinned               — lists the pin store
 
 DIR="${MOCK_BREW_DIR:-/dev/null}"
 
@@ -61,6 +62,17 @@ case "$1" in
         if [ -f "$F" ]; then cat "$F"; else exit 1; fi
         ;;
     list)
+        # `brew list --pinned` → names of the formulae currently pinned (one per
+        # line), read from the stateful pin store so a test can assert the
+        # wrapper left nothing pinned behind after an interrupted [s] run.
+        for arg in "$@"; do
+            if [ "$arg" = "--pinned" ]; then
+                if [ -d "$DIR/pinned" ]; then
+                    ls "$DIR/pinned" 2>/dev/null
+                fi
+                exit 0
+            fi
+        done
         # `brew list --versions --formula <name>` → installed versions
         for arg in "$@"; do :; done
         NAME="$arg"
@@ -91,6 +103,11 @@ case "$1" in
         exit 0
         ;;
     upgrade)
+        # Test seam: MOCK_BREW_UPGRADE_SLEEP holds the upgrade open so a test can
+        # interrupt the wrapper while brew is "running".
+        if [ -n "${MOCK_BREW_UPGRADE_SLEEP:-}" ]; then
+            sleep "$MOCK_BREW_UPGRADE_SLEEP"
+        fi
         # Stateful: drop the upgraded package(s) from outdated.json so a later
         # `brew outdated` no longer lists them. This models "after upgrade, no
         # longer outdated" — required for the --self belt-and-suspenders re-check
@@ -133,15 +150,32 @@ except Exception:
         # Test seam: MOCK_PIN_LOG records pin/unpin calls so a test can assert
         # that a flagged dependency really was pinned for the duration of the
         # upgrade (the mechanism that stops brew resolving it in anyway).
+        _cmd="$1"
+        shift
         if [ -n "${MOCK_PIN_LOG:-}" ]; then
             # One line per package: real `brew pin` accepts several at once, and
             # logging only $2 would hide everything after the first.
-            _cmd="$1"
-            shift
             for _pkg in "$@"; do
                 echo "$_cmd $_pkg" >>"$MOCK_PIN_LOG"
             done
         fi
+        # Stateful pin store: `brew list --pinned` reads it back. Pre-existing
+        # pins are staged by a test as files under $DIR/pinned/ before the run.
+        mkdir -p "$DIR/pinned" 2>/dev/null
+        for _pkg in "$@"; do
+            case "$_pkg" in --*) continue ;; esac
+            if [ "$_cmd" = "pin" ]; then
+                : >"$DIR/pinned/$_pkg"
+            else
+                # Test seam: MOCK_BREW_UNPIN_SLEEP slows each unpin so a test can
+                # deliver SIGINT while the wrapper is INSIDE its unpin loop — the
+                # worst case, which strands the Held set (unpinned last).
+                if [ -n "${MOCK_BREW_UNPIN_SLEEP:-}" ]; then
+                    sleep "$MOCK_BREW_UNPIN_SLEEP"
+                fi
+                rm -f "$DIR/pinned/$_pkg"
+            fi
+        done
         exit 0
         ;;
     install)
