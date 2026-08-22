@@ -646,6 +646,19 @@ NVD_RECENT_WINDOW_DAYS = 120  # NVD's maximum pubStartDate..pubEndDate span
 NVD_RECENT_SWEEP_CAP = 10
 
 
+# Coverage notes for the verdict. Printed to stderr for a direct caller AND
+# carried in the JSON as "notes": the wrappers run the scanner with
+# 2>/dev/null, so a note that only went to stderr was never seen in a
+# brew-safe-upgrade run — the rate-limit hint had the same problem and travels
+# in the JSON for the same reason.
+_NOTES: list = []
+
+
+def _note(text):
+    _NOTES.append(text)
+    print(f"  Note: {text}", file=sys.stderr)
+
+
 def _nvd_recent_unanalysed(search_name):
     """Keyword records published in the last NVD_RECENT_WINDOW_DAYS that carry
     no CPE data yet. Used next to an authoritative CPE answer so a brand-new
@@ -670,11 +683,10 @@ def _nvd_recent_unanalysed(search_name):
             if truncated
             else str(len(fresh))
         )
-        print(
-            f"  Note: {count} unanalysed NVD records from the last "
+        _note(
+            f"{count} unanalysed NVD records from the last "
             f"{NVD_RECENT_WINDOW_DAYS} days mention '{search_name}' — too generic to "
-            "attribute by text; relying on CPE-analysed records only.",
-            file=sys.stderr,
+            "attribute by text; relying on CPE-analysed records only."
         )
         return []
     return fresh
@@ -1395,6 +1407,7 @@ def main():
                 # to print identically as "check failed".
                 "failure_reasons": [f"{e['source']}: {e['summary']}" for e in errors],
                 "rate_limited": rate_limited,
+                "notes": list(_NOTES),
                 "vulnerabilities": [],
             },
             sys.stdout,
@@ -1421,6 +1434,7 @@ def main():
                 "sources_total": len(applicable),
                 "sources_failed": failed_sources,
                 "rate_limited": rate_limited,
+                "notes": list(_NOTES),
                 "vulnerabilities": [],
             },
             sys.stdout,
@@ -1457,6 +1471,7 @@ def main():
                 "sources_total": len(applicable),
                 "sources_failed": failed_sources,
                 "rate_limited": rate_limited,
+                "notes": list(_NOTES),
                 "vulnerabilities": vulns,
             },
             sys.stdout,

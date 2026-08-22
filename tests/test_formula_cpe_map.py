@@ -188,9 +188,13 @@ def test_recent_sweep_that_overflows_is_treated_as_too_generic(monkeypatch, caps
         r = json.loads(_nvd_response(f"CVE-2026-{i:05d}", f"PHP issue in SomeApp{i}.", []))
         records.extend(r["vulnerabilities"])
     body = {"totalResults": 500, "vulnerabilities": records}
+    monkeypatch.setattr(dsc, "_NOTES", [])
     _, findings = _run("php", "8.5.9", {"pubStartDate=": json.dumps(body).encode()})
     assert findings == [], findings
     assert "fetched 2 of 500 records" in capsys.readouterr().err
+    # The same note rides in the verdict JSON: the wrappers run the scanner
+    # with 2>/dev/null, so stderr alone never reached a brew-safe-upgrade user.
+    assert any("fetched 2 of 500 records" in n for n in dsc._NOTES), dsc._NOTES
 
 
 def test_versionless_cpe_is_reported_but_not_as_version_scoped():

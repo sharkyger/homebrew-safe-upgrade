@@ -676,6 +676,21 @@ except Exception:
 " 2>/dev/null || true
 }
 
+# Print the scanner's coverage notes from a verdict ($1) under the package's
+# line ("    note: …"). The scanner runs with 2>/dev/null here, so anything it
+# only said on stderr — "N unanalysed records … relying on CPE-analysed
+# records only" — never reached the user; the JSON carries them as "notes".
+print_scan_notes() {
+    echo "$1" | python3 -c "
+import sys, json
+try:
+    for n in json.load(sys.stdin).get('notes') or []:
+        print(f'    note: {n}')
+except Exception:
+    pass
+" 2>/dev/null || true
+}
+
 # Sorted, de-duplicated finding ids from a scanner verdict ($1), one per line.
 # Used to compare the candidate's exposure with the installed version's.
 finding_ids() {
@@ -1202,6 +1217,7 @@ except Exception:
             else
                 echo "  [ok] $name $current"
                 printf '%s' "$SHA_DETAIL"
+                print_scan_notes "$RESULT_JSON"
                 CLEAN_COUNT=$((CLEAN_COUNT + 1))
             fi
         elif [ "$EXIT_CODE" -eq 1 ]; then
@@ -1227,11 +1243,13 @@ except Exception:
                 _n=$(printf '%s\n' "$_CAND_IDS" | grep -c .)
                 echo "  [SAME] $name $current -- same $_n finding(s) as installed $installed, upgrade does not change exposure"
                 print_vuln_lines "$RESULT_JSON"
+                print_scan_notes "$RESULT_JSON"
                 SAME_PKGS="$SAME_PKGS $name"
                 CLEAN_COUNT=$((CLEAN_COUNT + 1))
             else
                 echo "  [VULN] $name $current -- vulnerabilities found!"
                 print_vuln_lines "$RESULT_JSON"
+                print_scan_notes "$RESULT_JSON"
                 BLOCKED_PKGS="$BLOCKED_PKGS $name"
             fi
         else
