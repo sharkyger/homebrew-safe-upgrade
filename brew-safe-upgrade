@@ -1430,13 +1430,28 @@ except Exception:
     pass
 " 2>/dev/null) || DEP_LATEST_TABLE=""
     fi
-    # "<name> <installed>" lines. awk '$NF' takes the LAST version when several
-    # kegs are installed; the revision suffix (_1, _2, …) is stripped so a
-    # revision bump of an already-current formula isn't classified as incoming.
+    # "<name> <installed>" lines. `brew list --versions a b c` prints NOTHING
+    # and exits 1 if even one name is not installed — and incoming deps are
+    # very often not installed — so the batch is built over the deps that
+    # have a Cellar directory (one `brew --cellar`, then a stat per dep),
+    # which is exactly the set brew can answer for. A dep without a Cellar
+    # directory is not installed: INSTALLED_VER stays empty with no call at
+    # all, the same verdict the per-dep `brew list` gave. Tap-qualified deps
+    # live under their bare name in the Cellar and in brew's listing.
+    # awk '$NF' takes the LAST version when several kegs are installed; the
+    # revision suffix (_1, _2, …) is stripped so a revision bump of an
+    # already-current formula isn't classified as incoming.
     DEP_INSTALLED_TABLE=""
-    if [ -n "$QUERY_DEPS" ]; then
+    CELLAR=$(brew --cellar 2>/dev/null) || CELLAR=""
+    INSTALLED_QUERY_DEPS=""
+    if [ -n "$CELLAR" ]; then
+        for dep in $QUERY_DEPS; do
+            [ -d "$CELLAR/${dep##*/}" ] && INSTALLED_QUERY_DEPS="$INSTALLED_QUERY_DEPS $dep"
+        done
+    fi
+    if [ -n "$INSTALLED_QUERY_DEPS" ]; then
         # shellcheck disable=SC2086
-        DEP_INSTALLED_TABLE=$(brew list --versions --formula $QUERY_DEPS 2>/dev/null | awk 'NF>=2 {print $1, $NF}' | sed 's/_[0-9]*$//') || DEP_INSTALLED_TABLE=""
+        DEP_INSTALLED_TABLE=$(brew list --versions --formula $INSTALLED_QUERY_DEPS 2>/dev/null | awk 'NF>=2 {print $1, $NF}' | sed 's/_[0-9]*$//') || DEP_INSTALLED_TABLE=""
     fi
     table_get() {
         # table_get <table> <key> → value of the first matching line
@@ -1461,8 +1476,10 @@ except Exception:
         fi
         [ -z "$LATEST" ] && continue
 
-        INSTALLED_VER=$(table_get "$DEP_INSTALLED_TABLE" "$dep")
-        if [ -z "$INSTALLED_VER" ] && [ -z "$DEP_INSTALLED_TABLE" ]; then
+        INSTALLED_VER=$(table_get "$DEP_INSTALLED_TABLE" "${dep##*/}")
+        if [ -z "$INSTALLED_VER" ] && { [ -z "$CELLAR" ] || [ -d "$CELLAR/${dep##*/}" ]; }; then
+            # Cellar unknown, or the dep IS installed but the batch did not
+            # answer for it: ask singly, exactly as before.
             INSTALLED_VER=$(brew list --versions --formula "$dep" 2>/dev/null | awk '{print $NF}' | sed 's/_[0-9]*$//')
         fi
 

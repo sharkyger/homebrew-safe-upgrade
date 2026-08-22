@@ -1,5 +1,10 @@
 """The dependency graph walk is batched and deduped.
 
+A first version of these tests asserted only verdicts — and passed while the
+mock still answered one name per `brew info`, because the per-item fallback
+quietly did all the work. The call-count assertions below are what make the
+batching a tested promise.
+
 The 2026-08-22 acceptance run spent 378 s in the dependency phase to find TWO
 incoming deps: `brew deps` per package, then `brew info` + `brew list` per
 (package, dep) pair, over closures that overlap almost entirely. The walk now
@@ -46,13 +51,34 @@ def _two_parents_one_fresh_dep(brew_env):
     fresh_commit(brew_env, "taglib", days=0)
 
 
+def _brew_calls(log, *prefix):
+    if not log.exists():
+        return []
+    return [
+        line
+        for line in log.read_text().splitlines()
+        if all(word in line.split() for word in prefix)
+    ]
+
+
 def test_shared_dep_is_checked_once_and_holds_both_owners(brew_env, tmp_path):
     _two_parents_one_fresh_dep(brew_env)
     stub = make_cve_stub(tmp_path)
+    log = tmp_path / "brew_calls.log"
     result = run_upgrade(
-        ["--skip-unsafe"], env_extra={"DEPENDENCY_SECURITY_CHECK": str(stub)}, input_text="y\n"
+        ["--skip-unsafe"],
+        env_extra={"DEPENDENCY_SECURITY_CHECK": str(stub), "MOCK_BREW_CALL_LOG": str(log)},
+        input_text="y\n",
     )
     out = result.stdout
+    # The promise: ONE deps call, ONE info call and ONE list call for the graph,
+    # not one per package or per (package, dep) pair.
+    assert len(_brew_calls(log, "deps", "--for-each")) == 1, log.read_text()
+    assert len(_brew_calls(log, "deps")) == 1, log.read_text()
+    info_calls = [c for c in _brew_calls(log, "info") if "taglib" in c or "zlib" in c]
+    assert len(info_calls) == 1, "\n".join(info_calls)
+    list_calls = [c for c in _brew_calls(log, "list", "--versions") if "taglib" in c or "zlib" in c]
+    assert len(list_calls) == 1, "\n".join(list_calls)
     assert "Found 1 incoming dependency version(s) to check" in out, out
     assert out.count("checking taglib 2.3.1") == 1
     assert "[HOLD-DEP] taglib" in out
@@ -67,12 +93,20 @@ def test_batch_info_failure_falls_back_per_dep(brew_env, tmp_path):
     the walk must then ask per dep and reach the same verdict."""
     _two_parents_one_fresh_dep(brew_env)
     stub = make_cve_stub(tmp_path)
+    log = tmp_path / "brew_calls.log"
     result = run_upgrade(
         ["--skip-unsafe"],
-        env_extra={"DEPENDENCY_SECURITY_CHECK": str(stub), "MOCK_BREW_INFO_BATCH_FAIL": "1"},
+        env_extra={
+            "DEPENDENCY_SECURITY_CHECK": str(stub),
+            "MOCK_BREW_INFO_BATCH_FAIL": "1",
+            "MOCK_BREW_CALL_LOG": str(log),
+        },
         input_text="y\n",
     )
     out = result.stdout
+    # The batch call was made and refused; then one call per dep.
+    info_calls = [c for c in _brew_calls(log, "info") if "taglib" in c or "zlib" in c]
+    assert len(info_calls) == 3, "\n".join(info_calls)
     assert "Found 1 incoming dependency version(s) to check" in out, out
     assert "[HOLD-DEP] taglib" in out
     assert "Clean formulae to upgrade: unrelated" in out, out

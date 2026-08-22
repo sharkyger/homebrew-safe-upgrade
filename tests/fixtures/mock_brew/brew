@@ -29,16 +29,66 @@ if [ -n "${MOCK_BREW_FAIL:-}" ] && [ "$1" = "$MOCK_BREW_FAIL" ]; then
     exit 1
 fi
 
+# Test seam: MOCK_BREW_CALL_LOG records every invocation (one line each), so a
+# test can assert HOW MANY brew calls a phase made — the batched graph walk is
+# a promise about call count, and a fallback that silently does the per-item
+# work would pass every verdict-only assertion.
+if [ -n "${MOCK_BREW_CALL_LOG:-}" ]; then
+    echo "$*" >>"$MOCK_BREW_CALL_LOG"
+fi
+
 case "$1" in
+    --cellar)
+        # The wrapper stats $CELLAR/<name> to learn whether a dep is installed
+        # before batching `brew list --versions` (which fails outright on any
+        # uninstalled name). The mock Cellar mirrors the list_<name>.txt
+        # fixtures: a name is "installed" iff a versions file was staged.
+        mkdir -p "$DIR/cellar" 2>/dev/null
+        for f in "$DIR"/list_*.txt; do
+            [ -e "$f" ] || continue
+            n="${f##*/list_}"
+            n="${n%.txt}"
+            mkdir -p "$DIR/cellar/$n" 2>/dev/null
+        done
+        echo "$DIR/cellar"
+        ;;
     info)
-        # last positional arg is the package name
-        for arg in "$@"; do :; done
-        NAME="$arg"
-        F="$DIR/info_${NAME}.json"
-        if [ -f "$F" ]; then
-            cat "$F"
+        # Every positional arg is a package name; the batched graph walk passes
+        # several at once. Merge the canned per-package files into one answer,
+        # as real `brew info --json=v2 a b c` does. Test seam:
+        # MOCK_BREW_INFO_BATCH_FAIL=1 makes a multi-name call fail (real brew
+        # fails the whole call when one name is unknown), so the per-dep
+        # fallback is exercised.
+        NAMES=""
+        for arg in "$@"; do
+            case "$arg" in info | --*) ;; *) NAMES="$NAMES $arg" ;; esac
+        done
+        # shellcheck disable=SC2086
+        set -- $NAMES
+        if [ "$#" -gt 1 ] && [ -n "${MOCK_BREW_INFO_BATCH_FAIL:-}" ]; then
+            echo "Error: No available formula with the name \"$1\"." >&2
+            exit 1
+        fi
+        if [ "$#" -le 1 ]; then
+            F="$DIR/info_${1:-}.json"
+            if [ -f "$F" ]; then
+                cat "$F"
+            else
+                echo '{"formulae":[],"casks":[]}'
+            fi
         else
-            echo '{"formulae":[],"casks":[]}'
+            DIR="$DIR" python3 -c '
+import os, json, sys
+out = {"formulae": [], "casks": []}
+for name in sys.argv[1:]:
+    f = os.path.join(os.environ["DIR"], f"info_{name}.json")
+    if os.path.exists(f):
+        with open(f) as fh:
+            d = json.load(fh)
+        out["formulae"] += d.get("formulae", [])
+        out["casks"] += d.get("casks", [])
+print(json.dumps(out))
+' "$@"
         fi
         ;;
     deps)
@@ -88,11 +138,21 @@ case "$1" in
                 exit 0
             fi
         done
-        # `brew list --versions --formula <name>` → installed versions
-        for arg in "$@"; do :; done
-        NAME="$arg"
-        F="$DIR/list_${NAME}.txt"
-        if [ -f "$F" ]; then cat "$F"; fi
+        # `brew list --versions --formula <name>...` → installed versions, one
+        # line per name. Real brew prints NOTHING and exits 1 if ANY name is
+        # not installed (verified 2026-08-22) — mirrored here so the wrapper's
+        # Cellar pre-filter is what keeps the batch answerable.
+        _out=""
+        for arg in "$@"; do
+            case "$arg" in list | --*) continue ;; esac
+            F="$DIR/list_${arg##*/}.txt"
+            if [ -f "$F" ]; then
+                _out="${_out}$(cat "$F")"$'\n'
+            else
+                exit 1
+            fi
+        done
+        printf '%s' "$_out"
         ;;
     outdated)
         F="$DIR/outdated.json"
