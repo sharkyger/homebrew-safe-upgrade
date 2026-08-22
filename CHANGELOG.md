@@ -8,6 +8,8 @@ The project is pre-1.0; expect minor breaking changes between 0.x releases until
 
 ## [Unreleased]
 
+## [0.3.4] — 2026-08-22
+
 ### Fixed
 
 - **An interrupted `[s]` run no longer leaves your formulae pinned.** Under `[s]` / `--skip-unsafe` the excluded formulae are `brew pin`-ed around the upgrade so brew cannot drag a flagged dependency in underneath something else. That bracket was pin → upgrade → unpin with nothing in between: a Ctrl-C or crash left every excluded formula pinned, silently — and plain `brew upgrade` skips pinned formulae without a word, so a user sat on pinned *vulnerable* packages indefinitely believing they upgrade normally. The wrapper now records the pins it sets (pre-existing pins are yours and are left alone), releases them in a trap on normal exit and on a handled interrupt or termination signal (Ctrl-C, `kill`), and prints what it released. A SIGKILL or a host crash cannot run a trap — after one of those, `brew list --pinned` shows what is left. Verified with the signal delivered inside the unpin loop itself — the Held set is unpinned last, so that is the set a late Ctrl-C used to strand.
@@ -327,7 +329,8 @@ pre-tag history by theme rather than by release. Full detail is in `git log`.
 - CodeQL, gitleaks, and dependabot wired up.
 - Community health files: issue templates (bug, false-positive, feature), discussion link from README on the open `--min-age` default question.
 
-[Unreleased]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.3.3...HEAD
+[Unreleased]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.3.4...HEAD
+[0.3.4]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.3.0...v0.3.1
