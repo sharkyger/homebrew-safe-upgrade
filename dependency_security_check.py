@@ -1100,6 +1100,10 @@ def _cpes_carry_version_scope(cpes):
         parts = cpe.get("criteria", "").split(":")
         if len(parts) >= 6 and parts[5] not in ("*", "-", ""):
             return True
+        # An OpenSSH portmark in the UPDATE component (`openssh:*:p2`) is a
+        # version statement too — _cpe_version_affected matches on it.
+        if len(parts) >= 7 and re.fullmatch(r"p\d+", parts[6] or ""):
+            return True
     return False
 
 

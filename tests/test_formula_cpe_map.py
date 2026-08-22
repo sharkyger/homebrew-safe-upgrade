@@ -237,3 +237,14 @@ def test_bounded_cpe_is_version_scoped():
     assert findings and findings[0]["scoped"] is True
     _, findings = _run("gdk-pixbuf", "2.44.8", {"gdk-pixbuf": json.dumps(body).encode()})
     assert findings == [], "2.44.8 is outside the bound and must be clean"
+
+
+def test_portmark_in_the_update_component_is_version_scope():
+    """`openssh:*:p2` pins a portable build; the matcher applies it, so the
+    label must not call the finding unscoped."""
+    assert dsc._cpes_carry_version_scope(
+        [{"criteria": "cpe:2.3:a:openbsd:openssh:*:p2:*:*:*:*:*:*"}]
+    )
+    assert not dsc._cpes_carry_version_scope(
+        [{"criteria": "cpe:2.3:a:openbsd:openssh:*:*:*:*:*:*:*:*"}]
+    )

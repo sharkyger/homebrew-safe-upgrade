@@ -103,3 +103,27 @@ def test_graph_timing_is_printed_even_with_no_incoming_deps(brew_env, tmp_path):
     ).stdout
     assert "No new dependency versions coming in." in out, out
     assert "(dependency graph took " in out, out
+
+
+def test_dep_membership_in_the_batch_is_literal_not_regex(brew_env, tmp_path):
+    """`foo.bar` as a regex matches the clean package `fooXbar`; the dep would
+    then be skipped as "already in the batch" and never checked."""
+    write_outdated(
+        brew_env,
+        [
+            {"name": "fooXbar", "installed_versions": ["1.0"], "current_version": "2.0"},
+            {"name": "player", "installed_versions": ["1.0"], "current_version": "2.0"},
+        ],
+    )
+    for n, v in (("fooXbar", "2.0"), ("player", "2.0"), ("foo.bar", "3.0")):
+        write_formula_info(brew_env, n, v)
+    write_deps(brew_env, "fooXbar", [])
+    write_deps(brew_env, "player", ["foo.bar"])
+    write_installed_version(brew_env, "foo.bar", "2.9")  # incoming
+    fresh_commit(brew_env, "foo.bar", days=0)
+    stub = make_cve_stub(tmp_path)
+    out = run_upgrade(
+        ["--skip-unsafe"], env_extra={"DEPENDENCY_SECURITY_CHECK": str(stub)}, input_text="y\n"
+    ).stdout
+    assert "checking foo.bar 3.0" in out, out
+    assert "[HOLD-DEP] foo.bar" in out, out
