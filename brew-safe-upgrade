@@ -676,6 +676,20 @@ except Exception:
 " 2>/dev/null || true
 }
 
+# Sorted, de-duplicated finding ids from a scanner verdict ($1), one per line.
+# Used to compare the candidate's exposure with the installed version's.
+finding_ids() {
+    echo "$1" | python3 -c "
+import sys, json
+try:
+    vulns = json.load(sys.stdin).get('vulnerabilities') or []
+    ids = sorted({str(v.get('id', '')) for v in vulns if v.get('id')})
+    print('\\n'.join(ids))
+except Exception:
+    pass
+" 2>/dev/null || true
+}
+
 # Elapsed-time reporter: phase_took <label> <start_seconds>. Uses bash's SECONDS
 # so a 10-minute run shows where the time went — the age phase, the security
 # phase and the dependency phase have very different cost profiles and the
@@ -1043,6 +1057,7 @@ echo ""
 _phase_start=$SECONDS
 
 BLOCKED_PKGS=""
+SAME_PKGS=""
 TAMPERED_PKGS=""
 
 # One actionable note per run when NVD threw us out for asking too fast.
@@ -1190,9 +1205,35 @@ except Exception:
                 CLEAN_COUNT=$((CLEAN_COUNT + 1))
             fi
         elif [ "$EXIT_CODE" -eq 1 ]; then
-            echo "  [VULN] $name $current -- vulnerabilities found!"
-            print_vuln_lines "$RESULT_JSON"
-            BLOCKED_PKGS="$BLOCKED_PKGS $name"
+            # Before blocking, compare with what is INSTALLED. A record with no
+            # version scope (or a versionless CPE) hits the installed and the
+            # candidate version identically, and then a block is a deadlock:
+            # the age hold is waived because "installed has CVEs", the upgrade
+            # is refused because "candidate has CVEs", and the package can
+            # never pass — gh 2.98.0 sat on CVE-2024-53858 (fixed in 2.63.0,
+            # never given a CPE) that way. Per-package CPE fixes cannot close
+            # the class; the next unscoped record recreates it.
+            #
+            # Rule: the SAME finding set on installed and candidate means the
+            # upgrade does not change exposure. That is its own state, [SAME],
+            # reported on its own line and upgraded with the clean set. Any
+            # difference — a finding only the candidate carries, or an installed
+            # scan that fails — keeps the block (fail closed).
+            _CAND_IDS=$(finding_ids "$RESULT_JSON")
+            _INST_JSON=$(python3 "$SCRIPT" brew "$name" "$installed" 2>/dev/null) && _INST_EXIT=0 || _INST_EXIT=$?
+            _INST_IDS=""
+            [ "$_INST_EXIT" -eq 1 ] && _INST_IDS=$(finding_ids "$_INST_JSON")
+            if [ -n "$_CAND_IDS" ] && [ "$_CAND_IDS" = "$_INST_IDS" ]; then
+                _n=$(printf '%s\n' "$_CAND_IDS" | grep -c .)
+                echo "  [SAME] $name $current -- same $_n finding(s) as installed $installed, upgrade does not change exposure"
+                print_vuln_lines "$RESULT_JSON"
+                SAME_PKGS="$SAME_PKGS $name"
+                CLEAN_COUNT=$((CLEAN_COUNT + 1))
+            else
+                echo "  [VULN] $name $current -- vulnerabilities found!"
+                print_vuln_lines "$RESULT_JSON"
+                BLOCKED_PKGS="$BLOCKED_PKGS $name"
+            fi
         else
             _why=$(first_failure_reason "$RESULT_JSON")
             echo "  [skip] $name $current -- check failed${_why:+ ($_why)}, will not upgrade"
@@ -1263,6 +1304,9 @@ echo ""
 echo "Results: $CLEAN_COUNT clean"
 if [ -n "$BLOCKED_PKGS" ]; then
     echo "  Blocked (vulnerable):$BLOCKED_PKGS"
+fi
+if [ -n "$SAME_PKGS" ]; then
+    echo "  Unchanged exposure (same findings as installed, upgrading):$SAME_PKGS"
 fi
 if [ -n "$TAMPERED_PKGS" ]; then
     echo "  Blocked (SHA tampered):$TAMPERED_PKGS"
