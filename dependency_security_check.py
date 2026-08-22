@@ -1061,9 +1061,34 @@ def _nvd_cve_to_finding(vuln, ecosystem, version, match_terms, require_desc_matc
         # False when NVD has no applicability data for the record yet (typically
         # "Awaiting Analysis") and the text names no version bound: the CVE is
         # reported against every version because nothing says it is fixed, not
-        # because this version is known to be affected.
-        "scoped": bool(relevant_cpes),
+        # because this version is known to be affected. Equally False when the
+        # only applicability is a VERSIONLESS CPE (`gnome:gdk-pixbuf:-`, no
+        # bounds): that names the product, not a version, and the verdict is
+        # the same fail-closed "nothing says it is fixed" — CVE-2026-5201 was
+        # fixed in gdk-pixbuf 2.44.6 and still blocked 2.44.8 as "scoped".
+        "scoped": _cpes_carry_version_scope(relevant_cpes),
     }
+
+
+def _cpes_carry_version_scope(cpes):
+    """True if at least one CPE makes a statement about versions: a bound
+    (versionStart*/versionEnd*) or a concrete version in the criteria. A bare
+    `*` or `-` version with no bounds is a product name, not a version scope."""
+    for cpe in cpes:
+        if any(
+            cpe.get(k)
+            for k in (
+                "versionStartIncluding",
+                "versionStartExcluding",
+                "versionEndIncluding",
+                "versionEndExcluding",
+            )
+        ):
+            return True
+        parts = cpe.get("criteria", "").split(":")
+        if len(parts) >= 6 and parts[5] not in ("*", "-", ""):
+            return True
+    return False
 
 
 def query_nvd(package_name, ecosystem, version=None):
