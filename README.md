@@ -79,6 +79,20 @@ Upgrade clean packages only? The blocked ones will be skipped.
 Proceed? [y/N]
 ```
 
+If the candidate carries exactly the findings the installed version already carries — typically a record NVD has not scoped to a version, which hits both sides identically — the upgrade does not change your exposure, and it says so instead of blocking:
+
+```
+  [SAME] gh 2.99.0 -- same 1 finding(s) as installed 2.98.0, upgrade does not change exposure
+    [MEDIUM] CVE-2024-53858 (CVSS 6.5) — NIST NVD
+
+Results: 4 clean
+  Unchanged exposure (same findings as installed, upgrading): gh
+```
+
+A finding only the candidate carries is a real regression and stays `[VULN]`. A `note: …` line under a verdict is a coverage note from the scanner (for example "N unanalysed NVD records … relying on CPE-analysed records only").
+
+Under `[s]` / `--skip-unsafe` the excluded formulae are `brew pin`-ed for the duration of the upgrade so brew cannot pull a flagged dependency in underneath something else. The pins are released on exit, including on Ctrl-C or a `kill` (the wrapper prints the list it released). A SIGKILL or a host crash cannot run the trap — after one of those, check `brew list --pinned`. Pins you set yourself are never touched.
+
 ### Getting help
 
 Every command answers `--help` (or `-h`) with a synopsis, a flag listing, and
@@ -121,7 +135,7 @@ Every `safe-install` or `safe-upgrade` also checks the dependencies that would l
 - Deps that are installed, but a newer version is coming in → checked.
 - Deps that are installed at the same version that would be installed → skipped (already on your system; that's `brew-vulns`' job).
 
-For `safe-upgrade`, deps are deduplicated across the entire upgrade batch — `openssl@3` showing up in five outdated packages is checked once.
+For `safe-upgrade`, deps are deduplicated across the entire upgrade batch — `openssl@3` showing up in five outdated packages is checked once. The graph itself is built with one `brew deps --for-each`, one `brew info` and one `brew list` for the whole batch, and the phase reports `(dependency graph took Ns)` and `(dependency checks took Ns)` separately.
 
 ```
 $ brew safe-install gh

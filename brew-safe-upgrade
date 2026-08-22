@@ -676,6 +676,35 @@ except Exception:
 " 2>/dev/null || true
 }
 
+# Print the scanner's coverage notes from a verdict ($1) under the package's
+# line ("    note: …"). The scanner runs with 2>/dev/null here, so anything it
+# only said on stderr — "N unanalysed records … relying on CPE-analysed
+# records only" — never reached the user; the JSON carries them as "notes".
+print_scan_notes() {
+    echo "$1" | python3 -c "
+import sys, json
+try:
+    for n in json.load(sys.stdin).get('notes') or []:
+        print(f'    note: {n}')
+except Exception:
+    pass
+" 2>/dev/null || true
+}
+
+# Sorted, de-duplicated finding ids from a scanner verdict ($1), one per line.
+# Used to compare the candidate's exposure with the installed version's.
+finding_ids() {
+    echo "$1" | python3 -c "
+import sys, json
+try:
+    vulns = json.load(sys.stdin).get('vulnerabilities') or []
+    ids = sorted({str(v.get('id', '')) for v in vulns if v.get('id')})
+    print('\\n'.join(ids))
+except Exception:
+    pass
+" 2>/dev/null || true
+}
+
 # Elapsed-time reporter: phase_took <label> <start_seconds>. Uses bash's SECONDS
 # so a 10-minute run shows where the time went — the age phase, the security
 # phase and the dependency phase have very different cost profiles and the
@@ -1043,6 +1072,7 @@ echo ""
 _phase_start=$SECONDS
 
 BLOCKED_PKGS=""
+SAME_PKGS=""
 TAMPERED_PKGS=""
 
 # One actionable note per run when NVD threw us out for asking too fast.
@@ -1187,12 +1217,41 @@ except Exception:
             else
                 echo "  [ok] $name $current"
                 printf '%s' "$SHA_DETAIL"
+                print_scan_notes "$RESULT_JSON"
                 CLEAN_COUNT=$((CLEAN_COUNT + 1))
             fi
         elif [ "$EXIT_CODE" -eq 1 ]; then
-            echo "  [VULN] $name $current -- vulnerabilities found!"
-            print_vuln_lines "$RESULT_JSON"
-            BLOCKED_PKGS="$BLOCKED_PKGS $name"
+            # Before blocking, compare with what is INSTALLED. A record with no
+            # version scope (or a versionless CPE) hits the installed and the
+            # candidate version identically, and then a block is a deadlock:
+            # the age hold is waived because "installed has CVEs", the upgrade
+            # is refused because "candidate has CVEs", and the package can
+            # never pass — gh 2.98.0 sat on CVE-2024-53858 (fixed in 2.63.0,
+            # never given a CPE) that way. Per-package CPE fixes cannot close
+            # the class; the next unscoped record recreates it.
+            #
+            # Rule: the SAME finding set on installed and candidate means the
+            # upgrade does not change exposure. That is its own state, [SAME],
+            # reported on its own line and upgraded with the clean set. Any
+            # difference — a finding only the candidate carries, or an installed
+            # scan that fails — keeps the block (fail closed).
+            _CAND_IDS=$(finding_ids "$RESULT_JSON")
+            _INST_JSON=$(python3 "$SCRIPT" brew "$name" "$installed" 2>/dev/null) && _INST_EXIT=0 || _INST_EXIT=$?
+            _INST_IDS=""
+            [ "$_INST_EXIT" -eq 1 ] && _INST_IDS=$(finding_ids "$_INST_JSON")
+            if [ -n "$_CAND_IDS" ] && [ "$_CAND_IDS" = "$_INST_IDS" ]; then
+                _n=$(printf '%s\n' "$_CAND_IDS" | grep -c .)
+                echo "  [SAME] $name $current -- same $_n finding(s) as installed $installed, upgrade does not change exposure"
+                print_vuln_lines "$RESULT_JSON"
+                print_scan_notes "$RESULT_JSON"
+                SAME_PKGS="$SAME_PKGS $name"
+                CLEAN_COUNT=$((CLEAN_COUNT + 1))
+            else
+                echo "  [VULN] $name $current -- vulnerabilities found!"
+                print_vuln_lines "$RESULT_JSON"
+                print_scan_notes "$RESULT_JSON"
+                BLOCKED_PKGS="$BLOCKED_PKGS $name"
+            fi
         else
             _why=$(first_failure_reason "$RESULT_JSON")
             echo "  [skip] $name $current -- check failed${_why:+ ($_why)}, will not upgrade"
@@ -1264,6 +1323,9 @@ echo "Results: $CLEAN_COUNT clean"
 if [ -n "$BLOCKED_PKGS" ]; then
     echo "  Blocked (vulnerable):$BLOCKED_PKGS"
 fi
+if [ -n "$SAME_PKGS" ]; then
+    echo "  Unchanged exposure (same findings as installed, upgrading):$SAME_PKGS"
+fi
 if [ -n "$TAMPERED_PKGS" ]; then
     echo "  Blocked (SHA tampered):$TAMPERED_PKGS"
 fi
@@ -1310,20 +1372,97 @@ if [ "$CHECK_DEPS" = true ] && [ -n "$CLEAN_PKGS" ]; then
     # without that we can only accept or reject the batch as a whole (#98).
     # `brew deps` is recursive by default, so this records the full closure.
     DEP_OWNERS_ARR=()
-    for pkg in $CLEAN_PKGS; do
-        DEPS_PARSED_ARR=()
-        while IFS= read -r line; do
-            [ -n "$line" ] && DEPS_PARSED_ARR+=("$line")
-        done < <(brew deps "$pkg" 2>/dev/null || true)
 
-        for dep in ${DEPS_PARSED_ARR[@]+"${DEPS_PARSED_ARR[@]}"}; do
-            [ -z "$dep" ] && continue
+    # Graph walk, BATCHED. The first version ran `brew deps` per package and
+    # then `brew info` + `brew list` per (package, dep) PAIR — closures overlap
+    # heavily, so a 34-package batch made several hundred brew invocations
+    # (each a Ruby start-up) to find two incoming deps: 378 s on the 2026-08-22
+    # acceptance run, ~67x the cost of actually checking them. Now: one
+    # `brew deps --for-each` for the whole batch, one `brew info` and one
+    # `brew list` for the UNIQUE dep set, and the decision loop runs once per
+    # unique dep. bash 3.2 has no associative arrays, so the lookups are
+    # newline tables ("name value") read with awk. Each batched call falls
+    # back to the per-item call if brew rejects the batch (one unknown name
+    # fails the whole `brew info` invocation), so the result is the same set
+    # the per-pair walk produced — only cheaper.
+    _graph_start=$SECONDS
+    # "<pkg> <dep>" lines, one per edge.
+    DEP_EDGES=""
+    # shellcheck disable=SC2086
+    _for_each=$(brew deps --for-each $CLEAN_PKGS 2>/dev/null) || _for_each=""
+    if [ -n "$_for_each" ]; then
+        DEP_EDGES=$(printf '%s\n' "$_for_each" | awk -F': ' 'NF>=2 { n=split($2, d, " "); for (i=1;i<=n;i++) if (d[i] != "") print $1, d[i] }')
+    else
+        for pkg in $CLEAN_PKGS; do
+            while IFS= read -r line; do
+                [ -n "$line" ] && DEP_EDGES="${DEP_EDGES}${pkg} ${line}"$'\n'
+            done < <(brew deps "$pkg" 2>/dev/null || true)
+        done
+    fi
+    UNIQUE_DEPS=$(printf '%s\n' "$DEP_EDGES" | awk 'NF==2 {print $2}' | sort -u)
 
-            if [[ ! "$dep" =~ $DEP_NAME_RE ]]; then
-                echo "    [skip-dep] $dep -- invalid name, refusing to query"
-                continue
-            fi
+    # Name-validate BEFORE anything from the graph reaches a brew command line.
+    QUERY_DEPS=""
+    for dep in $UNIQUE_DEPS; do
+        if [[ ! "$dep" =~ $DEP_NAME_RE ]]; then
+            echo "    [skip-dep] $dep -- invalid name, refusing to query"
+            continue
+        fi
+        QUERY_DEPS="$QUERY_DEPS $dep"
+    done
 
+    # "<name> <stable>" lines for every unique dep brew knows. Tap-qualified
+    # names are keyed by full_name as well as name so either form resolves.
+    DEP_LATEST_TABLE=""
+    if [ -n "$QUERY_DEPS" ]; then
+        # shellcheck disable=SC2086
+        DEP_LATEST_TABLE=$(brew info --json=v2 --formula $QUERY_DEPS 2>/dev/null | python3 -c "
+import sys, json
+try:
+    for f in json.load(sys.stdin).get('formulae', []):
+        v = f.get('versions', {}).get('stable', '') or ''
+        if not v:
+            continue
+        for key in {f.get('name', ''), f.get('full_name', '')}:
+            if key:
+                print(key, v)
+except Exception:
+    pass
+" 2>/dev/null) || DEP_LATEST_TABLE=""
+    fi
+    # "<name> <installed>" lines. `brew list --versions a b c` prints NOTHING
+    # and exits 1 if even one name is not installed — and incoming deps are
+    # very often not installed — so the batch is built over the deps that
+    # have a Cellar directory (one `brew --cellar`, then a stat per dep),
+    # which is exactly the set brew can answer for. A dep without a Cellar
+    # directory is not installed: INSTALLED_VER stays empty with no call at
+    # all, the same verdict the per-dep `brew list` gave. Tap-qualified deps
+    # live under their bare name in the Cellar and in brew's listing.
+    # awk '$NF' takes the LAST version when several kegs are installed; the
+    # revision suffix (_1, _2, …) is stripped so a revision bump of an
+    # already-current formula isn't classified as incoming.
+    DEP_INSTALLED_TABLE=""
+    CELLAR=$(brew --cellar 2>/dev/null) || CELLAR=""
+    INSTALLED_QUERY_DEPS=""
+    if [ -n "$CELLAR" ]; then
+        for dep in $QUERY_DEPS; do
+            [ -d "$CELLAR/${dep##*/}" ] && INSTALLED_QUERY_DEPS="$INSTALLED_QUERY_DEPS $dep"
+        done
+    fi
+    if [ -n "$INSTALLED_QUERY_DEPS" ]; then
+        # shellcheck disable=SC2086
+        DEP_INSTALLED_TABLE=$(brew list --versions --formula $INSTALLED_QUERY_DEPS 2>/dev/null | awk 'NF>=2 {print $1, $NF}' | sed 's/_[0-9]*$//') || DEP_INSTALLED_TABLE=""
+    fi
+    table_get() {
+        # table_get <table> <key> → value of the first matching line
+        printf '%s\n' "$1" | awk -v k="$2" '$1 == k { print $2; exit }'
+    }
+
+    for dep in $QUERY_DEPS; do
+        LATEST=$(table_get "$DEP_LATEST_TABLE" "$dep")
+        if [ -z "$LATEST" ]; then
+            # Not in the batch answer (or the batch call failed): ask singly,
+            # exactly as before, so one unresolvable name costs one call.
             LATEST=$(brew info --json=v2 --formula "$dep" 2>/dev/null | python3 -c "
 import sys, json
 try:
@@ -1334,34 +1473,35 @@ try:
 except Exception:
     pass
 " 2>/dev/null)
-            # awk '$NF' grabs the LAST version when multiple kegs are installed.
-            # sed strips Homebrew revision suffix (`_1`, `_2`, …) so a revision
-            # bump of an already-current formula isn't classified as incoming.
+        fi
+        [ -z "$LATEST" ] && continue
+
+        INSTALLED_VER=$(table_get "$DEP_INSTALLED_TABLE" "${dep##*/}")
+        if [ -z "$INSTALLED_VER" ] && { [ -z "$CELLAR" ] || [ -d "$CELLAR/${dep##*/}" ]; }; then
+            # Cellar unknown, or the dep IS installed but the batch did not
+            # answer for it: ask singly, exactly as before.
             INSTALLED_VER=$(brew list --versions --formula "$dep" 2>/dev/null | awk '{print $NF}' | sed 's/_[0-9]*$//')
+        fi
 
-            [ -z "$LATEST" ] && continue
+        # Skip if dep is already part of the upgrade batch (checked above).
+        # Literal membership, not grep: DEP_NAME_RE admits '.', and as a
+        # regex `foo.bar` also matches `fooXbar` — a dep wrongly read as
+        # "in the batch" would skip its own check.
+        case " $CLEAN_PKGS " in
+            *" $dep "*) continue ;;
+        esac
 
-            # Skip if dep is already part of the upgrade batch (will be checked above)
-            if echo " $CLEAN_PKGS " | grep -q " $dep "; then
-                continue
-            fi
-
-            if [ -z "$INSTALLED_VER" ] || [ "$INSTALLED_VER" != "$LATEST" ]; then
-                # Array-based dedup — quoted iteration preserves whitespace
-                # in pathological dep names (taps); flat-string dedup did not.
-                _entry="${dep}|${LATEST}"
-                _seen=0
-                for _e in ${INCOMING_DEPS_ARR[@]+"${INCOMING_DEPS_ARR[@]}"}; do
-                    [ "$_e" = "$_entry" ] && _seen=1 && break
-                done
-                [ "$_seen" -eq 0 ] && INCOMING_DEPS_ARR+=("$_entry")
-                # Ownership is recorded per (dep, pkg) even when the dep itself
-                # is a duplicate: two packages can share one flagged dep and
-                # both have to be held.
-                DEP_OWNERS_ARR+=("${dep}|${pkg}")
-            fi
-        done
+        if [ -z "$INSTALLED_VER" ] || [ "$INSTALLED_VER" != "$LATEST" ]; then
+            INCOMING_DEPS_ARR+=("${dep}|${LATEST}")
+            # Ownership is recorded per (dep, pkg): two packages can share one
+            # flagged dep and both have to be held.
+            while IFS= read -r _owner; do
+                [ -n "$_owner" ] && DEP_OWNERS_ARR+=("${dep}|${_owner}")
+            done < <(printf '%s\n' "$DEP_EDGES" | awk -v d="$dep" '$2 == d { print $1 }' | sort -u)
+        fi
     done
+    phase_took "dependency graph" "$_graph_start"
+    _phase_start=$SECONDS
 
     DEP_COUNT=${#INCOMING_DEPS_ARR[@]}
 
@@ -1628,10 +1768,59 @@ else
         fi
     fi
     if [ "$CONFIRM" = "y" ]; then
-        # Pin excluded formulae so brew can't upgrade them as dependencies
+        # Pin excluded formulae so brew can't upgrade them as dependencies.
+        #
+        # The pins are OURS for the duration of the upgrade and must never
+        # outlive it: a Ctrl-C or crash between pin and unpin used to leave every
+        # excluded formula pinned silently, and plain `brew upgrade` skips pinned
+        # formulae without a word — so a user sat on pinned VULNERABLE packages
+        # indefinitely, believing they upgrade normally. Hence:
+        #   - pre-existing pins are recorded first and left alone (they are the
+        #     user's, not ours — unpinning them would be a different bug);
+        #   - every pin we add goes into SAFE_PINNED_BY_US;
+        #   - a trap on EXIT/INT/TERM unpins whatever is still in that list, so
+        #     an interrupt anywhere in the bracket — during the upgrade OR during
+        #     the unpin loop itself — still ends with our pins gone, and says so.
+        PREEXISTING_PINS=" $(brew list --pinned 2>/dev/null | tr '\n' ' ') "
+        SAFE_PINNED_BY_US=""
+        _safe_unpin_ours() {
+            # Idempotent: the normal path empties the list before the EXIT trap
+            # fires, so a clean run never unpins twice. On an abnormal path the
+            # list still holds what is left and we release it here.
+            local _left="$SAFE_PINNED_BY_US" _p
+            [ -z "${_left// /}" ] && return 0
+            echo "" >&2
+            echo "Interrupted — releasing the pins brew-safe-upgrade set:$_left" >&2
+            for _p in $_left; do
+                if brew unpin "$_p" >/dev/null 2>&1; then
+                    SAFE_PINNED_BY_US="${SAFE_PINNED_BY_US// $_p / }"
+                else
+                    echo "  could not unpin $_p — check: brew list --pinned" >&2
+                fi
+            done
+            SAFE_PINNED_BY_US=""
+        }
+        _safe_on_signal() {
+            _safe_unpin_ours
+            trap - EXIT
+            exit 130
+        }
+        trap _safe_unpin_ours EXIT
+        trap _safe_on_signal INT TERM
         for pkg in $EXCLUDE_PKGS; do
             if [ -n "$pkg" ]; then
-                brew pin "$pkg" 2>/dev/null || true
+                case "$PREEXISTING_PINS" in
+                    *" $pkg "*) continue ;;
+                esac
+                # Claim ownership BEFORE the pin lands: a Ctrl-C that reaches
+                # `brew pin` after it wrote the pin but before we recorded it
+                # would leave a pin the trap does not know about. Claiming
+                # first and unclaiming on failure closes that window; an unpin
+                # of something that was never pinned is harmless.
+                SAFE_PINNED_BY_US="$SAFE_PINNED_BY_US $pkg "
+                if ! brew pin "$pkg" 2>/dev/null; then
+                    SAFE_PINNED_BY_US="${SAFE_PINNED_BY_US// $pkg / }"
+                fi
             fi
         done
 
@@ -1645,12 +1834,18 @@ else
             brew upgrade --cask $CLEAN_PKGS_CASKS </dev/null 2>&1 || true
         fi
 
-        # Unpin excluded packages
-        for pkg in $EXCLUDE_PKGS; do
-            if [ -n "$pkg" ]; then
-                brew unpin "$pkg" 2>/dev/null || true
+        # Unpin what WE pinned (pre-existing pins stay). Each success is struck
+        # from the list as it happens, so an interrupt mid-loop hands the trap
+        # exactly the remainder.
+        for pkg in $SAFE_PINNED_BY_US; do
+            if brew unpin "$pkg" 2>/dev/null; then
+                SAFE_PINNED_BY_US="${SAFE_PINNED_BY_US// $pkg / }"
+            else
+                echo "Warning: could not unpin $pkg — run: brew unpin $pkg" >&2
             fi
         done
+        SAFE_PINNED_BY_US=""
+        trap - EXIT INT TERM
     fi
 fi
 

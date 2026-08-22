@@ -16,7 +16,8 @@
 #                                      (the --self belt-and-suspenders re-check
 #                                      depends on this being stateful).
 #   brew outdated --json=v2          — returns outdated.json
-#   brew pin/unpin <name>            — no-op success
+#   brew pin/unpin <name>            — stateful (files under $DIR/pinned/)
+#   brew list --pinned               — lists the pin store
 
 DIR="${MOCK_BREW_DIR:-/dev/null}"
 
@@ -28,21 +29,86 @@ if [ -n "${MOCK_BREW_FAIL:-}" ] && [ "$1" = "$MOCK_BREW_FAIL" ]; then
     exit 1
 fi
 
+# Test seam: MOCK_BREW_CALL_LOG records every invocation (one line each), so a
+# test can assert HOW MANY brew calls a phase made — the batched graph walk is
+# a promise about call count, and a fallback that silently does the per-item
+# work would pass every verdict-only assertion.
+if [ -n "${MOCK_BREW_CALL_LOG:-}" ]; then
+    echo "$*" >>"$MOCK_BREW_CALL_LOG"
+fi
+
 case "$1" in
+    --cellar)
+        # The wrapper stats $CELLAR/<name> to learn whether a dep is installed
+        # before batching `brew list --versions` (which fails outright on any
+        # uninstalled name). The mock Cellar mirrors the list_<name>.txt
+        # fixtures: a name is "installed" iff a versions file was staged.
+        mkdir -p "$DIR/cellar" 2>/dev/null
+        for f in "$DIR"/list_*.txt; do
+            [ -e "$f" ] || continue
+            n="${f##*/list_}"
+            n="${n%.txt}"
+            mkdir -p "$DIR/cellar/$n" 2>/dev/null
+        done
+        echo "$DIR/cellar"
+        ;;
     info)
-        # last positional arg is the package name
-        for arg in "$@"; do :; done
-        NAME="$arg"
-        F="$DIR/info_${NAME}.json"
-        if [ -f "$F" ]; then
-            cat "$F"
+        # Every positional arg is a package name; the batched graph walk passes
+        # several at once. Merge the canned per-package files into one answer,
+        # as real `brew info --json=v2 a b c` does. Test seam:
+        # MOCK_BREW_INFO_BATCH_FAIL=1 makes a multi-name call fail (real brew
+        # fails the whole call when one name is unknown), so the per-dep
+        # fallback is exercised.
+        NAMES=""
+        for arg in "$@"; do
+            case "$arg" in info | --*) ;; *) NAMES="$NAMES $arg" ;; esac
+        done
+        # shellcheck disable=SC2086
+        set -- $NAMES
+        if [ "$#" -gt 1 ] && [ -n "${MOCK_BREW_INFO_BATCH_FAIL:-}" ]; then
+            echo "Error: No available formula with the name \"$1\"." >&2
+            exit 1
+        fi
+        if [ "$#" -le 1 ]; then
+            F="$DIR/info_${1:-}.json"
+            if [ -f "$F" ]; then
+                cat "$F"
+            else
+                echo '{"formulae":[],"casks":[]}'
+            fi
         else
-            echo '{"formulae":[],"casks":[]}'
+            DIR="$DIR" python3 -c '
+import os, json, sys
+out = {"formulae": [], "casks": []}
+for name in sys.argv[1:]:
+    f = os.path.join(os.environ["DIR"], f"info_{name}.json")
+    if os.path.exists(f):
+        with open(f) as fh:
+            d = json.load(fh)
+        out["formulae"] += d.get("formulae", [])
+        out["casks"] += d.get("casks", [])
+print(json.dumps(out))
+' "$@"
         fi
         ;;
     deps)
-        # last positional arg is the package name. Normalize slashes so a
-        # tap-qualified name (sharkyger/tap/safe-upgrade) maps to a flat filename.
+        # `brew deps --for-each a b` → "a: d1 d2" per line (same closure as the
+        # single-name form). Otherwise the last positional arg is the package
+        # name. Normalize slashes so a tap-qualified name
+        # (sharkyger/tap/safe-upgrade) maps to a flat filename.
+        if [ "${2:-}" = "--for-each" ]; then
+            shift 2
+            for NAME in "$@"; do
+                NAME_NORM="$(printf '%s' "$NAME" | tr '/' '_')"
+                F="$DIR/deps_${NAME_NORM}.txt"
+                if [ -f "$F" ]; then
+                    printf '%s: %s\n' "$NAME" "$(tr '\n' ' ' <"$F" | sed 's/ *$//')"
+                else
+                    printf '%s: \n' "$NAME"
+                fi
+            done
+            exit 0
+        fi
         for arg in "$@"; do :; done
         NAME="$arg"
         NAME_NORM="$(printf '%s' "$NAME" | tr '/' '_')"
@@ -61,11 +127,32 @@ case "$1" in
         if [ -f "$F" ]; then cat "$F"; else exit 1; fi
         ;;
     list)
-        # `brew list --versions --formula <name>` → installed versions
-        for arg in "$@"; do :; done
-        NAME="$arg"
-        F="$DIR/list_${NAME}.txt"
-        if [ -f "$F" ]; then cat "$F"; fi
+        # `brew list --pinned` → names of the formulae currently pinned (one per
+        # line), read from the stateful pin store so a test can assert the
+        # wrapper left nothing pinned behind after an interrupted [s] run.
+        for arg in "$@"; do
+            if [ "$arg" = "--pinned" ]; then
+                if [ -d "$DIR/pinned" ]; then
+                    ls "$DIR/pinned" 2>/dev/null
+                fi
+                exit 0
+            fi
+        done
+        # `brew list --versions --formula <name>...` → installed versions, one
+        # line per name. Real brew prints NOTHING and exits 1 if ANY name is
+        # not installed (verified 2026-08-22) — mirrored here so the wrapper's
+        # Cellar pre-filter is what keeps the batch answerable.
+        _out=""
+        for arg in "$@"; do
+            case "$arg" in list | --*) continue ;; esac
+            F="$DIR/list_${arg##*/}.txt"
+            if [ -f "$F" ]; then
+                _out="${_out}$(cat "$F")"$'\n'
+            else
+                exit 1
+            fi
+        done
+        printf '%s' "$_out"
         ;;
     outdated)
         F="$DIR/outdated.json"
@@ -91,6 +178,11 @@ case "$1" in
         exit 0
         ;;
     upgrade)
+        # Test seam: MOCK_BREW_UPGRADE_SLEEP holds the upgrade open so a test can
+        # interrupt the wrapper while brew is "running".
+        if [ -n "${MOCK_BREW_UPGRADE_SLEEP:-}" ]; then
+            sleep "$MOCK_BREW_UPGRADE_SLEEP"
+        fi
         # Stateful: drop the upgraded package(s) from outdated.json so a later
         # `brew outdated` no longer lists them. This models "after upgrade, no
         # longer outdated" — required for the --self belt-and-suspenders re-check
@@ -133,15 +225,32 @@ except Exception:
         # Test seam: MOCK_PIN_LOG records pin/unpin calls so a test can assert
         # that a flagged dependency really was pinned for the duration of the
         # upgrade (the mechanism that stops brew resolving it in anyway).
+        _cmd="$1"
+        shift
         if [ -n "${MOCK_PIN_LOG:-}" ]; then
             # One line per package: real `brew pin` accepts several at once, and
             # logging only $2 would hide everything after the first.
-            _cmd="$1"
-            shift
             for _pkg in "$@"; do
                 echo "$_cmd $_pkg" >>"$MOCK_PIN_LOG"
             done
         fi
+        # Stateful pin store: `brew list --pinned` reads it back. Pre-existing
+        # pins are staged by a test as files under $DIR/pinned/ before the run.
+        mkdir -p "$DIR/pinned" 2>/dev/null
+        for _pkg in "$@"; do
+            case "$_pkg" in --*) continue ;; esac
+            if [ "$_cmd" = "pin" ]; then
+                : >"$DIR/pinned/$_pkg"
+            else
+                # Test seam: MOCK_BREW_UNPIN_SLEEP slows each unpin so a test can
+                # deliver SIGINT while the wrapper is INSIDE its unpin loop — the
+                # worst case, which strands the Held set (unpinned last).
+                if [ -n "${MOCK_BREW_UNPIN_SLEEP:-}" ]; then
+                    sleep "$MOCK_BREW_UNPIN_SLEEP"
+                fi
+                rm -f "$DIR/pinned/$_pkg"
+            fi
+        done
         exit 0
         ;;
     install)

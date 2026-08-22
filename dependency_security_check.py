@@ -646,6 +646,19 @@ NVD_RECENT_WINDOW_DAYS = 120  # NVD's maximum pubStartDate..pubEndDate span
 NVD_RECENT_SWEEP_CAP = 10
 
 
+# Coverage notes for the verdict. Printed to stderr for a direct caller AND
+# carried in the JSON as "notes": the wrappers run the scanner with
+# 2>/dev/null, so a note that only went to stderr was never seen in a
+# brew-safe-upgrade run — the rate-limit hint had the same problem and travels
+# in the JSON for the same reason.
+_NOTES: list = []
+
+
+def _note(text):
+    _NOTES.append(text)
+    print(f"  Note: {text}", file=sys.stderr)
+
+
 def _nvd_recent_unanalysed(search_name):
     """Keyword records published in the last NVD_RECENT_WINDOW_DAYS that carry
     no CPE data yet. Used next to an authoritative CPE answer so a brand-new
@@ -670,11 +683,10 @@ def _nvd_recent_unanalysed(search_name):
             if truncated
             else str(len(fresh))
         )
-        print(
-            f"  Note: {count} unanalysed NVD records from the last "
+        _note(
+            f"{count} unanalysed NVD records from the last "
             f"{NVD_RECENT_WINDOW_DAYS} days mention '{search_name}' — too generic to "
-            "attribute by text; relying on CPE-analysed records only.",
-            file=sys.stderr,
+            "attribute by text; relying on CPE-analysed records only."
         )
         return []
     return fresh
@@ -905,6 +917,13 @@ def _same_scheme(a, b):
     return bool(pa and pb and pa._key[0][0] == pb._key[0][0])
 
 
+# How many words may precede the sentence-leading "in" for it to still count as
+# boilerplate: "An issue was discovered in" / "Multiple issues were found in"
+# put four words before it, "A command injection vulnerability exists in" five.
+# An "in" further down the sentence is a later clause.
+_IN_HEAD_MAX_WORDS = 5
+
+
 def _desc_names_this_package(desc, match_terms):
     """Keyword-path relevance heuristic: is the CVE really about this package?
 
@@ -959,9 +978,21 @@ def _desc_names_this_package(desc, match_terms):
     matched_nodash_re = re.compile(r"(?<![a-z0-9])" + re.escape(matched_nodash) + r"(?![a-z0-9])")
     if matched_re.search(head) or matched_nodash_re.search(head):
         return True
-    # "in [the] [version(s) of] <product>" — the product is what the issue is in.
+    # "in [the] [version(s) of] <product>" — the product is what the issue is
+    # in. Only the SENTENCE-LEADING "in" qualifies: the first "in" of the
+    # sentence, and it must sit in the boilerplate head ("In <product> ...",
+    # "A vulnerability in <product>", "An issue was discovered in <product>").
+    # Any later "in" names a component, a context or an environment, not the
+    # affected product: CVE-2026-14586 is an Unbound bug — "In NLnet Labs
+    # Unbound 1.22.0 ..., in DNS-over-QUIC environments, ..., an assertion in
+    # libngtcp2 ..." — and the old rule (any "in <product>") flagged libngtcp2.
+    first_in = re.search(r"\bin\b", first_sentence)
+    if first_in is None:
+        return False
+    if len(first_sentence[: first_in.start()].split()) > _IN_HEAD_MAX_WORDS:
+        return False
     in_re = re.compile(
-        r"\bin (?:the )?(?:versions? of )?(?:the )?"
+        r"in (?:the )?(?:versions? of )?(?:the )?"
         + "(?:"
         + re.escape(matched_term)
         + "|"
@@ -969,7 +1000,7 @@ def _desc_names_this_package(desc, match_terms):
         + ")"
         + r"(?![a-z0-9\-])"
     )
-    return bool(in_re.search(first_sentence))
+    return bool(in_re.match(first_sentence, first_in.start()))
 
 
 def _nvd_cve_to_finding(vuln, ecosystem, version, match_terms, require_desc_match, products=()):
@@ -1042,9 +1073,38 @@ def _nvd_cve_to_finding(vuln, ecosystem, version, match_terms, require_desc_matc
         # False when NVD has no applicability data for the record yet (typically
         # "Awaiting Analysis") and the text names no version bound: the CVE is
         # reported against every version because nothing says it is fixed, not
-        # because this version is known to be affected.
-        "scoped": bool(relevant_cpes),
+        # because this version is known to be affected. Equally False when the
+        # only applicability is a VERSIONLESS CPE (`gnome:gdk-pixbuf:-`, no
+        # bounds): that names the product, not a version, and the verdict is
+        # the same fail-closed "nothing says it is fixed" — CVE-2026-5201 was
+        # fixed in gdk-pixbuf 2.44.6 and still blocked 2.44.8 as "scoped".
+        "scoped": _cpes_carry_version_scope(relevant_cpes),
     }
+
+
+def _cpes_carry_version_scope(cpes):
+    """True if at least one CPE makes a statement about versions: a bound
+    (versionStart*/versionEnd*) or a concrete version in the criteria. A bare
+    `*` or `-` version with no bounds is a product name, not a version scope."""
+    for cpe in cpes:
+        if any(
+            cpe.get(k)
+            for k in (
+                "versionStartIncluding",
+                "versionStartExcluding",
+                "versionEndIncluding",
+                "versionEndExcluding",
+            )
+        ):
+            return True
+        parts = cpe.get("criteria", "").split(":")
+        if len(parts) >= 6 and parts[5] not in ("*", "-", ""):
+            return True
+        # An OpenSSH portmark in the UPDATE component (`openssh:*:p2`) is a
+        # version statement too — _cpe_version_affected matches on it.
+        if len(parts) >= 7 and re.fullmatch(r"p\d+", parts[6] or ""):
+            return True
+    return False
 
 
 def query_nvd(package_name, ecosystem, version=None):
@@ -1351,6 +1411,7 @@ def main():
                 # to print identically as "check failed".
                 "failure_reasons": [f"{e['source']}: {e['summary']}" for e in errors],
                 "rate_limited": rate_limited,
+                "notes": list(_NOTES),
                 "vulnerabilities": [],
             },
             sys.stdout,
@@ -1377,6 +1438,7 @@ def main():
                 "sources_total": len(applicable),
                 "sources_failed": failed_sources,
                 "rate_limited": rate_limited,
+                "notes": list(_NOTES),
                 "vulnerabilities": [],
             },
             sys.stdout,
@@ -1413,6 +1475,7 @@ def main():
                 "sources_total": len(applicable),
                 "sources_failed": failed_sources,
                 "rate_limited": rate_limited,
+                "notes": list(_NOTES),
                 "vulnerabilities": vulns,
             },
             sys.stdout,

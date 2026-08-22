@@ -8,6 +8,22 @@ The project is pre-1.0; expect minor breaking changes between 0.x releases until
 
 ## [Unreleased]
 
+### Fixed
+
+- **An interrupted `[s]` run no longer leaves your formulae pinned.** Under `[s]` / `--skip-unsafe` the excluded formulae are `brew pin`-ed around the upgrade so brew cannot drag a flagged dependency in underneath something else. That bracket was pin → upgrade → unpin with nothing in between: a Ctrl-C or crash left every excluded formula pinned, silently — and plain `brew upgrade` skips pinned formulae without a word, so a user sat on pinned *vulnerable* packages indefinitely believing they upgrade normally. The wrapper now records the pins it sets (pre-existing pins are yours and are left alone), releases them in a trap on normal exit and on a handled interrupt or termination signal (Ctrl-C, `kill`), and prints what it released. A SIGKILL or a host crash cannot run a trap — after one of those, `brew list --pinned` shows what is left. Verified with the signal delivered inside the unpin loop itself — the Held set is unpinned last, so that is the set a late Ctrl-C used to strand.
+
+- **Identical findings on the installed and the candidate version are "unchanged exposure", not a block — `[SAME]`.** `gh 2.98.0` could never pass: CVE-2024-53858 (Deferred, never given a CPE, fixed in 2.63.0) matched the installed and the candidate version identically on the keyword path, so the freshness hold was waived because the installed version "has CVEs" and the upgrade refused because the candidate "has CVEs". Per-package CPE fixes cannot close the class; the next unscoped record recreates it. When the candidate carries exactly the finding set the installed version carries, the upgrade does not change exposure: it is reported as `[SAME]` with the findings still named, summarised on its own line, and upgraded with the clean set. A finding only the candidate carries, a clean installed version, or an installed-side scan that fails all keep the block.
+
+- **Only the sentence-leading "in <product>" counts on the keyword path.** CVE-2026-14586 is an Unbound bug — "In NLnet Labs Unbound 1.22.0 …, in DNS-over-QUIC environments, …, an assertion in libngtcp2 …" — and the relevance rule matched its third "in", blocking `libngtcp2` on a record about another product. The first "in" of the sentence is now the only one that qualifies, and only in the boilerplate head ("In <product> …", "A vulnerability in <product>", "An issue was discovered in <product>"). Every previously pinned case keeps its side.
+
+- **A versionless CPE is not version scope.** CVE-2026-5201 (gdk-pixbuf JPEG loader) was fixed upstream in 2.44.6; NVD's only upstream applicability is `cpe:2.3:a:gnome:gdk-pixbuf:-` — no version, no bounds — and the scanner reported it against 2.44.8 as `scoped: true`, i.e. "version-confirmed", when nothing in the record speaks to a version. The verdict is unchanged (fail closed: the record does not say 2.44.8 is fixed); the label is corrected — `scoped` is true only when a CPE carries a version bound or a concrete version — which also makes the finding visibly the same evidence-free record on both sides, so `[SAME]` lets the upgrade through instead of deadlocking it.
+
+- **Scanner coverage notes reach the user.** The wrapper runs the scanner with its stderr discarded, so the "N unanalysed NVD records … relying on CPE-analysed records only" note only ever existed on a stderr nobody saw. The scanner now carries its notes in the verdict JSON (`notes`), and `brew safe-upgrade` prints them as `note: …` under `[ok]`, `[SAME]` and `[VULN]` — the same route the rate-limit hint already travels.
+
+### Changed
+
+- **The dependency graph walk is batched; its timing is reported separately from the checks.** A 34-package batch spent 378 s in the dependency phase to find two incoming dependencies: `brew deps` per package, then `brew info` and `brew list` per (package, dependency) *pair*, over closures that overlap almost entirely — several hundred Ruby start-ups. Now one `brew deps --for-each` for the batch, one `brew info` and one `brew list` for the unique dependency set, and the decision runs once per unique dependency (a shared flagged dependency still holds every dependent; each batched call falls back to the per-item call if brew rejects the batch). The phase prints `(dependency graph took Ns)` and `(dependency checks took Ns)` separately, the graph line even when nothing is incoming.
+
 ## [0.3.3] — 2026-08-21
 
 ### Fixed

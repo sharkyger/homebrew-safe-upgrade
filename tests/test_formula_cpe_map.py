@@ -188,6 +188,63 @@ def test_recent_sweep_that_overflows_is_treated_as_too_generic(monkeypatch, caps
         r = json.loads(_nvd_response(f"CVE-2026-{i:05d}", f"PHP issue in SomeApp{i}.", []))
         records.extend(r["vulnerabilities"])
     body = {"totalResults": 500, "vulnerabilities": records}
+    monkeypatch.setattr(dsc, "_NOTES", [])
     _, findings = _run("php", "8.5.9", {"pubStartDate=": json.dumps(body).encode()})
     assert findings == [], findings
     assert "fetched 2 of 500 records" in capsys.readouterr().err
+    # The same note rides in the verdict JSON: the wrappers run the scanner
+    # with 2>/dev/null, so stderr alone never reached a brew-safe-upgrade user.
+    assert any("fetched 2 of 500 records" in n for n in dsc._NOTES), dsc._NOTES
+
+
+def test_versionless_cpe_is_reported_but_not_as_version_scoped():
+    """CVE-2026-5201: the only upstream applicability is `gnome:gdk-pixbuf:-`
+    — no version, no bounds. The fix shipped in 2.44.6, yet 2.44.8 was blocked
+    with `scoped: True`, which reads as "version-confirmed". The finding stays
+    (fail closed: nothing in the record says 2.44.8 is fixed) but is labelled
+    unscoped, so the wrapper's [SAME] rule can see that installed and candidate
+    carry the same evidence-free record."""
+    body = json.loads(
+        _nvd_response(
+            "CVE-2026-5201",
+            "A flaw was found in the gdk-pixbuf library. This heap-based buffer overflow "
+            "vulnerability occurs in the JPEG image loader.",
+            [
+                "cpe:2.3:a:gnome:gdk-pixbuf:-:*:*:*:*:*:*:*",
+                "cpe:2.3:o:redhat:enterprise_linux:9.0:*:*:*:*:*:*:*",
+            ],
+        )
+    )
+    body["totalResults"] = 1
+    _, findings = _run("gdk-pixbuf", "2.44.8", {"gdk-pixbuf": json.dumps(body).encode()})
+    assert {f["id"] for f in findings} == {"CVE-2026-5201"}
+    assert findings[0]["scoped"] is False
+
+
+def test_bounded_cpe_is_version_scoped():
+    body = json.loads(
+        _nvd_response(
+            "CVE-2026-5201",
+            "A flaw was found in the gdk-pixbuf library.",
+            ["cpe:2.3:a:gnome:gdk-pixbuf:*:*:*:*:*:*:*:*"],
+        )
+    )
+    body["vulnerabilities"][0]["cve"]["configurations"][0]["nodes"][0]["cpeMatch"][0][
+        "versionEndExcluding"
+    ] = "2.44.6"
+    body["totalResults"] = 1
+    _, findings = _run("gdk-pixbuf", "2.44.5", {"gdk-pixbuf": json.dumps(body).encode()})
+    assert findings and findings[0]["scoped"] is True
+    _, findings = _run("gdk-pixbuf", "2.44.8", {"gdk-pixbuf": json.dumps(body).encode()})
+    assert findings == [], "2.44.8 is outside the bound and must be clean"
+
+
+def test_portmark_in_the_update_component_is_version_scope():
+    """`openssh:*:p2` pins a portable build; the matcher applies it, so the
+    label must not call the finding unscoped."""
+    assert dsc._cpes_carry_version_scope(
+        [{"criteria": "cpe:2.3:a:openbsd:openssh:*:p2:*:*:*:*:*:*"}]
+    )
+    assert not dsc._cpes_carry_version_scope(
+        [{"criteria": "cpe:2.3:a:openbsd:openssh:*:*:*:*:*:*:*:*"}]
+    )
