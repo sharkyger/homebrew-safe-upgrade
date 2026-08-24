@@ -8,6 +8,8 @@ The project is pre-1.0; expect minor breaking changes between 0.x releases until
 
 ## [Unreleased]
 
+## [0.3.5] — 2026-08-24
+
 ### Fixed
 
 - **An upgrade that FIXES vulnerabilities is no longer blocked for still having some — `[IMPROVES]`.** The verdict compared the candidate's findings to the installed version's with `=`, so "exposure unchanged" passed (`[SAME]`, v0.3.4) while "exposure strictly reduced" was blocked. That failed in the unsafe direction: `python@3.12` 3.12.14 fixes two of 3.12.13's eleven findings — CVE-2026-15308 (HIGH) and CVE-2026-0864 — and introduces none, and was blocked for it, holding the machine on the *more* vulnerable version while the run exited 0. The test is now subset, not equality: block on what the candidate **adds**, never on what it removes. Equal findings stay `[SAME]`; a strict subset is `[IMPROVES]`, reported with the count it fixes, summarised on its own line, and upgraded with the clean set. A finding only the candidate carries — even alongside several it fixes — still blocks; so does a clean or unreadable installed-side scan.
@@ -337,7 +339,8 @@ pre-tag history by theme rather than by release. Full detail is in `git log`.
 - CodeQL, gitleaks, and dependabot wired up.
 - Community health files: issue templates (bug, false-positive, feature), discussion link from README on the open `--min-age` default question.
 
-[Unreleased]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.3.4...HEAD
+[Unreleased]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.3.5...HEAD
+[0.3.5]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.3.4...v0.3.5
 [0.3.4]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.3.1...v0.3.2
