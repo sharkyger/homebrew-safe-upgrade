@@ -705,6 +705,17 @@ except Exception:
 " 2>/dev/null || true
 }
 
+# Findings the CANDIDATE ($1) carries that the INSTALLED version ($2) does not.
+# Empty output means the upgrade introduces nothing new: its exposure is a
+# subset of what is already on the machine, so blocking it can only keep the
+# user on the more vulnerable version. Both inputs come from finding_ids (sorted,
+# unique); re-sorting is cheap and keeps comm's precondition local.
+new_findings() {
+    comm -23 \
+        <(printf '%s\n' "$1" | grep -v '^$' | sort -u) \
+        <(printf '%s\n' "$2" | grep -v '^$' | sort -u)
+}
+
 # Elapsed-time reporter: phase_took <label> <start_seconds>. Uses bash's SECONDS
 # so a 10-minute run shows where the time went — the age phase, the security
 # phase and the dependency phase have very different cost profiles and the
@@ -1073,6 +1084,7 @@ _phase_start=$SECONDS
 
 BLOCKED_PKGS=""
 SAME_PKGS=""
+IMPROVED_PKGS=""
 TAMPERED_PKGS=""
 
 # One actionable note per run when NVD threw us out for asking too fast.
@@ -1230,21 +1242,39 @@ except Exception:
             # never given a CPE) that way. Per-package CPE fixes cannot close
             # the class; the next unscoped record recreates it.
             #
-            # Rule: the SAME finding set on installed and candidate means the
-            # upgrade does not change exposure. That is its own state, [SAME],
-            # reported on its own line and upgraded with the clean set. Any
-            # difference — a finding only the candidate carries, or an installed
-            # scan that fails — keeps the block (fail closed).
+            # Rule: block on what the candidate ADDS, never on what it removes.
+            # If the candidate's findings are a SUBSET of the installed
+            # version's, the upgrade cannot increase exposure — equal is [SAME],
+            # strictly smaller is [IMPROVES] — and both upgrade with the clean
+            # set. Anything the candidate carries and the installed version does
+            # not, or an installed scan that fails, keeps the block (fail closed).
+            #
+            # Equality alone was the wrong test, and it failed in the unsafe
+            # direction: python@3.12 3.12.14 fixed two of 3.12.13's eleven
+            # findings and added none, and was blocked for it, holding the
+            # machine on the MORE vulnerable version while the run exited 0.
+            # Because Python's newest release essentially always carries open
+            # CVEs, that was a permanent deadlock, not a transient hold.
             _CAND_IDS=$(finding_ids "$RESULT_JSON")
             _INST_JSON=$(python3 "$SCRIPT" brew "$name" "$installed" 2>/dev/null) && _INST_EXIT=0 || _INST_EXIT=$?
             _INST_IDS=""
             [ "$_INST_EXIT" -eq 1 ] && _INST_IDS=$(finding_ids "$_INST_JSON")
-            if [ -n "$_CAND_IDS" ] && [ "$_CAND_IDS" = "$_INST_IDS" ]; then
+            _NEW_IDS=""
+            if [ -n "$_CAND_IDS" ] && [ -n "$_INST_IDS" ]; then
+                _NEW_IDS=$(new_findings "$_CAND_IDS" "$_INST_IDS")
+            fi
+            if [ -n "$_CAND_IDS" ] && [ -n "$_INST_IDS" ] && [ -z "$_NEW_IDS" ]; then
                 _n=$(printf '%s\n' "$_CAND_IDS" | grep -c .)
-                echo "  [SAME] $name $current -- same $_n finding(s) as installed $installed, upgrade does not change exposure"
+                _ni=$(printf '%s\n' "$_INST_IDS" | grep -c .)
+                if [ "$_n" -eq "$_ni" ]; then
+                    echo "  [SAME] $name $current -- same $_n finding(s) as installed $installed, upgrade does not change exposure"
+                    SAME_PKGS="$SAME_PKGS $name"
+                else
+                    echo "  [IMPROVES] $name $current -- fixes $((_ni - _n)) of $_ni finding(s) from installed $installed, introduces none"
+                    IMPROVED_PKGS="$IMPROVED_PKGS $name"
+                fi
                 print_vuln_lines "$RESULT_JSON"
                 print_scan_notes "$RESULT_JSON"
-                SAME_PKGS="$SAME_PKGS $name"
                 CLEAN_COUNT=$((CLEAN_COUNT + 1))
             else
                 echo "  [VULN] $name $current -- vulnerabilities found!"
@@ -1326,6 +1356,9 @@ fi
 if [ -n "$SAME_PKGS" ]; then
     echo "  Unchanged exposure (same findings as installed, upgrading):$SAME_PKGS"
 fi
+if [ -n "$IMPROVED_PKGS" ]; then
+    echo "  Reduced exposure (fixes findings, upgrading):$IMPROVED_PKGS"
+fi
 if [ -n "$TAMPERED_PKGS" ]; then
     echo "  Blocked (SHA tampered):$TAMPERED_PKGS"
 fi
@@ -1348,9 +1381,16 @@ fi
 # rate-limited NVD traffic with little practical benefit. Held deps are
 # surfaced via [HOLD-DEP]; user can override at the prompt.
 #
-# Storage: INCOMING_DEPS_ARR holds "<dep>|<version>" entries. `|` chosen
-# because Homebrew formula names contain `@` (e.g. openssl@3) and versions
-# occasionally do too — `|` cannot appear in either.
+# That reasoning covers the AGE bypass only. The CVE verdict itself IS
+# relative here, as it is at the top level — see the [SAME-DEP]/[IMPROVES-DEP]
+# branch below. Reason (3) does not carry over: that comparison runs only when
+# a dep has already been flagged, so it costs one extra query per flagged dep,
+# not one per dep.
+#
+# Storage: INCOMING_DEPS_ARR holds "<dep>|<incoming>|<installed>" entries
+# (the third field is empty when the dep is not installed). `|` chosen because
+# Homebrew formula names contain `@` (e.g. openssl@3) and versions occasionally
+# do too — `|` cannot appear in either.
 DEP_BLOCKED_VULN=""
 DEP_BLOCKED_VULN_REASONS=""
 DEP_BLOCKED_HOLD=""
@@ -1492,7 +1532,11 @@ except Exception:
         esac
 
         if [ -z "$INSTALLED_VER" ] || [ "$INSTALLED_VER" != "$LATEST" ]; then
-            INCOMING_DEPS_ARR+=("${dep}|${LATEST}")
+            # Third field is the INSTALLED version (empty when the dep is not
+            # installed): the block path below needs a baseline to compare the
+            # incoming findings against, and re-deriving it there would mean
+            # another brew call per flagged dep.
+            INCOMING_DEPS_ARR+=("${dep}|${LATEST}|${INSTALLED_VER}")
             # Ownership is recorded per (dep, pkg): two packages can share one
             # flagged dep and both have to be held.
             while IFS= read -r _owner; do
@@ -1513,8 +1557,10 @@ except Exception:
 
         _DEP_IDX=0
         for entry in ${INCOMING_DEPS_ARR[@]+"${INCOMING_DEPS_ARR[@]}"}; do
-            DEP=${entry%|*}
-            DEP_VER=${entry##*|}
+            DEP=${entry%%|*}
+            _dep_rest=${entry#*|}
+            DEP_VER=${_dep_rest%%|*}
+            DEP_INSTALLED_VER=${_dep_rest#*|}
 
             # Progress (#60): each dep makes network calls (age + 3 CVE DBs), so a
             # large batch can run for minutes. Announce the dep BEFORE the slow
@@ -1572,10 +1618,40 @@ except Exception:
             if [ "$DEP_EXIT" -eq 0 ]; then
                 echo "    [ok-dep] $DEP $DEP_VER"
             elif [ "$DEP_EXIT" -eq 1 ]; then
-                echo "    [VULN-DEP] $DEP $DEP_VER -- vulnerabilities found"
-                SUMMARY=$(echo "$DEP_RESULT" | grep -E 'CRITICAL|HIGH|MEDIUM' | head -1 || true)
-                DEP_BLOCKED_VULN="$DEP_BLOCKED_VULN $DEP"
-                DEP_BLOCKED_VULN_REASONS="${DEP_BLOCKED_VULN_REASONS}    $DEP $DEP_VER: ${SUMMARY:-vulnerabilities reported}"$'\n'
+                # Same relative rule as the top-level scan: block on findings the
+                # incoming version ADDS, not on ones it inherits or fixes. Without
+                # this, a dep whose newest release still carries any open CVE taints
+                # every dependent forever — python@3.12 held pip-cve-gate and
+                # shopify-cli that way while the upgrade would have FIXED two of the
+                # eleven findings already installed.
+                #
+                # The extra scan runs only here, on the block path, so it costs one
+                # query per FLAGGED dep rather than one per dep — the NVD traffic
+                # objection in the design note above does not apply at this volume.
+                _DCAND_IDS=$(finding_ids "$DEP_RESULT")
+                _DINST_IDS=""
+                if [ -n "$DEP_INSTALLED_VER" ]; then
+                    _DINST_JSON=$(python3 "$SCRIPT" brew "$DEP" "$DEP_INSTALLED_VER" 2>/dev/null) && _DINST_EXIT=0 || _DINST_EXIT=$?
+                    [ "$_DINST_EXIT" -eq 1 ] && _DINST_IDS=$(finding_ids "$_DINST_JSON")
+                fi
+                _DNEW_IDS=""
+                if [ -n "$_DCAND_IDS" ] && [ -n "$_DINST_IDS" ]; then
+                    _DNEW_IDS=$(new_findings "$_DCAND_IDS" "$_DINST_IDS")
+                fi
+                if [ -n "$_DCAND_IDS" ] && [ -n "$_DINST_IDS" ] && [ -z "$_DNEW_IDS" ]; then
+                    _dn=$(printf '%s\n' "$_DCAND_IDS" | grep -c .)
+                    _dni=$(printf '%s\n' "$_DINST_IDS" | grep -c .)
+                    if [ "$_dn" -eq "$_dni" ]; then
+                        echo "    [SAME-DEP] $DEP $DEP_VER -- same $_dn finding(s) as installed $DEP_INSTALLED_VER, upgrade does not change exposure"
+                    else
+                        echo "    [IMPROVES-DEP] $DEP $DEP_VER -- fixes $((_dni - _dn)) of $_dni finding(s) from installed $DEP_INSTALLED_VER, introduces none"
+                    fi
+                else
+                    echo "    [VULN-DEP] $DEP $DEP_VER -- vulnerabilities found"
+                    SUMMARY=$(echo "$DEP_RESULT" | grep -E 'CRITICAL|HIGH|MEDIUM' | head -1 || true)
+                    DEP_BLOCKED_VULN="$DEP_BLOCKED_VULN $DEP"
+                    DEP_BLOCKED_VULN_REASONS="${DEP_BLOCKED_VULN_REASONS}    $DEP $DEP_VER: ${SUMMARY:-vulnerabilities reported}"$'\n'
+                fi
             else
                 _why=$(first_failure_reason "$DEP_RESULT")
                 echo "    [skip-dep] $DEP $DEP_VER -- check failed (${_why:-network or DB error})"
@@ -1671,7 +1747,13 @@ except Exception:
                 # (#98). `s` upgrades only the packages that don't touch it.
                 echo "Continue upgrade?"
                 echo "  [y] yes — upgrade everything, including the flagged dependencies"
-                echo "  [s] skip — upgrade only the unaffected packages above"
+                # Offer [s] only when it would actually do something. With no
+                # unaffected package left, skipping is a guaranteed no-op — the
+                # line above already said so — and offering it anyway reads as a
+                # safe way out that silently upgrades nothing.
+                if [ -n "$DEP_SAFE_PKGS" ]; then
+                    echo "  [s] skip — upgrade only the unaffected packages above"
+                fi
                 echo "  [N] no  — cancel the whole upgrade (default)"
                 read -r DEP_CONFIRM
                 if [[ "$DEP_CONFIRM" =~ ^[sS] ]]; then

@@ -121,3 +121,78 @@ def test_installed_scan_failure_stays_blocked(brew_env, tmp_path):
     out = _run(brew_env, stub).stdout
     assert "[VULN] gh 2.99.0" in out, out
     assert "[SAME]" not in out
+
+
+# --------------------------------------------------------------------------
+# [IMPROVES]: the candidate fixes findings and introduces none.
+#
+# The equality test above is inverted against the safest case. python@3.12
+# 3.12.13 carried 11 findings, 3.12.14 carried 9 — a strict subset, fixing
+# CVE-2026-15308 (HIGH) and CVE-2026-0864 with zero regressions — and the
+# gate blocked it, holding the machine on the MORE vulnerable version while
+# exiting 0. "Exposure unchanged" passed; "exposure strictly reduced" did
+# not. The rule is subset, not equality: block on a finding the candidate
+# ADDS, never on findings it removes.
+# --------------------------------------------------------------------------
+
+
+def test_strict_subset_improves_and_upgrades(brew_env, tmp_path):
+    _scenario(brew_env)
+    stub = _stub(
+        tmp_path,
+        {
+            ("gh", "2.98.0"): ["CVE-2024-1", "CVE-2024-2", "CVE-2024-3"],
+            ("gh", "2.99.0"): ["CVE-2024-1", "CVE-2024-3"],
+        },
+    )
+    result = _run(brew_env, stub, input_text="y\n")
+    out = result.stdout
+    assert "[IMPROVES] gh 2.99.0 -- fixes 1 of 3 finding(s) from installed 2.98.0" in out, out
+    assert "[VULN]" not in out
+    assert "[SAME]" not in out, "a strict improvement is not the same exposure"
+    assert "Blocked (vulnerable)" not in out
+    assert "Reduced exposure (fixes findings, upgrading): gh" in out, out
+    assert "Clean formulae to upgrade: gh" in out, out
+    # brew upgrade actually ran
+    assert json.loads((brew_env / "outdated.json").read_text())["formulae"] == []
+
+
+def test_improves_still_names_the_remaining_findings(brew_env, tmp_path):
+    """Reduced is not clean — the user still sees what is left."""
+    _scenario(brew_env)
+    stub = _stub(
+        tmp_path,
+        {
+            ("gh", "2.98.0"): ["CVE-2024-1", "CVE-2024-2"],
+            ("gh", "2.99.0"): ["CVE-2024-1"],
+        },
+    )
+    out = _run(brew_env, stub, input_text="y\n").stdout
+    assert "[IMPROVES] gh 2.99.0" in out, out
+    assert "CVE-2024-1" in out, "the surviving finding is still reported"
+
+
+def test_candidate_that_adds_and_removes_stays_blocked(brew_env, tmp_path):
+    """Fail closed on a swap: fewer findings overall, but one is NEW. Count is
+    not the test — introducing anything the installed version lacks is."""
+    _scenario(brew_env)
+    stub = _stub(
+        tmp_path,
+        {
+            ("gh", "2.98.0"): ["CVE-2024-1", "CVE-2024-2", "CVE-2024-3"],
+            ("gh", "2.99.0"): ["CVE-2024-1", "CVE-2026-NEW"],
+        },
+    )
+    out = _run(brew_env, stub).stdout
+    assert "[VULN] gh 2.99.0" in out, out
+    assert "[IMPROVES]" not in out
+    assert "Blocked (vulnerable): gh" in out
+
+
+def test_improves_requires_a_readable_installed_scan(brew_env, tmp_path):
+    """Installed side unreadable → no baseline → cannot claim improvement."""
+    _scenario(brew_env)
+    stub = _stub(tmp_path, {("gh", "2.98.0"): "FAIL", ("gh", "2.99.0"): ["CVE-2024-1"]})
+    out = _run(brew_env, stub).stdout
+    assert "[VULN] gh 2.99.0" in out, out
+    assert "[IMPROVES]" not in out

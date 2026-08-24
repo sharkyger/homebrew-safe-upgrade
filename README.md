@@ -89,7 +89,17 @@ Results: 4 clean
   Unchanged exposure (same findings as installed, upgrading): gh
 ```
 
-A finding only the candidate carries is a real regression and stays `[VULN]`. A `note: …` line under a verdict is a coverage note from the scanner (for example "N unanalysed NVD records … relying on CPE-analysed records only").
+If the candidate fixes some of the installed version's findings and introduces none, that is `[IMPROVES]` — an upgrade that reduces exposure is never blocked for the findings it still carries:
+
+```
+  [IMPROVES] python@3.12 3.12.14 -- fixes 2 of 11 finding(s) from installed 3.12.13, introduces none
+    [HIGH] CVE-2026-3644 (CVSS 7.5) — NIST NVD
+
+Results: 4 clean
+  Reduced exposure (fixes findings, upgrading): python@3.12
+```
+
+The rule for both verdicts is the same: **what the candidate adds blocks it; what it removes never does.** A finding only the candidate carries is a real regression and stays `[VULN]` — even when it fixes several others at the same time. A clean installed version, or an installed-side scan that fails, leaves no baseline to compare against and also stays `[VULN]` (fail closed). A `note: …` line under a verdict is a coverage note from the scanner (for example "N unanalysed NVD records … relying on CPE-analysed records only").
 
 Under `[s]` / `--skip-unsafe` the excluded formulae are `brew pin`-ed for the duration of the upgrade so brew cannot pull a flagged dependency in underneath something else. The pins are released on exit, including on Ctrl-C or a `kill` (the wrapper prints the list it released). A SIGKILL or a host crash cannot run the trap — after one of those, check `brew list --pinned`. Pins you set yourself are never touched.
 
@@ -155,7 +165,9 @@ Checking transitive dependencies...
 Install gh? [Y/n]
 ```
 
-If a dep has a known CVE, the check warns and asks whether to proceed:
+Incoming dependencies are judged the same relative way as top-level packages: `[SAME-DEP]` when the incoming version carries exactly the installed version's findings, `[IMPROVES-DEP]` when it fixes some and adds none. Neither is a vulnerability-based hold on the packages that depend on it — the freshness (`--min-age`) check is separate and still applies. A dep that is not installed, or whose installed-side scan fails, has no baseline and is treated as flagged.
+
+If a dep introduces a finding its installed version does not have, the check warns and asks whether to proceed:
 
 ```
 WARNING: incoming dependencies have known issues:
