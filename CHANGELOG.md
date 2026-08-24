@@ -8,6 +8,14 @@ The project is pre-1.0; expect minor breaking changes between 0.x releases until
 
 ## [Unreleased]
 
+### Fixed
+
+- **An upgrade that FIXES vulnerabilities is no longer blocked for still having some — `[IMPROVES]`.** The verdict compared the candidate's findings to the installed version's with `=`, so "exposure unchanged" passed (`[SAME]`, v0.3.4) while "exposure strictly reduced" was blocked. That failed in the unsafe direction: `python@3.12` 3.12.14 fixes two of 3.12.13's eleven findings — CVE-2026-15308 (HIGH) and CVE-2026-0864 — and introduces none, and was blocked for it, holding the machine on the *more* vulnerable version while the run exited 0. The test is now subset, not equality: block on what the candidate **adds**, never on what it removes. Equal findings stay `[SAME]`; a strict subset is `[IMPROVES]`, reported with the count it fixes, summarised on its own line, and upgraded with the clean set. A finding only the candidate carries — even alongside several it fixes — still blocks; so does a clean or unreadable installed-side scan.
+
+- **The dependency path compares against the installed version too — `[SAME-DEP]` / `[IMPROVES-DEP]`.** The top-level scan has had a relative test since `gh` 2.98.0; the dependency path never grew one, and blocked on any finding at all in the incoming version. Because a widely-depended-on formula's newest release essentially always carries some open CVE, that tainted every dependent *permanently*, not transiently: `pip-cve-gate` 0.3.3 and `shopify-cli` 4.7.0 were both `[ok]` on their own checks and both held, leaving a batch that reported "Nothing left to upgrade" and exited 0. Dependencies now use the same subset rule as the top level. The extra installed-side scan runs only once a dep has already been flagged, so it costs one query per *flagged* dep rather than one per dep. A dep that is not installed, or whose installed-side scan fails, has no baseline and still taints — fail closed. Applies to `brew safe-install` as well as `brew safe-upgrade`.
+
+- **`[s]` is no longer offered when it provably does nothing.** When no package in the batch is free of the flagged dependencies — which the line directly above the prompt already states — skipping is a guaranteed no-op, and offering it reads as a safe way out that silently upgrades nothing. The option now appears only when there is an unaffected package for it to upgrade.
+
 ## [0.3.4] — 2026-08-22
 
 ### Fixed

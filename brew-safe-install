@@ -245,6 +245,29 @@ except Exception:
 " 2>/dev/null || true
 }
 
+# Sorted, de-duplicated finding ids from a scanner verdict ($1), one per line.
+# Used to compare an incoming dependency's exposure with the installed one's.
+finding_ids() {
+    echo "$1" | python3 -c "
+import sys, json
+try:
+    vulns = json.load(sys.stdin).get('vulnerabilities') or []
+    ids = sorted({str(v.get('id', '')) for v in vulns if v.get('id')})
+    print('\\n'.join(ids))
+except Exception:
+    pass
+" 2>/dev/null || true
+}
+
+# Findings the CANDIDATE ($1) carries that the INSTALLED version ($2) does not.
+# Empty output means the upgrade introduces nothing new. Same rule, same wording
+# as brew-safe-upgrade — a dep flagged here is flagged there.
+new_findings() {
+    comm -23 \
+        <(printf '%s\n' "$1" | grep -v '^$' | sort -u) \
+        <(printf '%s\n' "$2" | grep -v '^$' | sort -u)
+}
+
 resolve_gh_token() {
     if [ -n "${GH_TOKEN:-}" ]; then
         printf '%s' "$GH_TOKEN"
@@ -759,7 +782,8 @@ CLEAN_PKGS=$(echo "$CLEAN_PKGS" | xargs) # trim
 # rate-limited NVD traffic with little practical benefit. Held deps are
 # surfaced via [HOLD-DEP]; user can override at the prompt.
 #
-# Storage: INCOMING_DEPS_ARR holds "<dep>|<version>" entries. `|` chosen
+# Storage: INCOMING_DEPS_ARR holds "<dep>|<incoming>|<installed>" entries
+# (third field empty when the dep is not installed). `|` chosen
 # because Homebrew formula names contain `@` (e.g. openssl@3) and versions
 # occasionally do too — `|` cannot appear in either.
 DEP_BLOCKED_VULN=""
@@ -816,7 +840,7 @@ except Exception:
             if [ -z "$INSTALLED_VER" ] || [ "$INSTALLED_VER" != "$LATEST" ]; then
                 # Array-based dedup — quoted iteration preserves whitespace
                 # in pathological dep names (taps); flat-string dedup did not.
-                _entry="${dep}|${LATEST}"
+                _entry="${dep}|${LATEST}|${INSTALLED_VER}"
                 _seen=0
                 for _e in ${INCOMING_DEPS_ARR[@]+"${INCOMING_DEPS_ARR[@]}"}; do
                     [ "$_e" = "$_entry" ] && _seen=1 && break
@@ -836,8 +860,10 @@ except Exception:
 
         _DEP_IDX=0
         for entry in ${INCOMING_DEPS_ARR[@]+"${INCOMING_DEPS_ARR[@]}"}; do
-            DEP=${entry%|*}
-            DEP_VER=${entry##*|}
+            DEP=${entry%%|*}
+            _dep_rest=${entry#*|}
+            DEP_VER=${_dep_rest%%|*}
+            DEP_INSTALLED_VER=${_dep_rest#*|}
 
             # Progress (#60): each dep makes network calls (age + 3 CVE DBs), so a
             # large batch can run for minutes. Announce the dep BEFORE the slow
@@ -895,10 +921,35 @@ except Exception:
             if [ "$DEP_EXIT" -eq 0 ]; then
                 echo "    [ok-dep] $DEP $DEP_VER"
             elif [ "$DEP_EXIT" -eq 1 ]; then
-                echo "    [VULN-DEP] $DEP $DEP_VER -- vulnerabilities found"
-                SUMMARY=$(echo "$DEP_RESULT" | grep -E 'CRITICAL|HIGH|MEDIUM' | head -1 || true)
-                DEP_BLOCKED_VULN="$DEP_BLOCKED_VULN $DEP"
-                DEP_BLOCKED_VULN_REASONS="${DEP_BLOCKED_VULN_REASONS}    $DEP $DEP_VER: ${SUMMARY:-vulnerabilities reported}"$'\n'
+                # Block on what the incoming version ADDS, not on what it
+                # inherits or fixes — see the same branch in brew-safe-upgrade.
+                # An install pulls the newest dep, so without this a dep whose
+                # latest release carries any open CVE blocks every package that
+                # depends on it, permanently.
+                _DCAND_IDS=$(finding_ids "$DEP_RESULT")
+                _DINST_IDS=""
+                if [ -n "$DEP_INSTALLED_VER" ]; then
+                    _DINST_JSON=$(python3 "$SCRIPT" brew "$DEP" "$DEP_INSTALLED_VER" 2>/dev/null) && _DINST_EXIT=0 || _DINST_EXIT=$?
+                    [ "$_DINST_EXIT" -eq 1 ] && _DINST_IDS=$(finding_ids "$_DINST_JSON")
+                fi
+                _DNEW_IDS=""
+                if [ -n "$_DCAND_IDS" ] && [ -n "$_DINST_IDS" ]; then
+                    _DNEW_IDS=$(new_findings "$_DCAND_IDS" "$_DINST_IDS")
+                fi
+                if [ -n "$_DCAND_IDS" ] && [ -n "$_DINST_IDS" ] && [ -z "$_DNEW_IDS" ]; then
+                    _dn=$(printf '%s\n' "$_DCAND_IDS" | grep -c .)
+                    _dni=$(printf '%s\n' "$_DINST_IDS" | grep -c .)
+                    if [ "$_dn" -eq "$_dni" ]; then
+                        echo "    [SAME-DEP] $DEP $DEP_VER -- same $_dn finding(s) as installed $DEP_INSTALLED_VER, upgrade does not change exposure"
+                    else
+                        echo "    [IMPROVES-DEP] $DEP $DEP_VER -- fixes $((_dni - _dn)) of $_dni finding(s) from installed $DEP_INSTALLED_VER, introduces none"
+                    fi
+                else
+                    echo "    [VULN-DEP] $DEP $DEP_VER -- vulnerabilities found"
+                    SUMMARY=$(echo "$DEP_RESULT" | grep -E 'CRITICAL|HIGH|MEDIUM' | head -1 || true)
+                    DEP_BLOCKED_VULN="$DEP_BLOCKED_VULN $DEP"
+                    DEP_BLOCKED_VULN_REASONS="${DEP_BLOCKED_VULN_REASONS}    $DEP $DEP_VER: ${SUMMARY:-vulnerabilities reported}"$'\n'
+                fi
             else
                 _why=$(first_failure_reason "$DEP_RESULT")
                 echo "    [skip-dep] $DEP $DEP_VER -- check failed (${_why:-network or DB error})"
