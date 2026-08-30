@@ -8,6 +8,12 @@ The project is pre-1.0; expect minor breaking changes between 0.x releases until
 
 ## [Unreleased]
 
+### Fixed
+
+- **A CVE with several affected branches is no longer dropped by the wrong one.** When a record carries no CPE data the bounds come from its description, and `re.search` returned only the FIRST one — so "Foo 9.x before 9.2 and 10.x before 10.1 are affected" cleared 10.0 against 9.2 and discarded a CVE that genuinely applied. Two more shapes failed the same way: an exclusive bound mentioned in passing returned before the real bound was read ("a prior issue was fixed in 1.0. This new flaw affects versions through 3.0" cleared 2.0), and a prose year parsed as a version ("this flaw has existed since 2019" ruled out every 8.x release). All three dropped a live finding, which is the unsafe direction — a false positive costs an argument, a false negative ships a vulnerability. The version must now clear **every** bound the description states, and a bare four-digit bound counts only when the version is date-schemed itself. `up to X` is now recognised as inclusive alongside `through X`, and `up to but not including X` as exclusive. The Warp-style bound restated in the product's own scheme — `prior to 2024.07.18 (v0.2024.07.16.08.02)` — behaves exactly as before.
+
+- **`brew <formula>` without a version no longer reports the release that FIXES a CVE as vulnerable.** `resolve_latest_version()` covered pip and npm only; for brew it returned `None`, and the scanner then falls back to "Version: unknown — checking all known CVEs" and reports the formula's entire history at every version. `python3 dependency_security_check.py brew gitleaks` returned CVE-2026-63728 — "Gitleaks prior to 8.30.1" — against Homebrew's stable 8.30.1, the release carrying the fix; `brew wget` returned 25 findings instead of the 5 that apply to 1.25.0. The stable version now comes from the local client (`brew info --json=v2`), since Homebrew has no version endpoint to query the way PyPI and npm are queried. `brew safe-upgrade` itself always passes an explicit version and was never affected. Every failure path — no brew binary, unknown formula, timeout, malformed JSON, a `--json=v1` top-level list, a payload with no version — returns `None`, which is the previous behaviour, so nothing that works today starts failing. Cask versions written as `version,build` contribute only the part before the comma.
+
 ## [0.3.5] — 2026-08-24
 
 ### Fixed

@@ -25,6 +25,7 @@ import json
 import os
 import re
 import ssl
+import subprocess
 import sys
 import time
 import urllib.error
@@ -148,8 +149,65 @@ def _foreign_target_sw(target_sw, ecosystem):
     return target_sw in _ALL_ECOSYSTEM_TARGET_SW and target_sw not in own
 
 
+def _resolve_brew_version(package_name: str) -> str | None:
+    """Resolve a Homebrew formula's stable version via the local brew client.
+
+    Homebrew has no version endpoint to query the way PyPI and npm are queried,
+    but the installed client already knows: `brew info --json=v2` reports the
+    stable version that `brew install` would actually fetch.
+
+    This is the only process spawn in the shipped Python modules — everything
+    else here is network + parsing, and the bash CLI does the brew calls. It
+    earns the exception because the alternative is worse: without it, an
+    unversioned `brew` check falls back to the formula's ENTIRE CVE history and
+    reports the release that FIXES a CVE as vulnerable.
+
+    The formula name is passed as a separate argv element and never through a
+    shell, so a crafted name cannot become a command.
+    """
+    try:
+        # args list, never a shell; `brew` resolved from PATH like every other
+        # brew call this tool makes.
+        result = subprocess.run(  # noqa: S603
+            ["brew", "info", "--json=v2", package_name],  # noqa: S607
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    try:
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return None
+    # `--json=v1` emits a top-level LIST. Guard here rather than leaning on the
+    # caller's broad except, so the helper holds up when called directly.
+    if not isinstance(data, dict):
+        return None
+    for formula in data.get("formulae", []):
+        version = (formula.get("versions") or {}).get("stable")
+        if version:
+            return str(version)
+    # Casks carry their version at the top level rather than under versions{}.
+    # Homebrew writes them as `version,build` (e.g. "6.0.2,1234"); only the part
+    # before the comma is the marketing version a CVE range talks about.
+    for cask in data.get("casks", []):
+        if cask.get("version"):
+            return str(cask["version"]).split(",", 1)[0]
+    return None
+
+
 def resolve_latest_version(package_name, ecosystem):
-    """Resolve the latest version of a package from its registry."""
+    """Resolve the latest version of a package from its registry.
+
+    Returning None is not neutral: the caller then checks the package against
+    its ENTIRE CVE history, so anything that ever had an advisory is reported
+    vulnerable — including at the very version that fixed it. Every ecosystem
+    the gate accepts should therefore be resolvable here.
+    """
     try:
         if ecosystem == "pip":
             url = f"https://pypi.org/pypi/{urllib.parse.quote(package_name)}/json"
@@ -163,6 +221,8 @@ def resolve_latest_version(package_name, ecosystem):
             with _urlopen(req, timeout=8) as resp:
                 data = json.loads(resp.read())
             return data.get("version")
+        elif ecosystem == "brew":
+            return _resolve_brew_version(package_name)
     except Exception:
         return None
     return None
@@ -859,54 +919,105 @@ def _cpe_version_affected(version, relevant_cpes):
     return affected
 
 
+_BOUND_VER_RE = r"(?:version\s+)?v?([\d]+(?:\.[\d]+)*)"
+# An advisory may restate the bound in the product's own version scheme right
+# after it: "prior to 2024.07.18 (v0.2024.07.16.08.02)" — Warp's cask versions
+# carry a leading "0." the date-style bound lacks, so only the parenthesised
+# form compares against "0.2026.08.19...". That form names the last AFFECTED
+# build, so it is an inclusive bound.
+_BOUND_ALT_RE = r"(?:\s*\(v?([\d]+(?:\.[\d]+)*)[^)]*\))?"
+
+# Boundary words are NOT interchangeable. "through X" / "up to X" INCLUDE X;
+# "before X" / "prior to X" / "fixed in X" EXCLUDE it. "up to but not
+# including X" reads like the inclusive form but is exclusive, so it is matched
+# as exclusive and held out of the inclusive pattern by a lookahead.
+_BOUND_EXC_WORDS = r"(?:before|prior to|fixed in|patched in|up to but not including)"
+_BOUND_EXCLUSIVE = re.compile(
+    rf"{_BOUND_EXC_WORDS}\s+{_BOUND_VER_RE}{_BOUND_ALT_RE}",
+    re.IGNORECASE,
+)
+_BOUND_INCLUSIVE = re.compile(
+    rf"(?:\bthrough|\bup to(?!\s+but not including))\s+{_BOUND_VER_RE}",
+    re.IGNORECASE,
+)
+_BOUND_LOWER = re.compile(
+    rf"(?:starting in|introduced in|since)\s+{_BOUND_VER_RE}",
+    re.IGNORECASE,
+)
+
+
+def _is_year_like(bound, version):
+    """Is this "bound" a prose year rather than a version?
+
+    "This flaw has existed since 2019" names no version, but `since 2019`
+    parses as 2019 and would rule out every 8.x release — dropping the CVE.
+    A bare four-digit bound counts only when the version is date-schemed too.
+    """
+    if not re.fullmatch(r"\d{4}", bound):
+        return False
+    pv = parse_version(version)
+    return not (pv and 1990 <= pv._key[0][0] <= 2100)
+
+
+def _desc_bounds(version, desc):
+    """Every version bound the description states, as (exclusive, inclusive, lower)."""
+    exclusive = [
+        (m.group(1), m.group(2))
+        for m in _BOUND_EXCLUSIVE.finditer(desc)
+        if not _is_year_like(m.group(1), version)
+    ]
+    inclusive = [
+        m.group(1)
+        for m in _BOUND_INCLUSIVE.finditer(desc)
+        if not _is_year_like(m.group(1), version)
+    ]
+    lower = [
+        m.group(1) for m in _BOUND_LOWER.finditer(desc) if not _is_year_like(m.group(1), version)
+    ]
+    return exclusive, inclusive, lower
+
+
 def _desc_says_not_affected(version, desc):
     """Description-derived version bounds, used only when a CVE has no CPE data.
 
     GitHub-style advisories often read "Starting in version X and prior to
-    version Y". Returns True when the description positively rules the version
-    out; ambiguity returns False (fail closed — the CVE stays).
+    version Y". Returns True only when the description POSITIVELY rules the
+    version out; ambiguity returns False (fail closed — the CVE stays).
+
+    An advisory routinely describes several affected branches ("9.x before 9.2
+    and 10.x before 10.1"). Reading only the FIRST bound cleared 10.0 against
+    9.2 and dropped a CVE that genuinely applied, so the version must clear
+    EVERY upper bound stated, not merely one. Likewise an exclusive bound
+    mentioned in passing ("a prior issue was fixed in 1.0") must not return
+    before the real inclusive bound has been read.
     """
-    v_re = r"(?:version\s+)?v?([\d]+(?:\.[\d]+)*)"
-    # An advisory may restate the bound in the product's own version scheme
-    # right after it: "prior to 2024.07.18 (v0.2024.07.16.08.02)" — Warp's
-    # cask versions carry a leading "0." the date-style bound lacks, so only
-    # the parenthesised form compares against "0.2026.08.19...". That form
-    # names the last AFFECTED build, so it is an inclusive bound.
-    alt_re = r"(?:\s*\(v?([\d]+(?:\.[\d]+)*)[^)]*\))?"
+    exclusive, inclusive, lower = _desc_bounds(version, desc)
+    if not (exclusive or inclusive or lower):
+        return False  # no bound at all — fail closed
 
-    # Exclusive upper bound: fixed at the matched version
-    end_exc = re.search(
-        rf"(?:before|prior to|fixed in|patched in)\s+{v_re}{alt_re}",
-        desc,
-        re.IGNORECASE,
-    )
-    if end_exc and _ver_ge(version, end_exc.group(1)):
-        return True  # version is at or above the fix — not affected
-    if (
-        end_exc
-        and end_exc.group(2)
-        and _same_scheme(version, end_exc.group(2))
-        and not _same_scheme(version, end_exc.group(1))
-        and _ver_gt(version, end_exc.group(2))
-    ):
-        # Above the last affected build, in the product's own scheme — used
-        # only when the primary bound is NOT in our scheme. "2024.07.17"
-        # against "prior to 2024.07.18 (v0.2024.07.16...)" must compare with
-        # the primary bound and stay affected.
+    # Below every stated introduction point: the flaw postdates this version.
+    if lower and all(_ver_lt(version, b) for b in lower):
         return True
 
-    # Inclusive upper bound: last affected version
-    end_inc = re.search(rf"\bthrough\s+{v_re}", desc, re.IGNORECASE)
-    if end_inc and _ver_gt(version, end_inc.group(1)):
-        return True
+    if not (exclusive or inclusive):
+        return False
 
-    # Lower bound: affected starts at this version
-    start_inc = re.search(
-        rf"(?:starting in|introduced in|since)\s+{v_re}",
-        desc,
-        re.IGNORECASE,
-    )
-    return bool(start_inc and _ver_lt(version, start_inc.group(1)))
+    for bound, alt in exclusive:
+        if _ver_ge(version, bound):
+            continue  # at or above this branch's fix
+        if (
+            alt
+            and _same_scheme(version, alt)
+            and not _same_scheme(version, bound)
+            and _ver_gt(version, alt)
+        ):
+            # Above the last affected build, in the product's own scheme — used
+            # only when the primary bound is NOT in our scheme. "2024.07.17"
+            # against "prior to 2024.07.18 (v0.2024.07.16...)" must compare
+            # with the primary bound and stay affected.
+            continue
+        return False  # inside this branch's affected range
+    return all(_ver_gt(version, bound) for bound in inclusive)
 
 
 def _same_scheme(a, b):
