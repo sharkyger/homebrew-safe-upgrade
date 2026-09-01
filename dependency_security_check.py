@@ -929,43 +929,56 @@ def _cpe_version_affected(version, relevant_cpes):
     return affected
 
 
-# A bound must LOOK like a version, not like a quantity in prose. CVE text is
-# full of cardinal numbers — "copies up to 256 bytes", "loops through 8 entries",
-# "allows up to 2 GB" — and reading one as a bound DROPS the CVE, the unsafe
-# direction. Two guards, both erring toward keeping the finding: an explicit
-# "version"/"v" marker always qualifies, otherwise the bound needs a dotted
-# component. Date-schemed casks have a large leading component and would clear
-# such phantom bounds routinely, so this matters most for exactly the packages
-# brew resolution was added for.
-_BOUND_VER_RE = r"(?:(version\s+)|v(?=[\d]))?([\d]+(?:\.[\d]+)*)"
-# An advisory may restate the bound in the product's own version scheme right
-# after it: "prior to 2024.07.18 (v0.2024.07.16.08.02)" — Warp's cask versions
-# carry a leading "0." the date-style bound lacks. That form names the last
-# AFFECTED build, so it is an inclusive bound.
+# Description bounds are a LAST RESORT, used only when a CVE carries no CPE
+# data. Deciding "not affected" from free-text English is inherently unreliable,
+# so this is deliberately narrow: it clears a finding only when the description
+# states ONE unambiguous bound. Anything else keeps the CVE.
+#
+# Three review rounds established why. Richer readings — several bounds at once,
+# bounds scoped to a release line, bounds restated in another scheme — each
+# looked correct and each produced new false negatives, because every additional
+# interpretation is another way to be wrong in the direction that drops a
+# security finding. A false positive costs an argument; a false negative ships a
+# vulnerability.
+_BOUND_VER_RE = r"(?:(version\s+|v(?=\d)))?([\d]+(?:\.[\d]+)*)"
+# An advisory may restate a bound in the product's own version scheme right
+# after it: "prior to 2024.07.18 (v0.2024.07.16.08.02)". That parenthesised form
+# names the last AFFECTED build, so it is an inclusive bound.
 _BOUND_ALT_RE = r"(?:\s*\(v?([\d]+(?:\.[\d]+)*)[^)]*\))?"
-# Units that mark a number as a quantity, belt-and-braces beside the dotted rule.
-_BOUND_UNIT_RE = (
-    r"(?!\s*(?:bytes?|bits?|entries|entry|requests?|times?|seconds?|minutes?|"
-    r"hours?|days?|characters?|chars?|items?|elements?|levels?|"
-    r"[KMGT]i?B|kb|mb|gb|tb)\b)"
+# What may legitimately FOLLOW a version bound. An allowlist, not a list of
+# units to exclude: CVE prose is full of quantities ("writes up to 4.0
+# kilobytes", "up to 1.5 million connections") and no blacklist of nouns is ever
+# complete. An unrecognised following word means the number is not a bound, so
+# the finding is kept.
+# NOTE the `\.(?!\d)`: a plain "." in this class would let the engine backtrack
+# and truncate the bound itself — "2024.07.18" matching as "2024.07" because the
+# ".18" satisfied the lookahead. A truncated bound compares against a different
+# number entirely, so a version-internal dot must NOT terminate a bound.
+_BOUND_AFTER_RE = (
+    r"(?=\s*$|\s*[,;:)\]]|\s*\.(?!\d)|\s*\((?=v?\d)|"
+    r"\s+(?:is|are|was|were|and|or|contains?|allows?|permits?|enables?|has|have|"
+    r"had|the|a|an|in|on|for|of|to|due|when|where|which|that|this|these|those|"
+    r"releases?|versions?|inclusive)\b)"
 )
 
 # Boundary words are NOT interchangeable. "through X" / "up to X" INCLUDE X;
-# "before X" / "prior to X" / "fixed in X" EXCLUDE it. "up to but not including
-# X" reads like the inclusive form but is exclusive, so it is matched as
-# exclusive and held out of the inclusive pattern by a lookahead.
+# "before X" / "prior to X" / "fixed in X" EXCLUDE it. Collapsing them into one
+# inclusive comparison reports the release that CARRIES the fix as vulnerable —
+# the bug that blocked `brew install gitleaks` at 8.30.1 against "Gitleaks prior
+# to 8.30.1". "up to but not including X" reads like the inclusive form but is
+# exclusive, so it is matched as such and held out by a lookahead.
 _BOUND_EXC_WORDS = r"(?:before|prior to|fixed in|patched in|up to but not including)"
 _BOUND_EXCLUSIVE = re.compile(
-    rf"{_BOUND_EXC_WORDS}\s+{_BOUND_VER_RE}{_BOUND_UNIT_RE}{_BOUND_ALT_RE}",
+    rf"{_BOUND_EXC_WORDS}\s+{_BOUND_VER_RE}{_BOUND_AFTER_RE}{_BOUND_ALT_RE}",
     re.IGNORECASE,
 )
 _BOUND_INCLUSIVE = re.compile(
     rf"(?:\bthrough|\bup to(?:\s+and including)?(?!\s+but not including))\s+"
-    rf"{_BOUND_VER_RE}{_BOUND_UNIT_RE}",
+    rf"{_BOUND_VER_RE}{_BOUND_AFTER_RE}{_BOUND_ALT_RE}",
     re.IGNORECASE,
 )
 _BOUND_LOWER = re.compile(
-    rf"(?:starting in|introduced in|since)\s+{_BOUND_VER_RE}{_BOUND_UNIT_RE}",
+    rf"(?:starting in|introduced in|since)\s+{_BOUND_VER_RE}{_BOUND_AFTER_RE}",
     re.IGNORECASE,
 )
 
@@ -973,9 +986,9 @@ _BOUND_LOWER = re.compile(
 def _is_year_like(bound, version):
     """Is this "bound" a prose year rather than a version?
 
-    "This flaw has existed since 2019" names no version, but `since 2019`
-    parses as 2019 and would rule out every 8.x release — dropping the CVE.
-    A bare four-digit bound counts only when the version is date-schemed too.
+    "This flaw has existed since 2019" names no version, but `since 2019` parses
+    as (2019,) and would rule out every 8.x release. A bare four-digit bound
+    counts only when the version is date-schemed too.
     """
     if not re.fullmatch(r"\d{4}", bound):
         return False
@@ -984,33 +997,14 @@ def _is_year_like(bound, version):
 
 
 def _usable_bound(marker, bound, version):
-    """A match is a real bound only if it reads as a version and is not a year."""
+    """A match is a real bound only if it reads as a version and is not a year.
+
+    Without an explicit "version"/"v" marker a bound needs a dotted component;
+    a bare integer in prose is not a version.
+    """
     if not (marker or "." in bound):
         return False
     return not _is_year_like(bound, version)
-
-
-def _release_line(v):
-    """Leading component of a version — its release line. None if unparseable."""
-    pv = parse_version(v)
-    return pv._key[0][0] if pv else None
-
-
-def _on_this_line(version, bounds, key=lambda b: b):
-    """Restrict bounds to the version's own release line.
-
-    Advisories state one fix per line: "Django 4.2 before 4.2.11, 5.0 before
-    5.0.4". Requiring 4.2.15 to clear 5.0.4 blocks a release that IS patched.
-    Requiring it to clear only its own line's bound is the actual claim made.
-    When no bound names the version's line, every bound applies — which is what
-    stops "9.x before 9.2 and 10.x before 10.1" from clearing 10.0 against 9.2,
-    while still letting 11.0 clear both.
-    """
-    line = _release_line(version)
-    if line is None:
-        return bounds
-    same = [b for b in bounds if _release_line(key(b)) == line]
-    return same or bounds
 
 
 def _desc_bounds(version, desc):
@@ -1021,7 +1015,7 @@ def _desc_bounds(version, desc):
         if _usable_bound(m.group(1), m.group(2), version)
     ]
     inclusive = [
-        m.group(2)
+        (m.group(2), m.group(3))
         for m in _BOUND_INCLUSIVE.finditer(desc)
         if _usable_bound(m.group(1), m.group(2), version)
     ]
@@ -1033,46 +1027,52 @@ def _desc_bounds(version, desc):
     return exclusive, inclusive, lower
 
 
+def _clears(version, bound, alt, inclusive):
+    """Is the version past this single upper bound?
+
+    `alt` is the bound restated in the product's own scheme, used only when the
+    primary bound is NOT in our scheme: "2024.07.17" against "prior to
+    2024.07.18 (v0.2024.07.16...)" must compare with the primary bound.
+    """
+    if _ver_gt(version, bound) or (not inclusive and _ver_ge(version, bound)):
+        return True
+    return bool(
+        alt
+        and _same_scheme(version, alt)
+        and not _same_scheme(version, bound)
+        and _ver_gt(version, alt)
+    )
+
+
 def _desc_says_not_affected(version, desc):
     """Description-derived version bounds, used only when a CVE has no CPE data.
 
-    GitHub-style advisories often read "Starting in version X and prior to
-    version Y". Returns True only when the description POSITIVELY rules the
-    version out; ambiguity returns False (fail closed — the CVE stays), because
-    a false positive costs an argument and a false negative ships a
-    vulnerability.
+    Returns True only when the description states ONE upper bound and the
+    version is past it. Two or more upper bounds means the advisory describes
+    several release lines ("Django 4.2 before 4.2.11, 5.0 before 5.0.4") and
+    nothing in the text says which one this version belongs to, so the finding
+    is KEPT — guessing wrong there drops a live CVE.
+
+    A lower bound applies only when it is the sole bound in the description.
+    Mixed with an upper bound it is unreliable: "Since 1.0 the library bundles
+    libbar. Foo before 3.0 is affected." states an introduction that has nothing
+    to do with the vulnerability, and honouring it would clear 0.9.
     """
+    if parse_version(version) is None:
+        return False  # not a real version — never clear a CVE on it
+
     exclusive, inclusive, lower = _desc_bounds(version, desc)
-    if not (exclusive or inclusive or lower):
-        return False  # no bound at all — fail closed
 
-    # Below every stated introduction point: the flaw postdates this version.
-    # An inclusive bound that still names the version overrides that, so a
-    # description saying both keeps the finding.
-    if (
-        lower
-        and all(_ver_lt(version, b) for b in lower)
-        and all(_ver_gt(version, b) for b in inclusive)
-    ):
-        return True
-
-    if not (exclusive or inclusive):
-        return False
-
-    for bound, alt in _on_this_line(version, exclusive, key=lambda b: b[0]):
-        if _ver_ge(version, bound):
-            continue  # at or above this line's fix
-        if (
-            alt
-            and _same_scheme(version, alt)
-            and not _same_scheme(version, bound)
-            and _ver_gt(version, alt)
-        ):
-            # Above the last affected build, in the product's own scheme — used
-            # only when the primary bound is NOT in our scheme.
-            continue
-        return False  # inside this line's affected range
-    return all(_ver_gt(version, b) for b in _on_this_line(version, inclusive))
+    if len(exclusive) + len(inclusive) > 1:
+        return False  # ambiguous — fail closed
+    if exclusive:
+        bound, alt = exclusive[0]
+        return _clears(version, bound, alt, inclusive=False)
+    if inclusive:
+        bound, alt = inclusive[0]
+        return _clears(version, bound, alt, inclusive=True)
+    # No upper bound at all: a lone lower bound can still rule the version out.
+    return len(lower) == 1 and _ver_lt(version, lower[0])
 
 
 def _same_scheme(a, b):

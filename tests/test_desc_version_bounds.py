@@ -24,23 +24,6 @@ import dependency_security_check as dsc
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def test_multi_branch_advisory_must_clear_every_bound():
-    """NVD routinely lists several affected branches in one description."""
-    desc = "Foo 9.x before 9.2 and 10.x before 10.1 are affected."
-    assert dsc._desc_says_not_affected("10.0", desc) is False  # clears 9.2, not 10.1
-    assert dsc._desc_says_not_affected("10.1", desc) is True  # clears both
-    assert dsc._desc_says_not_affected("9.1", desc) is False
-    desc2 = "Foo before 1.2.3 and 2.x before 2.0.1 allow RCE."
-    assert dsc._desc_says_not_affected("2.0.0", desc2) is False
-
-
-def test_prose_mention_of_an_earlier_fix_does_not_short_circuit():
-    """An exclusive bound matched first must not skip the inclusive bound."""
-    desc = "A prior issue was fixed in 1.0. This new flaw affects versions through 3.0."
-    assert dsc._desc_says_not_affected("2.0", desc) is False
-    assert dsc._desc_says_not_affected("3.1", desc) is True
-
-
 def test_bare_year_is_not_a_version_bound():
     """ "since 2019" is prose; as a bound it ruled out every 8.x release."""
     assert dsc._desc_says_not_affected("8.30.1", "This flaw has existed since 2019.") is False
@@ -81,13 +64,6 @@ def test_up_to_is_inclusive_but_up_to_but_not_including_is_not():
     assert dsc._desc_says_not_affected("2.9", "Affected up to but not including 3.0.") is False
 
 
-def test_lower_bound_excludes_versions_predating_introduction():
-    desc = "Starting in version 2.0 and prior to version 2.5, a flaw exists."
-    assert dsc._desc_says_not_affected("1.9", desc) is True
-    assert dsc._desc_says_not_affected("2.5", desc) is True
-    assert dsc._desc_says_not_affected("2.1", desc) is False
-
-
 def test_bound_restated_in_the_products_own_scheme():
     """Warp: "prior to 2024.07.18 (v0.2024.07.16.08.02)" — see test_cask_nvd_map."""
     desc = "Affected prior to 2024.07.18 (v0.2024.07.16.08.02)."
@@ -112,43 +88,6 @@ def test_ambiguity_fails_closed():
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def test_prose_quantities_are_not_version_bounds():
-    """ "up to 256 bytes" is a quantity. Read as a bound it DROPS the CVE.
-
-    Date-schemed casks have a large leading component, so they cleared these
-    phantom bounds routinely — exactly the packages brew resolution added.
-    """
-    assert dsc._desc_says_not_affected("2024.07.18", "A flaw copies up to 256 bytes.") is False
-    assert dsc._desc_says_not_affected("1000.1", "The handler loops through 8 entries.") is False
-    assert dsc._desc_says_not_affected("5.0", "Allows up to 2 GB of memory.") is False
-    # An explicit version marker still qualifies a single-component bound.
-    assert dsc._desc_says_not_affected("4.0", "Foo up to version 3 is vulnerable.") is True
-
-
-def test_bounds_apply_to_their_own_release_line():
-    """ "Django 4.2 before 4.2.11, 5.0 before 5.0.4" — 4.2.15 IS patched.
-
-    Requiring it to clear 5.0.4 as well blocked a patched LTS release.
-    """
-    django = "Django 4.2 before 4.2.11, 5.0 before 5.0.4 are affected."
-    assert dsc._desc_says_not_affected("4.2.15", django) is True
-    assert dsc._desc_says_not_affected("4.2.10", django) is False  # below its own bound
-    assert dsc._desc_says_not_affected("5.0.1", django) is False
-    curl = "curl 8.x before 8.7.1 and 7.x before 7.88.0 are affected."
-    assert dsc._desc_says_not_affected("7.90.0", curl) is True
-    assert dsc._desc_says_not_affected("8.5.0", curl) is False
-
-
-def test_no_matching_release_line_falls_back_to_every_bound():
-    """The multi-branch fix must not resurrect the first-bound-wins bug."""
-    desc = "Foo 9.x before 9.2 and 10.x before 10.1 are affected."
-    assert dsc._desc_says_not_affected("10.0", desc) is False  # its own line, not cleared
-    assert dsc._desc_says_not_affected("10.1", desc) is True
-    assert dsc._desc_says_not_affected("11.0", desc) is True  # above every line
-    # A single bound on another line still applies when none names this version.
-    assert dsc._desc_says_not_affected("3.5", "Foo before 2.0 is affected.") is True
-
-
 def test_up_to_and_including_is_inclusive():
     desc = "Foo up to and including 3.0 is vulnerable."
     assert dsc._desc_says_not_affected("3.0", desc) is False
@@ -159,3 +98,77 @@ def test_lower_bound_does_not_override_an_inclusive_bound():
     """A description naming both must fail closed."""
     desc = "Introduced in 2.0 of the rewrite. Legacy releases through 1.9 are also affected."
     assert dsc._desc_says_not_affected("1.5", desc) is False
+
+
+def test_several_upper_bounds_fail_closed():
+    """An advisory naming more than one upper bound is AMBIGUOUS — keep the CVE.
+
+    "Django 4.2 before 4.2.11, 5.0 before 5.0.4" describes two release lines,
+    and nothing in the text says which one a given version belongs to. Earlier
+    revisions tried both readings and each was wrong somewhere: taking the first
+    bound cleared 10.0 against 9.2 (dropped a live CVE), requiring every bound
+    blocked the patched Django 4.2.15 (false positive), and scoping bounds by
+    leading component could not tell 1.2.x from 1.3.x. Declining to guess is the
+    only reading that never drops a finding.
+    """
+    django = "Django 4.2 before 4.2.11, 5.0 before 5.0.4 are affected."
+    assert dsc._desc_says_not_affected("4.2.15", django) is False
+    assert dsc._desc_says_not_affected("4.2.10", django) is False
+    assert dsc._desc_says_not_affected("9.9", django) is False  # even far above both
+    same_major = "Foo 1.2.x before 1.2.5 and 1.3.x before 1.3.2 are affected."
+    assert dsc._desc_says_not_affected("1.2.9", same_major) is False
+    two_lines = "Foo 9.x before 9.2 and 10.x before 10.1 are affected."
+    assert dsc._desc_says_not_affected("10.0", two_lines) is False
+
+
+def test_a_second_bound_anywhere_makes_the_description_ambiguous():
+    """Two bounds is two bounds, even when one is mentioned in passing."""
+    desc = "A prior issue was fixed in 1.0. This new flaw affects versions through 3.0."
+    assert dsc._desc_says_not_affected("2.0", desc) is False
+    assert dsc._desc_says_not_affected("3.1", desc) is False  # ambiguous, not cleared
+    mixed = "Foo 2.x before 2.1 is affected. A second flaw affects everything before 9.0."
+    assert dsc._desc_says_not_affected("2.5", mixed) is False
+
+
+def test_a_lower_bound_counts_only_when_it_is_the_only_bound():
+    """Mixed with an upper bound, "since X" is unreliable.
+
+    "Since 1.0 the library bundles libbar. Foo before 3.0 is affected." states an
+    introduction that has nothing to do with the vulnerability; honouring it
+    cleared 0.9, which the same sentence calls affected.
+    """
+    assert dsc._desc_says_not_affected("1.9", "Starting in version 2.0 a flaw exists.") is True
+    assert dsc._desc_says_not_affected("2.1", "Starting in version 2.0 a flaw exists.") is False
+    mixed = "Since 1.0 the library bundles libbar. Foo before 3.0 is affected."
+    assert dsc._desc_says_not_affected("0.9", mixed) is False
+
+
+def test_prose_quantities_are_not_version_bounds():
+    """CVE text is full of quantities; reading one as a bound DROPS the CVE.
+
+    Guarded by an allowlist of what may FOLLOW a bound rather than a blacklist
+    of units — no list of nouns is ever complete, and an unrecognised word must
+    fail closed.
+    """
+    assert (
+        dsc._desc_says_not_affected("8.30.1", "A flaw writes up to 4.0 kilobytes past the end.")
+        is False
+    )
+    assert dsc._desc_says_not_affected("8.30.1", "Allows up to 1.5 million connections.") is False
+    assert dsc._desc_says_not_affected("2024.07.18", "A flaw copies up to 256 bytes.") is False
+    assert dsc._desc_says_not_affected("1000.1", "The handler loops through 8 entries.") is False
+
+
+def test_version_marker_qualifies_a_single_component_bound():
+    """ "prior to v8" is a version; "up to 8 entries" is not."""
+    assert dsc._desc_says_not_affected("9.0", "Foo prior to v8 is vulnerable.") is True
+    assert dsc._desc_says_not_affected("7.0", "Foo prior to v8 is vulnerable.") is False
+    assert dsc._desc_says_not_affected("4.0", "Foo up to version 3 is vulnerable.") is True
+
+
+def test_bound_is_never_truncated_at_an_internal_dot():
+    """Regression: the "what may follow" lookahead let the engine backtrack and
+    match "2024.07" out of "2024.07.18", comparing against a different number."""
+    desc = "Affected prior to 2024.07.18 (v0.2024.07.16.08.02)."
+    exclusive, _inclusive, _lower = dsc._desc_bounds("0.2026.08.19", desc)
+    assert exclusive == [("2024.07.18", "0.2024.07.16.08.02")]
