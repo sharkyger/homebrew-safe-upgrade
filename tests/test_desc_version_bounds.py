@@ -17,7 +17,16 @@ before being fixed:
 No network and no Homebrew needed.
 """
 
+import json
+import subprocess
+from unittest.mock import patch
+
 import dependency_security_check as dsc
+
+
+def _completed(stdout, returncode=0):
+    return subprocess.CompletedProcess(args=[], returncode=returncode, stdout=stdout, stderr="")
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Regressions: each case previously returned True and dropped a live CVE.
@@ -170,5 +179,61 @@ def test_bound_is_never_truncated_at_an_internal_dot():
     """Regression: the "what may follow" lookahead let the engine backtrack and
     match "2024.07" out of "2024.07.18", comparing against a different number."""
     desc = "Affected prior to 2024.07.18 (v0.2024.07.16.08.02)."
-    exclusive, _inclusive, _lower = dsc._desc_bounds("0.2026.08.19", desc)
+    exclusive, _inclusive, _lower, _listed = dsc._desc_bounds("0.2026.08.19", desc)
     assert exclusive == [("2024.07.18", "0.2024.07.16.08.02")]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Fourth-review regressions. All three drop a CVE, and the first two were
+# introduced by this change set rather than inherited.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_a_cask_version_latest_resolves_to_nothing():
+    """`version :latest` is not a version, and returning it is worse than None.
+
+    The tolerant parser maps "latest" to 0, so the CPE range check reads
+    `0 < versionStartIncluding` as "outside the affected range" and drops every
+    CPE-ranged CVE for that package. brew has no OSV or GHSA second opinion to
+    recover them, and before brew resolved at all the CPE block was skipped
+    entirely, so those findings used to be kept.
+    """
+    payload = json.dumps({"formulae": [], "casks": [{"version": "latest"}]})
+    with patch.object(dsc.subprocess, "run", return_value=_completed(payload)):
+        assert dsc._resolve_brew_version("some-cask") is None
+    # A real cask version still resolves, build suffix stripped.
+    payload = json.dumps({"formulae": [], "casks": [{"version": "6.0.2,1234"}]})
+    with patch.object(dsc.subprocess, "run", return_value=_completed(payload)):
+        assert dsc._resolve_brew_version("some-cask") == "6.0.2"
+    # Same rule on the formula path.
+    payload = json.dumps({"formulae": [{"versions": {"stable": "HEAD"}}], "casks": []})
+    with patch.object(dsc.subprocess, "run", return_value=_completed(payload)):
+        assert dsc._resolve_brew_version("weird") is None
+
+
+def test_a_bound_is_not_truncated_at_a_non_numeric_segment():
+    """ "through 1.3.x" must not become the bound 1.3, clearing the 1.3 branch."""
+    assert dsc._desc_says_not_affected("1.3.5", "Foo through 1.3.x is affected.") is False
+    assert dsc._desc_says_not_affected("2.4.9", "Foo up to 2.4.x is affected.") is False
+    assert dsc._desc_says_not_affected("1.2.9", "Foo before 1.2.x is affected.") is False
+    # A sentence-ending period still terminates a bound normally.
+    assert dsc._desc_says_not_affected("8.30.2", "Foo through 8.30.1.") is True
+
+
+def test_a_comma_list_of_fix_versions_is_ambiguous():
+    """ "fixed in 9.4.55, 10.0.24, and 11.0.24" states one fix per release line.
+
+    Only the first is captured, so 10.0.20 cleared against 9.4.55 — a CVE that
+    applies to it. A trailing list is as ambiguous as a repeated boundary word.
+    """
+    jetty = "Jetty is vulnerable to a DoS. This is fixed in 9.4.55, 10.0.24, and 11.0.24."
+    assert dsc._desc_says_not_affected("10.0.20", jetty) is False
+    assert dsc._desc_says_not_affected("11.0.30", jetty) is False  # ambiguous, not cleared
+    assert (
+        dsc._desc_says_not_affected("3.4.0", "Foo before 2.1.5, 3.4.1 and 4.0.2 is affected.")
+        is False
+    )
+    # A single bound followed by ordinary prose is still usable.
+    assert (
+        dsc._desc_says_not_affected("8.30.1", "Gitleaks prior to 8.30.1 contains a flaw.") is True
+    )

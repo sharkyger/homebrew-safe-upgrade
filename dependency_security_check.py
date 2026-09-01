@@ -149,6 +149,26 @@ def _foreign_target_sw(target_sw, ecosystem):
     return target_sw in _ALL_ECOSYSTEM_TARGET_SW and target_sw not in own
 
 
+def _brew_version_or_none(raw):
+    """Homebrew's answer, or None when it is not a version at all.
+
+    A cask may declare `version :latest`, and `brew info` then reports the
+    literal string "latest". Returning it is worse than returning nothing: the
+    tolerant parser maps it to 0, so the CPE range check reads
+    `0 < versionStartIncluding` as "outside the affected range" and DROPS every
+    CPE-ranged CVE for that package — and brew has no OSV or GHSA second opinion
+    to recover them. Anything that does not start with a digit degrades to None,
+    the same "unknown" path as any other resolution failure.
+
+    Homebrew writes cask versions as `version,build`; only the part before the
+    comma is the marketing version a CVE range talks about.
+    """
+    if not raw:
+        return None
+    candidate = str(raw).strip().split(",", 1)[0]
+    return candidate if re.match(r"^[v=]*\d", candidate) else None
+
+
 def _resolve_brew_version(package_name: str) -> str | None:
     """Resolve a Homebrew formula's stable version via the local brew client.
 
@@ -198,15 +218,13 @@ def _resolve_brew_version(package_name: str) -> str | None:
             continue
         version = (formula.get("versions") or {}).get("stable")
         if version:
-            return str(version)
+            return _brew_version_or_none(version)
     # Casks carry their version at the top level rather than under versions{}.
-    # Homebrew writes them as `version,build` (e.g. "6.0.2,1234"); only the part
-    # before the comma is the marketing version a CVE range talks about.
     for cask in data.get("casks") or []:
         if not isinstance(cask, dict):
             continue
         if cask.get("version"):
-            return str(cask["version"]).split(",", 1)[0]
+            return _brew_version_or_none(cask["version"])
     return None
 
 
@@ -950,12 +968,15 @@ _BOUND_ALT_RE = r"(?:\s*\(v?([\d]+(?:\.[\d]+)*)[^)]*\))?"
 # kilobytes", "up to 1.5 million connections") and no blacklist of nouns is ever
 # complete. An unrecognised following word means the number is not a bound, so
 # the finding is kept.
-# NOTE the `\.(?!\d)`: a plain "." in this class would let the engine backtrack
+# NOTE the `\.(?!\w)`: a plain "." in this class would let the engine backtrack
 # and truncate the bound itself — "2024.07.18" matching as "2024.07" because the
 # ".18" satisfied the lookahead. A truncated bound compares against a different
-# number entirely, so a version-internal dot must NOT terminate a bound.
+# number entirely, so a version-internal dot must NOT terminate a bound. The
+# same applies to a non-numeric segment: "through 1.3.x" truncating to 1.3
+# cleared the whole 1.3 branch, so `.x`, `.Final` and `.RELEASE` must not
+# terminate one either — hence `(?!\w)` rather than `(?!\d)`.
 _BOUND_AFTER_RE = (
-    r"(?=\s*$|\s*[,;:)\]]|\s*\.(?!\d)|\s*\((?=v?\d)|"
+    r"(?=\s*$|\s*[,;:)\]]|\s*\.(?!\w)|\s*\((?=v?\d)|"
     r"\s+(?:is|are|was|were|and|or|contains?|allows?|permits?|enables?|has|have|"
     r"had|the|a|an|in|on|for|of|to|due|when|where|which|that|this|these|those|"
     r"releases?|versions?|inclusive)\b)"
@@ -983,6 +1004,13 @@ _BOUND_LOWER = re.compile(
 )
 
 
+# "This is fixed in 9.4.55, 10.0.24, and 11.0.24" states one fix PER RELEASE
+# LINE inside a single clause. Only the first is captured, so 10.0.20 would
+# clear against 9.4.55 and drop a CVE that applies to it. A bound trailed by a
+# list of further versions is therefore as ambiguous as a repeated boundary word.
+_BOUND_LIST_TAIL = re.compile(r"\s*(?:,\s*(?:and\s+)?|\s+and\s+)v?\d+(?:\.\d+)*")
+
+
 def _is_year_like(bound, version):
     """Is this "bound" a prose year rather than a version?
 
@@ -1008,23 +1036,27 @@ def _usable_bound(marker, bound, version):
 
 
 def _desc_bounds(version, desc):
-    """Every version bound the description states, as (exclusive, inclusive, lower)."""
-    exclusive = [
-        (m.group(2), m.group(3))
-        for m in _BOUND_EXCLUSIVE.finditer(desc)
-        if _usable_bound(m.group(1), m.group(2), version)
-    ]
-    inclusive = [
-        (m.group(2), m.group(3))
-        for m in _BOUND_INCLUSIVE.finditer(desc)
-        if _usable_bound(m.group(1), m.group(2), version)
-    ]
+    """Bounds the description states: (exclusive, inclusive, lower, listed).
+
+    `listed` is True when an upper bound is trailed by a comma/and list of
+    further versions — one fix per release line inside a single clause, of
+    which only the first would be captured.
+    """
+    exclusive, inclusive, listed = [], [], False
+    for m in _BOUND_EXCLUSIVE.finditer(desc):
+        if _usable_bound(m.group(1), m.group(2), version):
+            exclusive.append((m.group(2), m.group(3)))
+            listed = listed or bool(_BOUND_LIST_TAIL.match(desc, m.end()))
+    for m in _BOUND_INCLUSIVE.finditer(desc):
+        if _usable_bound(m.group(1), m.group(2), version):
+            inclusive.append((m.group(2), m.group(3)))
+            listed = listed or bool(_BOUND_LIST_TAIL.match(desc, m.end()))
     lower = [
         m.group(2)
         for m in _BOUND_LOWER.finditer(desc)
         if _usable_bound(m.group(1), m.group(2), version)
     ]
-    return exclusive, inclusive, lower
+    return exclusive, inclusive, lower, listed
 
 
 def _clears(version, bound, alt, inclusive):
@@ -1061,9 +1093,9 @@ def _desc_says_not_affected(version, desc):
     if parse_version(version) is None:
         return False  # not a real version — never clear a CVE on it
 
-    exclusive, inclusive, lower = _desc_bounds(version, desc)
+    exclusive, inclusive, lower, listed = _desc_bounds(version, desc)
 
-    if len(exclusive) + len(inclusive) > 1:
+    if listed or len(exclusive) + len(inclusive) > 1:
         return False  # ambiguous — fail closed
     if exclusive:
         bound, alt = exclusive[0]
