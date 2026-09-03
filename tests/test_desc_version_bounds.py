@@ -237,3 +237,51 @@ def test_a_comma_list_of_fix_versions_is_ambiguous():
     assert (
         dsc._desc_says_not_affected("8.30.1", "Gitleaks prior to 8.30.1 contains a flaw.") is True
     )
+
+
+def test_a_bound_followed_by_an_ordinary_verb_is_still_a_bound():
+    """NVD's most common shape is "Foo before X <verb> ...".
+
+    An earlier revision applied a follow-word allowlist to exclusive bounds too.
+    No allowlist of English verbs is complete, so the bound was discarded and
+    the release carrying the fix stayed flagged — the very bug this work
+    removes, reintroduced for a large class of CPE-less advisories. Only
+    inclusive words ("up to", "through") collide with quantities; nobody writes
+    "before 4.0 kilobytes".
+    """
+    for verb in (
+        "does not properly validate input",
+        "mishandles certificates",
+        "fails to sanitise the path",
+        "might allow remote attackers to run code",
+        "lacks a bounds check",
+        "uses a predictable seed",
+    ):
+        desc = f"Foo before 1.5 {verb}."
+        assert dsc._desc_says_not_affected("2.0", desc) is True, desc
+        assert dsc._desc_says_not_affected("1.4", desc) is False, desc
+
+
+def test_identical_bounds_are_agreement_not_ambiguity():
+    """The standard GHSA Impact/Patches import states the same version twice."""
+    desc = "Versions prior to 2.0.1 are affected. This issue has been patched in version 2.0.1."
+    assert dsc._desc_says_not_affected("2.0.1", desc) is True
+    assert dsc._desc_says_not_affected("2.0.0", desc) is False
+
+
+def test_a_bound_may_be_annotated_with_a_parenthetical():
+    """Advisories routinely annotate the fix: "(see the advisory)", "(commit abc)"."""
+    assert dsc._desc_says_not_affected("2.0", "Fixed in 1.5 (see the advisory).") is True
+    assert dsc._desc_says_not_affected("1.4", "Fixed in 1.5 (see the advisory).") is False
+
+
+def test_and_does_not_qualify_a_quantity_as_a_bound():
+    """ "queue up to 2.0 and the daemon crashes" is a quantity, not a bound.
+
+    "and"/"or" follow a bare quantity as naturally as they follow a version, so
+    they are deliberately absent from the inclusive follow-allowlist.
+    """
+    assert (
+        dsc._desc_says_not_affected("4.0", "Users can queue up to 2.0 and the daemon crashes.")
+        is False
+    )

@@ -189,7 +189,7 @@ def _resolve_brew_version(package_name: str) -> str | None:
         # args list, never a shell; `brew` resolved from PATH like every other
         # brew call this tool makes.
         result = subprocess.run(  # noqa: S603
-            ["brew", "info", "--json=v2", package_name],  # noqa: S607
+            ["brew", "info", "--json=v2", "--", package_name],  # noqa: S607
             capture_output=True,
             text=True,
             # Homebrew 4.x can refresh its multi-MB JSON API cache from `brew
@@ -975,10 +975,24 @@ _BOUND_ALT_RE = r"(?:\s*\(v?([\d]+(?:\.[\d]+)*)[^)]*\))?"
 # same applies to a non-numeric segment: "through 1.3.x" truncating to 1.3
 # cleared the whole 1.3 branch, so `.x`, `.Final` and `.RELEASE` must not
 # terminate one either — hence `(?!\w)` rather than `(?!\d)`.
+# A truncation guard, applied to every bound: the version pattern is greedy but
+# can backtrack, and "through 1.3.x" matching as "1.3" cleared the whole 1.3
+# branch. A bound may not be followed by a dot plus a word character.
+_TRUNC_GUARD = r"(?!\.\w)"
+
+# What may follow an INCLUSIVE bound. Only "up to" and "through" collide with
+# quantities in prose ("writes up to 4.0 kilobytes", "loops through 8 entries");
+# nobody writes "before 4.0 kilobytes", so exclusive bounds need no such guard.
+# Applying this allowlist to exclusive bounds was a serious regression: NVD's
+# most common shape is "Foo before 1.5 does not properly validate input", and no
+# allowlist of English verbs is ever complete, so the bound was discarded and
+# the release carrying the fix stayed flagged — the exact bug this work removes.
+# "and"/"or" are deliberately absent: they follow a bare quantity as naturally
+# as a version ("queue up to 2.0 and the daemon crashes").
 _BOUND_AFTER_RE = (
-    r"(?=\s*$|\s*[,;:)\]]|\s*\.(?!\w)|\s*\((?=v?\d)|"
-    r"\s+(?:is|are|was|were|and|or|contains?|allows?|permits?|enables?|has|have|"
-    r"had|the|a|an|in|on|for|of|to|due|when|where|which|that|this|these|those|"
+    r"(?=\s*$|\s*[.,;:)\]]|\s*\(|"
+    r"\s+(?:is|are|was|were|contains?|allows?|permits?|enables?|has|have|had|"
+    r"the|a|an|in|on|for|of|to|due|when|where|which|that|this|these|those|"
     r"releases?|versions?|inclusive)\b)"
 )
 
@@ -990,16 +1004,16 @@ _BOUND_AFTER_RE = (
 # exclusive, so it is matched as such and held out by a lookahead.
 _BOUND_EXC_WORDS = r"(?:before|prior to|fixed in|patched in|up to but not including)"
 _BOUND_EXCLUSIVE = re.compile(
-    rf"{_BOUND_EXC_WORDS}\s+{_BOUND_VER_RE}{_BOUND_AFTER_RE}{_BOUND_ALT_RE}",
+    rf"{_BOUND_EXC_WORDS}\s+{_BOUND_VER_RE}{_TRUNC_GUARD}{_BOUND_ALT_RE}",
     re.IGNORECASE,
 )
 _BOUND_INCLUSIVE = re.compile(
     rf"(?:\bthrough|\bup to(?:\s+and including)?(?!\s+but not including))\s+"
-    rf"{_BOUND_VER_RE}{_BOUND_AFTER_RE}{_BOUND_ALT_RE}",
+    rf"{_BOUND_VER_RE}{_TRUNC_GUARD}{_BOUND_AFTER_RE}{_BOUND_ALT_RE}",
     re.IGNORECASE,
 )
 _BOUND_LOWER = re.compile(
-    rf"(?:starting in|introduced in|since)\s+{_BOUND_VER_RE}{_BOUND_AFTER_RE}",
+    rf"(?:starting in|introduced in|since)\s+{_BOUND_VER_RE}{_TRUNC_GUARD}{_BOUND_AFTER_RE}",
     re.IGNORECASE,
 )
 
@@ -1056,6 +1070,13 @@ def _desc_bounds(version, desc):
         for m in _BOUND_LOWER.finditer(desc)
         if _usable_bound(m.group(1), m.group(2), version)
     ]
+    # Identical bounds are agreement, not ambiguity: "Versions prior to 2.0.1
+    # are affected. This issue has been patched in version 2.0.1." is the
+    # standard GHSA Impact/Patches import shape, and counting it as two bounds
+    # kept the CVE at the patched version. De-duplicating cannot introduce a
+    # false negative — both bounds say the same thing.
+    exclusive = list(dict.fromkeys(exclusive))
+    inclusive = list(dict.fromkeys(inclusive))
     return exclusive, inclusive, lower, listed
 
 
