@@ -947,195 +947,6 @@ def _cpe_version_affected(version, relevant_cpes):
     return affected
 
 
-# Description bounds are a LAST RESORT, used only when a CVE carries no CPE
-# data. Deciding "not affected" from free-text English is inherently unreliable,
-# so this is deliberately narrow: it clears a finding only when the description
-# states ONE unambiguous bound. Anything else keeps the CVE.
-#
-# Three review rounds established why. Richer readings — several bounds at once,
-# bounds scoped to a release line, bounds restated in another scheme — each
-# looked correct and each produced new false negatives, because every additional
-# interpretation is another way to be wrong in the direction that drops a
-# security finding. A false positive costs an argument; a false negative ships a
-# vulnerability.
-_BOUND_VER_RE = r"(?:(version\s+|v(?=\d)))?([\d]+(?:\.[\d]+)*)"
-# An advisory may restate a bound in the product's own version scheme right
-# after it: "prior to 2024.07.18 (v0.2024.07.16.08.02)". That parenthesised form
-# names the last AFFECTED build, so it is an inclusive bound.
-_BOUND_ALT_RE = r"(?:\s*\(v?([\d]+(?:\.[\d]+)*)[^)]*\))?"
-# What may legitimately FOLLOW a version bound. An allowlist, not a list of
-# units to exclude: CVE prose is full of quantities ("writes up to 4.0
-# kilobytes", "up to 1.5 million connections") and no blacklist of nouns is ever
-# complete. An unrecognised following word means the number is not a bound, so
-# the finding is kept.
-# NOTE the `\.(?!\w)`: a plain "." in this class would let the engine backtrack
-# and truncate the bound itself — "2024.07.18" matching as "2024.07" because the
-# ".18" satisfied the lookahead. A truncated bound compares against a different
-# number entirely, so a version-internal dot must NOT terminate a bound. The
-# same applies to a non-numeric segment: "through 1.3.x" truncating to 1.3
-# cleared the whole 1.3 branch, so `.x`, `.Final` and `.RELEASE` must not
-# terminate one either — hence `(?!\w)` rather than `(?!\d)`.
-# A truncation guard, applied to every bound: the version pattern is greedy but
-# can backtrack, and "through 1.3.x" matching as "1.3" cleared the whole 1.3
-# branch. A bound may not be followed by a dot plus a word character.
-_TRUNC_GUARD = r"(?!\.\w)"
-
-# What may follow an INCLUSIVE bound. Only "up to" and "through" collide with
-# quantities in prose ("writes up to 4.0 kilobytes", "loops through 8 entries");
-# nobody writes "before 4.0 kilobytes", so exclusive bounds need no such guard.
-# Applying this allowlist to exclusive bounds was a serious regression: NVD's
-# most common shape is "Foo before 1.5 does not properly validate input", and no
-# allowlist of English verbs is ever complete, so the bound was discarded and
-# the release carrying the fix stayed flagged — the exact bug this work removes.
-# "and"/"or" are deliberately absent: they follow a bare quantity as naturally
-# as a version ("queue up to 2.0 and the daemon crashes").
-_BOUND_AFTER_RE = (
-    r"(?=\s*$|\s*[.,;:)\]]|\s*\(|"
-    r"\s+(?:is|are|was|were|contains?|allows?|permits?|enables?|has|have|had|"
-    r"the|a|an|in|on|for|of|to|due|when|where|which|that|this|these|those|"
-    r"releases?|versions?|inclusive)\b)"
-)
-
-# Boundary words are NOT interchangeable. "through X" / "up to X" INCLUDE X;
-# "before X" / "prior to X" / "fixed in X" EXCLUDE it. Collapsing them into one
-# inclusive comparison reports the release that CARRIES the fix as vulnerable —
-# the bug that blocked `brew install gitleaks` at 8.30.1 against "Gitleaks prior
-# to 8.30.1". "up to but not including X" reads like the inclusive form but is
-# exclusive, so it is matched as such and held out by a lookahead.
-_BOUND_EXC_WORDS = r"(?:before|prior to|fixed in|patched in|up to but not including)"
-_BOUND_EXCLUSIVE = re.compile(
-    rf"{_BOUND_EXC_WORDS}\s+{_BOUND_VER_RE}{_TRUNC_GUARD}{_BOUND_ALT_RE}",
-    re.IGNORECASE,
-)
-_BOUND_INCLUSIVE = re.compile(
-    rf"(?:\bthrough|\bup to(?:\s+and including)?(?!\s+but not including))\s+"
-    rf"{_BOUND_VER_RE}{_TRUNC_GUARD}{_BOUND_AFTER_RE}{_BOUND_ALT_RE}",
-    re.IGNORECASE,
-)
-_BOUND_LOWER = re.compile(
-    rf"(?:starting in|introduced in|since)\s+{_BOUND_VER_RE}{_TRUNC_GUARD}{_BOUND_AFTER_RE}",
-    re.IGNORECASE,
-)
-
-
-# "This is fixed in 9.4.55, 10.0.24, and 11.0.24" states one fix PER RELEASE
-# LINE inside a single clause. Only the first is captured, so 10.0.20 would
-# clear against 9.4.55 and drop a CVE that applies to it. A bound trailed by a
-# list of further versions is therefore as ambiguous as a repeated boundary word.
-_BOUND_LIST_TAIL = re.compile(r"\s*(?:,\s*(?:and\s+)?|\s+and\s+)v?\d+(?:\.\d+)*")
-
-
-def _is_year_like(bound, version):
-    """Is this "bound" a prose year rather than a version?
-
-    "This flaw has existed since 2019" names no version, but `since 2019` parses
-    as (2019,) and would rule out every 8.x release. A bare four-digit bound
-    counts only when the version is date-schemed too.
-    """
-    if not re.fullmatch(r"\d{4}", bound):
-        return False
-    pv = parse_version(version)
-    return not (pv and 1990 <= pv._key[0][0] <= 2100)
-
-
-def _usable_bound(marker, bound, version):
-    """A match is a real bound only if it reads as a version and is not a year.
-
-    Without an explicit "version"/"v" marker a bound needs a dotted component;
-    a bare integer in prose is not a version.
-    """
-    if not (marker or "." in bound):
-        return False
-    return not _is_year_like(bound, version)
-
-
-def _desc_bounds(version, desc):
-    """Bounds the description states: (exclusive, inclusive, lower, listed).
-
-    `listed` is True when an upper bound is trailed by a comma/and list of
-    further versions — one fix per release line inside a single clause, of
-    which only the first would be captured.
-    """
-    exclusive, inclusive, listed = [], [], False
-    for m in _BOUND_EXCLUSIVE.finditer(desc):
-        if _usable_bound(m.group(1), m.group(2), version):
-            exclusive.append((m.group(2), m.group(3)))
-            listed = listed or bool(_BOUND_LIST_TAIL.match(desc, m.end()))
-    for m in _BOUND_INCLUSIVE.finditer(desc):
-        if _usable_bound(m.group(1), m.group(2), version):
-            inclusive.append((m.group(2), m.group(3)))
-            listed = listed or bool(_BOUND_LIST_TAIL.match(desc, m.end()))
-    lower = [
-        m.group(2)
-        for m in _BOUND_LOWER.finditer(desc)
-        if _usable_bound(m.group(1), m.group(2), version)
-    ]
-    # Identical bounds are agreement, not ambiguity: "Versions prior to 2.0.1
-    # are affected. This issue has been patched in version 2.0.1." is the
-    # standard GHSA Impact/Patches import shape, and counting it as two bounds
-    # kept the CVE at the patched version. De-duplicating cannot introduce a
-    # false negative — both bounds say the same thing.
-    exclusive = list(dict.fromkeys(exclusive))
-    inclusive = list(dict.fromkeys(inclusive))
-    return exclusive, inclusive, lower, listed
-
-
-def _clears(version, bound, alt, inclusive):
-    """Is the version past this single upper bound?
-
-    `alt` is the bound restated in the product's own scheme, used only when the
-    primary bound is NOT in our scheme: "2024.07.17" against "prior to
-    2024.07.18 (v0.2024.07.16...)" must compare with the primary bound.
-    """
-    if _ver_gt(version, bound) or (not inclusive and _ver_ge(version, bound)):
-        return True
-    return bool(
-        alt
-        and _same_scheme(version, alt)
-        and not _same_scheme(version, bound)
-        and _ver_gt(version, alt)
-    )
-
-
-def _desc_says_not_affected(version, desc):
-    """Description-derived version bounds, used only when a CVE has no CPE data.
-
-    Returns True only when the description states ONE upper bound and the
-    version is past it. Two or more upper bounds means the advisory describes
-    several release lines ("Django 4.2 before 4.2.11, 5.0 before 5.0.4") and
-    nothing in the text says which one this version belongs to, so the finding
-    is KEPT — guessing wrong there drops a live CVE.
-
-    A lower bound applies only when it is the sole bound in the description.
-    Mixed with an upper bound it is unreliable: "Since 1.0 the library bundles
-    libbar. Foo before 3.0 is affected." states an introduction that has nothing
-    to do with the vulnerability, and honouring it would clear 0.9.
-    """
-    if parse_version(version) is None:
-        return False  # not a real version — never clear a CVE on it
-
-    exclusive, inclusive, lower, listed = _desc_bounds(version, desc)
-
-    if listed or len(exclusive) + len(inclusive) > 1:
-        return False  # ambiguous — fail closed
-    if exclusive:
-        bound, alt = exclusive[0]
-        return _clears(version, bound, alt, inclusive=False)
-    if inclusive:
-        bound, alt = inclusive[0]
-        return _clears(version, bound, alt, inclusive=True)
-    # No upper bound at all: a lone lower bound can still rule the version out.
-    return len(lower) == 1 and _ver_lt(version, lower[0])
-
-
-def _same_scheme(a, b):
-    """Do two version strings share a leading component? A cheap proxy for
-    "same versioning scheme": Warp's cask `0.2026.08.19...` and the advisory's
-    `(v0.2024.07.16...)` both start with 0; the date-style `2024.07.18` does not."""
-    pa, pb = parse_version(a), parse_version(b)
-    return bool(pa and pb and pa._key[0][0] == pb._key[0][0])
-
-
 # How many words may precede the sentence-leading "in" for it to still count as
 # boilerplate: "An issue was discovered in" / "Multiple issues were found in"
 # put four words before it, "A command injection vulnerability exists in" five.
@@ -1277,11 +1088,20 @@ def _nvd_cve_to_finding(vuln, ecosystem, version, match_terms, require_desc_matc
     ):
         return None
 
-    if version:
-        if relevant_cpes and not _cpe_version_affected(version, relevant_cpes):
-            return None
-        if not relevant_cpes and _desc_says_not_affected(version, desc):
-            return None
+    if version and relevant_cpes and not _cpe_version_affected(version, relevant_cpes):
+        return None
+
+    # A record with no relevant CPE data carries no version evidence, and its
+    # DESCRIPTION is not evidence either. Reading English to decide a security
+    # verdict has no fixed point: bounds appear per release line, in comma
+    # lists, negated ("is not fixed in 3.2"), as quantities ("writes up to 4.0
+    # kilobytes"), truncated at non-numeric segments ("through 1.3.x") — and
+    # every guard against one shape opened another. Six review rounds
+    # established that empirically, each finding CVEs a previous round's parser
+    # silently dropped. Such a record is kept and reported as unscoped
+    # ("scoped": False below), never cleared on prose, and the decision about
+    # whether it should BLOCK is made by partition_unactionable() against the
+    # available versions. See docs/PRD.md § Verdict semantics.
 
     return {
         "source": "NIST NVD",
@@ -1501,6 +1321,35 @@ def query_nvd(package_name, ecosystem, version=None):
     return findings
 
 
+def partition_unactionable(vulns, package_name, ecosystem, version):
+    """Split findings into (actionable, unactionable).
+
+    A finding with no version scope — `scoped: False`, an NVD record whose
+    applicability data cannot tie it to a version — can neither be pinned to
+    this version nor ruled out for it. Blocking on one is only useful if some
+    other version does not carry it. On the newest release there is no such
+    version, so the block denies the software without reducing exposure, and the
+    user's next move is to disable the gate. That is the failure this contract
+    exists to prevent, and it is what `brew install gitleaks` hit: CVE-2026-63728
+    has no CPE data, Homebrew's stable IS the fix release, and nothing newer
+    exists to move to.
+
+    Unactionable findings are still REPORTED — they are simply not a reason to
+    refuse the only version on offer. See docs/PRD.md § Verdict semantics.
+
+    Fails closed: if the latest version cannot be determined, or the checked
+    version is not the latest, every finding stays actionable.
+    """
+    unscoped = [v for v in vulns if v.get("scoped") is False]
+    if not unscoped or not version:
+        return vulns, []
+    latest = resolve_latest_version(package_name, ecosystem)
+    if not latest or parse_version(latest) != parse_version(version):
+        return vulns, []  # a better version may exist — keep blocking
+    unscoped_ids = {v["id"] for v in unscoped}
+    return [v for v in vulns if v["id"] not in unscoped_ids], unscoped
+
+
 def deduplicate(findings):
     """Remove duplicate CVEs reported by multiple sources."""
     seen = set()
@@ -1594,6 +1443,14 @@ def main():
 
     for e in errors:
         print(f"  Warning: {e['source']}: {e['summary']}", file=sys.stderr)
+
+    vulns, unactionable = partition_unactionable(vulns, package_name, ecosystem, version)
+    for u in unactionable:
+        print(
+            f"  Note: {u['id']} reported by {u['source']} with no version scope, "
+            f"and {version} is the newest release — no version exists without it.",
+            file=sys.stderr,
+        )
 
     # Coverage accounting, against the same `applicable` list the opening line
     # was built from. Reporting "2/3 sources checked" when NVD is the one that
