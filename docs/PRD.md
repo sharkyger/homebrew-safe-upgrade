@@ -1,6 +1,6 @@
 # Product Requirements Document — homebrew-safe-upgrade
 
-> Last updated: 2026-06-04 — living document.
+> Last updated: 2026-09-03 — living document.
 
 ## Mission
 
@@ -34,9 +34,60 @@ Security-first wrappers for `brew install` and `brew upgrade`. Every outdated pa
 - **No telemetry / phone-home.**
 - **No API keys required.** Three databases are free + public; the tool stays free + zero-config.
 
+## Verdict semantics
+
+What a verdict *means* was unwritten until 2026-09, and six consecutive review
+rounds re-litigated it because there was nothing to check an implementation
+against. This section is the contract.
+
+**The asymmetry, first, because everything else follows from it.** A false
+positive costs an argument. A false negative ships a vulnerability. Where the
+two trade off, prefer the false positive — with one exception, stated under
+Actionability below, because a false positive that blocks every available
+version is not a safe default either. It is how you teach a user to disable the
+gate, which is the original reason this section exists.
+
+**Admissible evidence.** A finding is tied to a version by evidence, and the
+evidence is graded:
+
+| State | Evidence | Meaning |
+|---|---|---|
+| `AFFECTED` | CPE range, or an OSV/GHSA version range | Definite: this version is in range. |
+| `CLEAN` | the same, resolving out of range | Definite: this version is not in range. |
+| `UNRESOLVED` | none — NVD record with no CPE data | **Not** definite. Reported as such. |
+
+**Description prose is not admissible for clearing a finding.** An NVD summary
+may be *annotated* onto a finding ("advisory text says prior to 8.30.1"), but it
+must never move a finding out of `AFFECTED` or `UNRESOLVED`. Reading English to
+decide a security verdict has no fixed point: bounds appear per release line, in
+comma lists, negated ("is not fixed in 3.2"), as quantities ("writes up to 4.0
+kilobytes"), truncated by non-numeric segments ("through 1.3.x"), and every
+guard against one shape opens another. A parser defect must degrade to a noisy
+report, never to a dropped CVE.
+
+**Actionability — blocking requires somewhere better to go.** An `UNRESOLVED`
+finding on the newest available release is not actionable: blocking denies the
+software without reducing exposure, since no version exists that lacks the
+finding. Block on `UNRESOLVED` only when some available version does not carry
+it. `AFFECTED` always blocks.
+
+**Relative verdicts — block on what an upgrade ADDS.** For an upgrade, compare
+the candidate's findings to the installed version's: report `[SAME]` when they
+match, `[IMPROVES]` when the candidate's are a strict subset, and block only on
+findings the candidate introduces. This is what makes the gate robust to its own
+imperfections — a systematic error (parser defect, missing CPE, noisy keyword
+match) produces the *same* finding on both sides and cancels out of the diff.
+
+**Fail closed on error, not on ignorance.** A source that errors, times out or
+rate-limits is a failure and holds the package. A source that legitimately has
+no data for an ecosystem is not evidence of safety and must not be counted as a
+clean result — notably OSV and GHSA have no Homebrew ecosystem, so for `brew`
+NVD is the only source that ever runs, and coverage must be reported honestly
+rather than as "3/3 sources checked".
+
 ## Quality bar
 
-- **3-layer code review** on every PR (CodeRabbit + Mistral Vibe + source-verification).
+- **Code review on every PR.** The only review that actually runs is a local agent-driven review (`/code-review`) plus source-verification by the maintainer. This used to read "3-layer review (CodeRabbit + Mistral Vibe + source-verification)"; both automated layers are gone. **CodeRabbit does not review this repository** — below 10 stars it posts a *passing* check with "Review skipped", so a green board is not review evidence. **Mistral Vibe is no longer used** (retired 2026-09). Treat the local review as the sole gate and weight it toward false negatives: a missed finding ships a vulnerability, a false one costs an argument.
 - **Signed releases** via maintainer YubiKey.
 - **No public security issues** — vulnerabilities are triaged privately and shipped as fixes.
 - **Python static-analysis floor:** Bandit + Mypy moderate strict (planned, separate PR).

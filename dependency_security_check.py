@@ -25,6 +25,7 @@ import json
 import os
 import re
 import ssl
+import subprocess
 import sys
 import time
 import urllib.error
@@ -148,8 +149,93 @@ def _foreign_target_sw(target_sw, ecosystem):
     return target_sw in _ALL_ECOSYSTEM_TARGET_SW and target_sw not in own
 
 
+def _brew_version_or_none(raw):
+    """Homebrew's answer, or None when it is not a version at all.
+
+    A cask may declare `version :latest`, and `brew info` then reports the
+    literal string "latest". Returning it is worse than returning nothing: the
+    tolerant parser maps it to 0, so the CPE range check reads
+    `0 < versionStartIncluding` as "outside the affected range" and DROPS every
+    CPE-ranged CVE for that package — and brew has no OSV or GHSA second opinion
+    to recover them. Anything that does not start with a digit degrades to None,
+    the same "unknown" path as any other resolution failure.
+
+    Homebrew writes cask versions as `version,build`; only the part before the
+    comma is the marketing version a CVE range talks about.
+    """
+    if not raw:
+        return None
+    candidate = str(raw).strip().split(",", 1)[0]
+    return candidate if re.match(r"^[v=]*\d", candidate) else None
+
+
+def _resolve_brew_version(package_name: str) -> str | None:
+    """Resolve a Homebrew formula's stable version via the local brew client.
+
+    Homebrew has no version endpoint to query the way PyPI and npm are queried,
+    but the installed client already knows: `brew info --json=v2` reports the
+    stable version that `brew install` would actually fetch.
+
+    This is the only process spawn in the shipped Python modules — everything
+    else here is network + parsing, and the bash CLI does the brew calls. It
+    earns the exception because the alternative is worse: without it, an
+    unversioned `brew` check falls back to the formula's ENTIRE CVE history and
+    reports the release that FIXES a CVE as vulnerable.
+
+    The formula name is passed as a separate argv element and never through a
+    shell, so a crafted name cannot become a command.
+    """
+    try:
+        # args list, never a shell; `brew` resolved from PATH like every other
+        # brew call this tool makes.
+        result = subprocess.run(  # noqa: S603
+            ["brew", "info", "--json=v2", "--", package_name],  # noqa: S607
+            capture_output=True,
+            text=True,
+            # Homebrew 4.x can refresh its multi-MB JSON API cache from `brew
+            # info`. Suppress that: a timeout returns None, and None is NOT
+            # neutral here — it puts the package back on the "check every CVE
+            # ever" path this function exists to remove, intermittently and with
+            # no diagnostic.
+            env={**os.environ, "HOMEBREW_NO_AUTO_UPDATE": "1"},
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    try:
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return None
+    # `--json=v1` emits a top-level LIST. Guard here rather than leaning on the
+    # caller's broad except, so the helper holds up when called directly.
+    if not isinstance(data, dict):
+        return None
+    for formula in data.get("formulae") or []:
+        if not isinstance(formula, dict):
+            continue
+        version = (formula.get("versions") or {}).get("stable")
+        if version:
+            return _brew_version_or_none(version)
+    # Casks carry their version at the top level rather than under versions{}.
+    for cask in data.get("casks") or []:
+        if not isinstance(cask, dict):
+            continue
+        if cask.get("version"):
+            return _brew_version_or_none(cask["version"])
+    return None
+
+
 def resolve_latest_version(package_name, ecosystem):
-    """Resolve the latest version of a package from its registry."""
+    """Resolve the latest version of a package from its registry.
+
+    Returning None is not neutral: the caller then checks the package against
+    its ENTIRE CVE history, so anything that ever had an advisory is reported
+    vulnerable — including at the very version that fixed it. Every ecosystem
+    the gate accepts should therefore be resolvable here.
+    """
     try:
         if ecosystem == "pip":
             url = f"https://pypi.org/pypi/{urllib.parse.quote(package_name)}/json"
@@ -163,6 +249,8 @@ def resolve_latest_version(package_name, ecosystem):
             with _urlopen(req, timeout=8) as resp:
                 data = json.loads(resp.read())
             return data.get("version")
+        elif ecosystem == "brew":
+            return _resolve_brew_version(package_name)
     except Exception:
         return None
     return None
@@ -859,64 +947,6 @@ def _cpe_version_affected(version, relevant_cpes):
     return affected
 
 
-def _desc_says_not_affected(version, desc):
-    """Description-derived version bounds, used only when a CVE has no CPE data.
-
-    GitHub-style advisories often read "Starting in version X and prior to
-    version Y". Returns True when the description positively rules the version
-    out; ambiguity returns False (fail closed — the CVE stays).
-    """
-    v_re = r"(?:version\s+)?v?([\d]+(?:\.[\d]+)*)"
-    # An advisory may restate the bound in the product's own version scheme
-    # right after it: "prior to 2024.07.18 (v0.2024.07.16.08.02)" — Warp's
-    # cask versions carry a leading "0." the date-style bound lacks, so only
-    # the parenthesised form compares against "0.2026.08.19...". That form
-    # names the last AFFECTED build, so it is an inclusive bound.
-    alt_re = r"(?:\s*\(v?([\d]+(?:\.[\d]+)*)[^)]*\))?"
-
-    # Exclusive upper bound: fixed at the matched version
-    end_exc = re.search(
-        rf"(?:before|prior to|fixed in|patched in)\s+{v_re}{alt_re}",
-        desc,
-        re.IGNORECASE,
-    )
-    if end_exc and _ver_ge(version, end_exc.group(1)):
-        return True  # version is at or above the fix — not affected
-    if (
-        end_exc
-        and end_exc.group(2)
-        and _same_scheme(version, end_exc.group(2))
-        and not _same_scheme(version, end_exc.group(1))
-        and _ver_gt(version, end_exc.group(2))
-    ):
-        # Above the last affected build, in the product's own scheme — used
-        # only when the primary bound is NOT in our scheme. "2024.07.17"
-        # against "prior to 2024.07.18 (v0.2024.07.16...)" must compare with
-        # the primary bound and stay affected.
-        return True
-
-    # Inclusive upper bound: last affected version
-    end_inc = re.search(rf"\bthrough\s+{v_re}", desc, re.IGNORECASE)
-    if end_inc and _ver_gt(version, end_inc.group(1)):
-        return True
-
-    # Lower bound: affected starts at this version
-    start_inc = re.search(
-        rf"(?:starting in|introduced in|since)\s+{v_re}",
-        desc,
-        re.IGNORECASE,
-    )
-    return bool(start_inc and _ver_lt(version, start_inc.group(1)))
-
-
-def _same_scheme(a, b):
-    """Do two version strings share a leading component? A cheap proxy for
-    "same versioning scheme": Warp's cask `0.2026.08.19...` and the advisory's
-    `(v0.2024.07.16...)` both start with 0; the date-style `2024.07.18` does not."""
-    pa, pb = parse_version(a), parse_version(b)
-    return bool(pa and pb and pa._key[0][0] == pb._key[0][0])
-
-
 # How many words may precede the sentence-leading "in" for it to still count as
 # boilerplate: "An issue was discovered in" / "Multiple issues were found in"
 # put four words before it, "A command injection vulnerability exists in" five.
@@ -1058,11 +1088,20 @@ def _nvd_cve_to_finding(vuln, ecosystem, version, match_terms, require_desc_matc
     ):
         return None
 
-    if version:
-        if relevant_cpes and not _cpe_version_affected(version, relevant_cpes):
-            return None
-        if not relevant_cpes and _desc_says_not_affected(version, desc):
-            return None
+    if version and relevant_cpes and not _cpe_version_affected(version, relevant_cpes):
+        return None
+
+    # A record with no relevant CPE data carries no version evidence, and its
+    # DESCRIPTION is not evidence either. Reading English to decide a security
+    # verdict has no fixed point: bounds appear per release line, in comma
+    # lists, negated ("is not fixed in 3.2"), as quantities ("writes up to 4.0
+    # kilobytes"), truncated at non-numeric segments ("through 1.3.x") — and
+    # every guard against one shape opened another. Six review rounds
+    # established that empirically, each finding CVEs a previous round's parser
+    # silently dropped. Such a record is kept and reported as unscoped
+    # ("scoped": False below), never cleared on prose, and the decision about
+    # whether it should BLOCK is made by partition_unactionable() against the
+    # available versions. See docs/PRD.md § Verdict semantics.
 
     return {
         "source": "NIST NVD",
@@ -1282,6 +1321,35 @@ def query_nvd(package_name, ecosystem, version=None):
     return findings
 
 
+def partition_unactionable(vulns, package_name, ecosystem, version):
+    """Split findings into (actionable, unactionable).
+
+    A finding with no version scope — `scoped: False`, an NVD record whose
+    applicability data cannot tie it to a version — can neither be pinned to
+    this version nor ruled out for it. Blocking on one is only useful if some
+    other version does not carry it. On the newest release there is no such
+    version, so the block denies the software without reducing exposure, and the
+    user's next move is to disable the gate. That is the failure this contract
+    exists to prevent, and it is what `brew install gitleaks` hit: CVE-2026-63728
+    has no CPE data, Homebrew's stable IS the fix release, and nothing newer
+    exists to move to.
+
+    Unactionable findings are still REPORTED — they are simply not a reason to
+    refuse the only version on offer. See docs/PRD.md § Verdict semantics.
+
+    Fails closed: if the latest version cannot be determined, or the checked
+    version is not the latest, every finding stays actionable.
+    """
+    unscoped = [v for v in vulns if v.get("scoped") is False]
+    if not unscoped or not version:
+        return vulns, []
+    latest = resolve_latest_version(package_name, ecosystem)
+    if not latest or parse_version(latest) != parse_version(version):
+        return vulns, []  # a better version may exist — keep blocking
+    unscoped_ids = {v["id"] for v in unscoped}
+    return [v for v in vulns if v["id"] not in unscoped_ids], unscoped
+
+
 def deduplicate(findings):
     """Remove duplicate CVEs reported by multiple sources."""
     seen = set()
@@ -1375,6 +1443,14 @@ def main():
 
     for e in errors:
         print(f"  Warning: {e['source']}: {e['summary']}", file=sys.stderr)
+
+    vulns, unactionable = partition_unactionable(vulns, package_name, ecosystem, version)
+    for u in unactionable:
+        print(
+            f"  Note: {u['id']} reported by {u['source']} with no version scope, "
+            f"and {version} is the newest release — no version exists without it.",
+            file=sys.stderr,
+        )
 
     # Coverage accounting, against the same `applicable` list the opening line
     # was built from. Reporting "2/3 sources checked" when NVD is the one that

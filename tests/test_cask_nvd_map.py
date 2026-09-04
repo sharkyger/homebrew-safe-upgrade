@@ -370,26 +370,30 @@ def test_warp_cask_does_not_inherit_cloudflare_warp_cves():
     assert {f["id"] for f in findings} == {"CVE-2024-41997"}, findings
 
 
-def test_warp_cask_version_scheme_parses_and_clears_the_fixed_cve():
+def test_warp_cask_version_scheme_parses():
     """Warp versions read "0.2026.08.19.08.15.stable_01". The ".stable" channel
     marker used to be an unrecognised suffix → unparseable → every comparison
-    False → CVE-2024-41997 (fixed 2024.07.18) stuck to every later build. The
-    advisory restates its bound in Warp's own scheme — "(v0.2024.07.16.08.02)",
-    the last affected build — which is what the version filter compares."""
+    False → CVE-2024-41997 (fixed 2024.07.18) stuck to every later build.
+
+    This test previously also asserted that the advisory's restated bound —
+    "(v0.2024.07.16.08.02)", the last affected build — CLEARED the CVE for later
+    versions. That description-bound parser has been removed: six review rounds
+    each found real CVEs a previous round's parser silently dropped, so prose is
+    no longer treated as version evidence at all (docs/PRD.md § Verdict
+    semantics). The user-visible outcome for Warp is unchanged — a record with
+    no version scope on the newest available cask is reported but does not block,
+    since no version exists without it — but it is now reached by a rule that
+    cannot be misled by a sentence. See partition_unactionable().
+
+    What still matters here, and is still asserted, is that the version itself
+    parses; an unparseable version fails every comparison and would break the
+    CPE path too.
+    """
     import dependency_security_check as dsc
 
     assert dsc.parse_version("0.2026.08.19.08.15.stable_01") is not None
-    desc = (
-        "An issue was discovered in version of Warp Terminal prior to 2024.07.18 "
-        "(v0.2024.07.16.08.02). A command injection vulnerability exists."
+    assert dsc.parse_version("0.2024.07.16.08.02") is not None
+    # Ordering across the channel marker still holds.
+    assert dsc.parse_version("0.2026.08.19.08.15.stable_01") > dsc.parse_version(
+        "0.2024.07.16.08.02"
     )
-    assert dsc._desc_says_not_affected("0.2026.08.19.08.15.stable_01", desc)
-    assert dsc._desc_says_not_affected("0.2024.07.18.10.00.stable_01", desc)
-    assert not dsc._desc_says_not_affected("0.2024.07.16.08.02", desc)
-    assert not dsc._desc_says_not_affected("0.2024.06.01.00.00.stable_01", desc)
-    # A version in the PRIMARY bound's own scheme compares with the primary
-    # bound, never the restated one: 2024.07.17 is below the 2024.07.18 fix.
-    assert not dsc._desc_says_not_affected("2024.07.17", desc)
-    assert dsc._desc_says_not_affected("2024.07.18", desc)
-    # And a restated bound in the same scheme as the primary never widens it.
-    assert not dsc._desc_says_not_affected("1.8.5", "Foo prior to 1.9 (v1.8.2) is vulnerable.")
