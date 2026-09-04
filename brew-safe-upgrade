@@ -1613,7 +1613,7 @@ except Exception:
                 fi
             fi
 
-            DEP_RESULT=$(python3 "$SCRIPT" brew "$DEP" "$DEP_VER" 2>&1) && DEP_EXIT=0 || DEP_EXIT=$?
+            DEP_RESULT=$(python3 "$SCRIPT" brew "$DEP" "$DEP_VER" 2>/dev/null) && DEP_EXIT=0 || DEP_EXIT=$?
 
             if [ "$DEP_EXIT" -eq 0 ]; then
                 echo "    [ok-dep] $DEP $DEP_VER"

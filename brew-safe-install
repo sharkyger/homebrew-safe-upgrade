@@ -234,6 +234,23 @@ fi
 # before the per-package loop, so `gh auth token` runs at most once.
 # First failure reason from a scanner verdict ($1), or nothing — so a [skip]
 # line says WHICH failure (404 / truncated read / throttle / record overflow).
+# Print the scanner's notes from a verdict ($1) under the package's verdict
+# line. Without this the wrapper renders NOTHING for a finding the scanner
+# declined to block on — `brew safe-install gitleaks` printed a bare [ok] and
+# the CVE was invisible, which is strictly worse than the false block it
+# replaced. brew-safe-upgrade has had print_scan_notes since v0.3.4; this side
+# never grew one.
+print_scan_notes() {
+    echo "$1" | python3 -c "
+import sys, json
+try:
+    for n in json.load(sys.stdin).get('notes') or []:
+        print(f'    note: {n}')
+except Exception:
+    pass
+" 2>/dev/null || true
+}
+
 first_failure_reason() {
     echo "$1" | python3 -c "
 import sys, json
@@ -600,7 +617,7 @@ except Exception:
     fi
 
     # Run security check
-    RESULT=$(python3 "$SCRIPT" brew "$BARE_NAME" "$VERSION" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+    RESULT=$(python3 "$SCRIPT" brew "$BARE_NAME" "$VERSION" 2>/dev/null) && EXIT_CODE=0 || EXIT_CODE=$?
 
     if [ "$EXIT_CODE" -eq 0 ]; then
         # --- SHA verification (default ON; --no-verify-sha to opt out) ---
@@ -700,6 +717,7 @@ except Exception:
             : # already echoed [BLOCKED] above; do not add to CLEAN_PKGS
         else
             echo "  [ok] $pkg $VERSION"
+            print_scan_notes "$RESULT"
             printf '%s' "$SHA_DETAIL"
             CLEAN_PKGS="$CLEAN_PKGS $pkg"
             CLEAN_COUNT=$((CLEAN_COUNT + 1))
@@ -916,7 +934,7 @@ except Exception:
                 fi
             fi
 
-            DEP_RESULT=$(python3 "$SCRIPT" brew "$DEP" "$DEP_VER" 2>&1) && DEP_EXIT=0 || DEP_EXIT=$?
+            DEP_RESULT=$(python3 "$SCRIPT" brew "$DEP" "$DEP_VER" 2>/dev/null) && DEP_EXIT=0 || DEP_EXIT=$?
 
             if [ "$DEP_EXIT" -eq 0 ]; then
                 echo "    [ok-dep] $DEP $DEP_VER"

@@ -217,7 +217,10 @@ def _resolve_brew_version(package_name: str) -> str | None:
         if not isinstance(formula, dict):
             continue
         version = (formula.get("versions") or {}).get("stable")
-        if version:
+        # Fall through rather than return: a name can be BOTH a formula and a
+        # cask, and a non-numeric formula version must not discard a usable
+        # cask one and put the package back on the check-every-CVE path.
+        if version and _brew_version_or_none(version):
             return _brew_version_or_none(version)
     # Casks carry their version at the top level rather than under versions{}.
     for cask in data.get("casks") or []:
@@ -1344,7 +1347,11 @@ def partition_unactionable(vulns, package_name, ecosystem, version):
     if not unscoped or not version:
         return vulns, []
     latest = resolve_latest_version(package_name, ecosystem)
-    if not latest or parse_version(latest) != parse_version(version):
+    pv_latest, pv_version = parse_version(latest), parse_version(version)
+    # Both unparseable compares EQUAL (None != None is False), which would read
+    # as "this is the newest release" without either side being comparable and
+    # stop unscoped findings blocking. Require both to parse.
+    if pv_latest is None or pv_version is None or pv_latest != pv_version:
         return vulns, []  # a better version may exist — keep blocking
     unscoped_ids = {v["id"] for v in unscoped}
     return [v for v in vulns if v["id"] not in unscoped_ids], unscoped
@@ -1492,6 +1499,7 @@ def main():
                 "failure_reasons": [f"{e['source']}: {e['summary']}" for e in errors],
                 "rate_limited": rate_limited,
                 "notes": list(_NOTES),
+                "unactionable": unactionable,
                 "vulnerabilities": [],
             },
             sys.stdout,
@@ -1519,6 +1527,7 @@ def main():
                 "sources_failed": failed_sources,
                 "rate_limited": rate_limited,
                 "notes": list(_NOTES),
+                "unactionable": unactionable,
                 "vulnerabilities": [],
             },
             sys.stdout,
@@ -1556,6 +1565,7 @@ def main():
                 "sources_failed": failed_sources,
                 "rate_limited": rate_limited,
                 "notes": list(_NOTES),
+                "unactionable": unactionable,
                 "vulnerabilities": vulns,
             },
             sys.stdout,
