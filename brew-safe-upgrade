@@ -652,6 +652,24 @@ run_brew_update() {
 # a scanner JSON verdict ($1). Shared by the security-check loop and the
 # age-check CVE bypass (#72), so every "has CVEs" verdict names the CVEs the
 # user is being asked to act on.
+# One-line "SEV CVE-id" summary of the worst finding in a verdict ($1), for the
+# end-of-run blocked-dependency reasons. Reads the JSON: the verdict is captured
+# with 2>/dev/null, so the scanner's human-readable stderr lines are not there to
+# grep. A grep over the JSON matched the single dump line and printed the entire
+# document into the summary.
+first_vuln_summary() {
+    echo "$1" | python3 -c "
+import sys, json
+try:
+    v = sorted(json.load(sys.stdin).get('vulnerabilities', []),
+               key=lambda x: (-(x.get('score') or 0), x.get('id', '')))
+    if v:
+        print(f\"{v[0].get('severity','?')} {v[0].get('id','?')}\")
+except Exception:
+    pass
+" 2>/dev/null || true
+}
+
 print_vuln_lines() {
     echo "$1" | python3 -c "
 import sys, json
@@ -697,7 +715,12 @@ finding_ids() {
     echo "$1" | python3 -c "
 import sys, json
 try:
-    vulns = json.load(sys.stdin).get('vulnerabilities') or []
+    d = json.load(sys.stdin)
+    # Both arrays. A finding declared UNACTIONABLE is not fixed — it is simply
+    # not a reason to block, and it applies to the installed version too. Reading
+    # only 'vulnerabilities' made the candidate look like it had fixed it, so
+    # [IMPROVES] claimed a security improvement that never happened.
+    vulns = (d.get('vulnerabilities') or []) + (d.get('unactionable') or [])
     ids = sorted({str(v.get('id', '')) for v in vulns if v.get('id')})
     print('\\n'.join(ids))
 except Exception:
@@ -1617,6 +1640,7 @@ except Exception:
 
             if [ "$DEP_EXIT" -eq 0 ]; then
                 echo "    [ok-dep] $DEP $DEP_VER"
+                print_scan_notes "$DEP_RESULT"
             elif [ "$DEP_EXIT" -eq 1 ]; then
                 # Same relative rule as the top-level scan: block on findings the
                 # incoming version ADDS, not on ones it inherits or fixes. Without
@@ -1648,7 +1672,7 @@ except Exception:
                     fi
                 else
                     echo "    [VULN-DEP] $DEP $DEP_VER -- vulnerabilities found"
-                    SUMMARY=$(echo "$DEP_RESULT" | grep -E 'CRITICAL|HIGH|MEDIUM' | head -1 || true)
+                    SUMMARY=$(first_vuln_summary "$DEP_RESULT")
                     DEP_BLOCKED_VULN="$DEP_BLOCKED_VULN $DEP"
                     DEP_BLOCKED_VULN_REASONS="${DEP_BLOCKED_VULN_REASONS}    $DEP $DEP_VER: ${SUMMARY:-vulnerabilities reported}"$'\n'
                 fi

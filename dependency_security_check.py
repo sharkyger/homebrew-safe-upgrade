@@ -226,7 +226,9 @@ def _resolve_brew_version(package_name: str) -> str | None:
     for cask in data.get("casks") or []:
         if not isinstance(cask, dict):
             continue
-        if cask.get("version"):
+        # Same fall-through as the formula loop above: a cask whose version is
+        # `:latest` must not discard a later usable one.
+        if cask.get("version") and _brew_version_or_none(cask["version"]):
             return _brew_version_or_none(cask["version"])
     return None
 
@@ -1324,7 +1326,7 @@ def query_nvd(package_name, ecosystem, version=None):
     return findings
 
 
-def partition_unactionable(vulns, package_name, ecosystem, version):
+def partition_unactionable(vulns, package_name, ecosystem, version, latest=None):
     """Split findings into (actionable, unactionable).
 
     A finding with no version scope — `scoped: False`, an NVD record whose
@@ -1346,7 +1348,10 @@ def partition_unactionable(vulns, package_name, ecosystem, version):
     unscoped = [v for v in vulns if v.get("scoped") is False]
     if not unscoped or not version:
         return vulns, []
-    latest = resolve_latest_version(package_name, ecosystem)
+    # `latest` is passed in when main() already resolved it — for brew that
+    # avoids a second `brew info` subprocess (up to 30s) per package.
+    if latest is None:
+        latest = resolve_latest_version(package_name, ecosystem)
     pv_latest, pv_version = parse_version(latest), parse_version(version)
     # Both unparseable compares EQUAL (None != None is False), which would read
     # as "this is the newest release" without either side being comparable and
@@ -1404,8 +1409,12 @@ def main():
         )
         sys.exit(2)
 
+    _resolved_latest = None
     if not version:
         version = resolve_latest_version(package_name, ecosystem)
+        # Remember it: when no version was supplied, the resolved one IS the
+        # latest, so partition_unactionable() need not resolve it again.
+        _resolved_latest = version
 
     print(f"\nSecurity check: {package_name} ({ecosystem})", file=sys.stderr)
     if version:
@@ -1451,7 +1460,9 @@ def main():
     for e in errors:
         print(f"  Warning: {e['source']}: {e['summary']}", file=sys.stderr)
 
-    vulns, unactionable = partition_unactionable(vulns, package_name, ecosystem, version)
+    vulns, unactionable = partition_unactionable(
+        vulns, package_name, ecosystem, version, latest=_resolved_latest
+    )
     for u in unactionable:
         # _note(), not a bare print: the wrappers run this scanner with stderr
         # DISCARDED and surface notes from the JSON "notes" field, so a stderr

@@ -70,3 +70,27 @@ def test_the_scan_captures_do_not_fold_stderr_into_the_json():
     src = WRAPPER.read_text()
     for call in re.findall(r'\$\(python3 "\$SCRIPT".*?\)', src, re.S):
         assert "2>&1" not in call, f"stderr folded into a JSON capture: {call.strip()[:80]}"
+
+
+def test_vulnerability_lines_are_rendered_from_json_not_grepped():
+    """The verdict is captured with 2>/dev/null, so the scanner's human-readable
+    stderr lines are not in it. A grep over the JSON matched the single dump
+    line and printed the ENTIRE document under [VULN]."""
+    src = WRAPPER.read_text()
+    assert "print_vuln_lines" in src, "install wrapper must render findings from JSON"
+    assert "grep -E 'CRITICAL|HIGH|MEDIUM'" not in src, "grep over JSON dumps the whole blob"
+
+
+def test_notes_render_on_every_verdict_branch():
+    """A package can be blocked by one finding and carry an unactionable one, and
+    a coverage note can appear on the failed path. Notes only on [ok] hid both."""
+    src = WRAPPER.read_text()
+    assert src.count('print_scan_notes "$RESULT"') >= 3, "notes missing from a verdict branch"
+    assert 'print_scan_notes "$DEP_RESULT"' in src, "dependency path renders no notes"
+
+
+def test_finding_ids_counts_unactionable_findings():
+    """Unactionable is not fixed. Reading only 'vulnerabilities' let [IMPROVES]
+    claim a candidate had fixed a finding that applies to both versions."""
+    src = WRAPPER.read_text()
+    assert "d.get('unactionable')" in src, "finding_ids ignores the unactionable array"
