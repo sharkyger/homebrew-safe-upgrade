@@ -217,13 +217,18 @@ def _resolve_brew_version(package_name: str) -> str | None:
         if not isinstance(formula, dict):
             continue
         version = (formula.get("versions") or {}).get("stable")
-        if version:
+        # Fall through rather than return: a name can be BOTH a formula and a
+        # cask, and a non-numeric formula version must not discard a usable
+        # cask one and put the package back on the check-every-CVE path.
+        if version and _brew_version_or_none(version):
             return _brew_version_or_none(version)
     # Casks carry their version at the top level rather than under versions{}.
     for cask in data.get("casks") or []:
         if not isinstance(cask, dict):
             continue
-        if cask.get("version"):
+        # Same fall-through as the formula loop above: a cask whose version is
+        # `:latest` must not discard a later usable one.
+        if cask.get("version") and _brew_version_or_none(cask["version"]):
             return _brew_version_or_none(cask["version"])
     return None
 
@@ -231,10 +236,18 @@ def _resolve_brew_version(package_name: str) -> str | None:
 def resolve_latest_version(package_name, ecosystem):
     """Resolve the latest version of a package from its registry.
 
-    Returning None is not neutral: the caller then checks the package against
-    its ENTIRE CVE history, so anything that ever had an advisory is reported
-    vulnerable — including at the very version that fixed it. Every ecosystem
-    the gate accepts should therefore be resolvable here.
+    Returning None is not neutral, in two ways. The caller checks the package
+    against its ENTIRE CVE history, so anything that ever had an advisory is
+    reported vulnerable — including at the very version that fixed it. And
+    partition_unactionable() cannot judge actionability without a "latest", so
+    every unscoped finding stays blocking.
+
+    KNOWN LIMITATION: only pip, npm and brew resolve here. For composer, cargo,
+    go, maven and gem a record with no CPE data therefore blocks at every
+    version with no escape — this tool has no OSV-based refutation to fall back
+    on. Those ecosystems are reachable only through the standalone scanner; the
+    brew wrappers never use them. Adding resolvers for them is the fix; until
+    then the behaviour is fail-closed and documented rather than silent.
     """
     try:
         if ecosystem == "pip":
@@ -1321,7 +1334,17 @@ def query_nvd(package_name, ecosystem, version=None):
     return findings
 
 
-def partition_unactionable(vulns, package_name, ecosystem, version):
+def _strip_brew_revision(v):
+    """Version string minus Homebrew's `_N` revision suffix.
+
+    A revision bump repackages the same upstream release, so `3.13.7_1` and
+    `3.13.7` are the same version for actionability. Nothing else is normalised:
+    `-N` build segments and date-style versions are real version differences.
+    """
+    return re.sub(r"_\d+$", "", str(v or "").strip())
+
+
+def partition_unactionable(vulns, package_name, ecosystem, version, latest=None):
     """Split findings into (actionable, unactionable).
 
     A finding with no version scope — `scoped: False`, an NVD record whose
@@ -1343,8 +1366,37 @@ def partition_unactionable(vulns, package_name, ecosystem, version):
     unscoped = [v for v in vulns if v.get("scoped") is False]
     if not unscoped or not version:
         return vulns, []
-    latest = resolve_latest_version(package_name, ecosystem)
-    if not latest or parse_version(latest) != parse_version(version):
+    # `latest` is passed in when main() already resolved it — for brew that
+    # avoids a second `brew info` subprocess (up to 30s) per package.
+    if latest is None:
+        latest = resolve_latest_version(package_name, ecosystem)
+    if not latest:
+        # Cannot tell whether a better version exists, so every finding stays
+        # blocking — but say why, or the user sees an unexplained permanent block.
+        _note(
+            f"{len(unscoped)} finding(s) carry no version scope and the latest "
+            f"{ecosystem} version could not be resolved, so they are treated as "
+            + (
+                "blocking. Check that the Homebrew client is installed and working."
+                if ecosystem == "brew"
+                else f"blocking. No latest-version resolver exists for {ecosystem}, "
+                "so this cannot be narrowed here."
+            )
+        )
+    pv_latest, pv_version = parse_version(latest), parse_version(version)
+    # Both unparseable compares EQUAL (None != None is False), which would read
+    # as "this is the newest release" without either side being comparable and
+    # stop unscoped findings blocking. Require both to parse.
+    if pv_latest is None or pv_version is None:
+        return vulns, []  # a better version may exist — keep blocking
+    # Compare the STRINGS, normalising only Homebrew's revision suffix.
+    # parse_version() is deliberately tolerant — it discards a trailing build
+    # segment, so "3.13.7_1" == "3.13.7" (wanted: a revision bump is the same
+    # upstream release) but ALSO "7.1.2-19" == "7.1.2-20" and
+    # "2023-10-05" == "2023-11-01" (not wanted: genuinely different releases).
+    # Deciding actionability on the parsed form therefore declared an older
+    # build "the newest release" and demoted a blocking finding to a note.
+    if _strip_brew_revision(latest) != _strip_brew_revision(version):
         return vulns, []  # a better version may exist — keep blocking
     unscoped_ids = {v["id"] for v in unscoped}
     return [v for v in vulns if v["id"] not in unscoped_ids], unscoped
@@ -1397,8 +1449,12 @@ def main():
         )
         sys.exit(2)
 
+    _resolved_latest = None
     if not version:
         version = resolve_latest_version(package_name, ecosystem)
+        # Remember it: when no version was supplied, the resolved one IS the
+        # latest, so partition_unactionable() need not resolve it again.
+        _resolved_latest = version
 
     print(f"\nSecurity check: {package_name} ({ecosystem})", file=sys.stderr)
     if version:
@@ -1444,13 +1500,24 @@ def main():
     for e in errors:
         print(f"  Warning: {e['source']}: {e['summary']}", file=sys.stderr)
 
-    vulns, unactionable = partition_unactionable(vulns, package_name, ecosystem, version)
-    for u in unactionable:
-        print(
-            f"  Note: {u['id']} reported by {u['source']} with no version scope, "
-            f"and {version} is the newest release — no version exists without it.",
-            file=sys.stderr,
+    vulns, unactionable = partition_unactionable(
+        vulns, package_name, ecosystem, version, latest=_resolved_latest
+    )
+    # Capped like print_vuln_lines(): one ~40-word sentence per finding buried
+    # the [ok] line and every other package in a multi-package run (wget alone
+    # can carry 25 records). Same convention as the CVE detail lines.
+    for u in unactionable[:3]:
+        # _note(), not a bare print: the wrappers run this scanner with stderr
+        # DISCARDED and surface notes from the JSON "notes" field, so a stderr
+        # line would be invisible to every `brew safe-upgrade` user. A finding we
+        # decline to block on must still reach the person installing the package.
+        _note(
+            f"{u['id']} ({u['severity']}) reported by {u['source']} with no version "
+            f"scope, and {version} is the newest release — no version exists "
+            f"without it, so it is reported rather than blocked."
         )
+    if len(unactionable) > 3:
+        _note(f"… and {len(unactionable) - 3} more finding(s) with no version scope.")
 
     # Coverage accounting, against the same `applicable` list the opening line
     # was built from. Reporting "2/3 sources checked" when NVD is the one that
@@ -1488,6 +1555,7 @@ def main():
                 "failure_reasons": [f"{e['source']}: {e['summary']}" for e in errors],
                 "rate_limited": rate_limited,
                 "notes": list(_NOTES),
+                "unactionable": unactionable,
                 "vulnerabilities": [],
             },
             sys.stdout,
@@ -1515,6 +1583,7 @@ def main():
                 "sources_failed": failed_sources,
                 "rate_limited": rate_limited,
                 "notes": list(_NOTES),
+                "unactionable": unactionable,
                 "vulnerabilities": [],
             },
             sys.stdout,
@@ -1529,7 +1598,15 @@ def main():
 
         for v in vulns:
             severity_label = v["severity"]
-            score_str = f" (CVSS {v['score']})" if v["score"] > 0 else ""
+            # `or 0`: an NVD record can carry "baseScore": null, and a bare
+            # `> 0` then raises TypeError HERE — before json.dump — so the
+            # process exits 1 with EMPTY stdout. The wrappers capture stdout
+            # only, so they print [VULN] with no detail lines, and finding_ids
+            # comes back empty, which also kills the [SAME]/[IMPROVES] relative
+            # verdict: a permanent block with no reason shown. Same guard as
+            # print_vuln_lines() in both wrappers.
+            _score = v.get("score") or 0
+            score_str = f" (CVSS {_score})" if _score > 0 else ""
             print(f"  [{severity_label}] {v['id']}{score_str}", file=sys.stderr)
             print(f"    Source: {v['source']}", file=sys.stderr)
             print(f"    {v['summary']}\n", file=sys.stderr)
@@ -1552,6 +1629,7 @@ def main():
                 "sources_failed": failed_sources,
                 "rate_limited": rate_limited,
                 "notes": list(_NOTES),
+                "unactionable": unactionable,
                 "vulnerabilities": vulns,
             },
             sys.stdout,
