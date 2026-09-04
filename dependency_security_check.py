@@ -236,10 +236,18 @@ def _resolve_brew_version(package_name: str) -> str | None:
 def resolve_latest_version(package_name, ecosystem):
     """Resolve the latest version of a package from its registry.
 
-    Returning None is not neutral: the caller then checks the package against
-    its ENTIRE CVE history, so anything that ever had an advisory is reported
-    vulnerable — including at the very version that fixed it. Every ecosystem
-    the gate accepts should therefore be resolvable here.
+    Returning None is not neutral, in two ways. The caller checks the package
+    against its ENTIRE CVE history, so anything that ever had an advisory is
+    reported vulnerable — including at the very version that fixed it. And
+    partition_unactionable() cannot judge actionability without a "latest", so
+    every unscoped finding stays blocking.
+
+    KNOWN LIMITATION: only pip, npm and brew resolve here. For composer, cargo,
+    go, maven and gem a record with no CPE data therefore blocks at every
+    version with no escape — this tool has no OSV-based refutation to fall back
+    on. Those ecosystems are reachable only through the standalone scanner; the
+    brew wrappers never use them. Adding resolvers for them is the fix; until
+    then the behaviour is fail-closed and documented rather than silent.
     """
     try:
         if ecosystem == "pip":
@@ -1326,6 +1334,16 @@ def query_nvd(package_name, ecosystem, version=None):
     return findings
 
 
+def _strip_brew_revision(v):
+    """Version string minus Homebrew's `_N` revision suffix.
+
+    A revision bump repackages the same upstream release, so `3.13.7_1` and
+    `3.13.7` are the same version for actionability. Nothing else is normalised:
+    `-N` build segments and date-style versions are real version differences.
+    """
+    return re.sub(r"_\d+$", "", str(v or "").strip())
+
+
 def partition_unactionable(vulns, package_name, ecosystem, version, latest=None):
     """Split findings into (actionable, unactionable).
 
@@ -1352,11 +1370,28 @@ def partition_unactionable(vulns, package_name, ecosystem, version, latest=None)
     # avoids a second `brew info` subprocess (up to 30s) per package.
     if latest is None:
         latest = resolve_latest_version(package_name, ecosystem)
+    if not latest:
+        # Cannot tell whether a better version exists, so every finding stays
+        # blocking — but say why, or the user sees an unexplained permanent block.
+        _note(
+            f"{len(unscoped)} finding(s) carry no version scope and the latest "
+            f"{ecosystem} version could not be resolved, so they are treated as "
+            f"blocking. Pass an explicit version to narrow this."
+        )
     pv_latest, pv_version = parse_version(latest), parse_version(version)
     # Both unparseable compares EQUAL (None != None is False), which would read
     # as "this is the newest release" without either side being comparable and
     # stop unscoped findings blocking. Require both to parse.
-    if pv_latest is None or pv_version is None or pv_latest != pv_version:
+    if pv_latest is None or pv_version is None:
+        return vulns, []  # a better version may exist — keep blocking
+    # Compare the STRINGS, normalising only Homebrew's revision suffix.
+    # parse_version() is deliberately tolerant — it discards a trailing build
+    # segment, so "3.13.7_1" == "3.13.7" (wanted: a revision bump is the same
+    # upstream release) but ALSO "7.1.2-19" == "7.1.2-20" and
+    # "2023-10-05" == "2023-11-01" (not wanted: genuinely different releases).
+    # Deciding actionability on the parsed form therefore declared an older
+    # build "the newest release" and demoted a blocking finding to a note.
+    if _strip_brew_revision(latest) != _strip_brew_revision(version):
         return vulns, []  # a better version may exist — keep blocking
     unscoped_ids = {v["id"] for v in unscoped}
     return [v for v in vulns if v["id"] not in unscoped_ids], unscoped

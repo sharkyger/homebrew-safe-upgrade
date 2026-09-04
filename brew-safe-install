@@ -253,7 +253,7 @@ try:
     for v in vulns[:5]:
         sev = v.get('severity', '?')
         vid = v.get('id', '?')
-        score = v.get('score', 0)
+        score = v.get('score') or 0  # a null score must not erase the whole list
         src = v.get('source', '?')
         score_str = f' (CVSS {score})' if score > 0 else ''
         print(f'    [{sev}] {vid}{score_str} — {src}')
@@ -575,7 +575,13 @@ try:
         installed = len(f.get('installed', [])) > 0
     elif casks and len(casks) > 0:
         c = casks[0]
-        version = c.get('version', '?')
+        # Cask versions are written as version,build (docker-desktop is
+        # 4.89.0,238018) and the scanner rejects the comma, so passing it
+        # through made every comma-versioned cask fail and never install.
+        # Only the part before the comma is the marketing version.
+        # This block is inside python3 -c with a DOUBLE-QUOTED shell string:
+        # no double quotes, no backticks, no dollar signs in here.
+        version = str(c.get('version', '?')).split(',')[0]
         full_name = c.get('full_token', c.get('token', ''))
         bare_name = full_name
         pkg_type = 'cask'

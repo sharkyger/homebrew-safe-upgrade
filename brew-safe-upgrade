@@ -683,7 +683,7 @@ try:
     for v in vulns[:5]:
         sev = v.get('severity', '?')
         vid = v.get('id', '?')
-        score = v.get('score', 0)
+        score = v.get('score') or 0  # a null score must not erase the whole list
         src = v.get('source', '?')
         score_str = f' (CVSS {score})' if score > 0 else ''
         print(f'    [{sev}] {vid}{score_str} — {src}')
@@ -1308,6 +1308,7 @@ except Exception:
         else
             _why=$(first_failure_reason "$RESULT_JSON")
             echo "  [skip] $name $current -- check failed${_why:+ ($_why)}, will not upgrade"
+            print_scan_notes "$RESULT_JSON"
             SKIPPED_PKGS="$SKIPPED_PKGS $name"
             if echo "$RESULT_JSON" | grep -q '"rate_limited": *true'; then
                 RATE_LIMIT_SEEN=true

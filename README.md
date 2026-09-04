@@ -497,9 +497,18 @@ python3 "$(brew --prefix safe-upgrade)/libexec/dependency_security_check.py" npm
 
 Exit codes:
 
-- `0` — no known vulnerabilities
+- `0` — nothing blocking. Either no findings at all, **or** findings that carry
+  no version scope on a package already at its newest release — see
+  `unactionable` below. Read `unactionable` and `notes`, not the exit code
+  alone, if you need to know whether anything was reported.
 - `1` — vulnerabilities found (details on stderr, JSON on stdout)
 - `2` — error (invalid input, network failure, or **no source could answer**)
+
+`unactionable` holds findings NVD could not tie to a version (no CPE data) on a
+package that is already at its newest available release. There is no version to
+move to, so they do not block — but they are reported, both here and as `note:`
+lines from the wrappers. A finding with real version evidence always blocks and
+appears in `vulnerabilities`. See `docs/PRD.md` § Verdict semantics.
 
 JSON output on stdout for programmatic use:
 
@@ -512,6 +521,8 @@ JSON output on stdout for programmatic use:
   "sources_ok": 3,
   "sources_total": 3,
   "sources_failed": [],
+  "notes": [],
+  "unactionable": [],
   "vulnerabilities": []
 }
 ```

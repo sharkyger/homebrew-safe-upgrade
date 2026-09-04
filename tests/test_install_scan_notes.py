@@ -94,3 +94,35 @@ def test_finding_ids_counts_unactionable_findings():
     claim a candidate had fixed a finding that applies to both versions."""
     src = WRAPPER.read_text()
     assert "d.get('unactionable')" in src, "finding_ids ignores the unactionable array"
+
+
+def test_a_null_cvss_score_does_not_erase_the_finding_list():
+    """`score > 0` on a null raised TypeError inside the renderer, and the bare
+    `except` swallowed it — printing [VULN] with no CVE lines at all."""
+    verdict = json.dumps(
+        {
+            "vulnerabilities": [
+                {"id": "CVE-1", "severity": "HIGH", "score": None, "source": "NVD"},
+                {"id": "CVE-2", "severity": "LOW", "score": 3.1, "source": "OSV"},
+            ]
+        }
+    )
+    src = WRAPPER.read_text()
+    m = re.search(r"^print_vuln_lines\(\) \{.*?^\}", src, re.S | re.M)
+    out = subprocess.run(
+        ["bash", "-c", f'{m.group(0)}\nprint_vuln_lines "$1"\n', "bash", verdict],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    ).stdout
+    assert "CVE-1" in out and "CVE-2" in out
+
+
+def test_cask_build_suffix_is_stripped_before_the_scanner_sees_it():
+    """`brew info` reports docker-desktop as "4.89.0,238018"; the scanner's input
+    validation rejects the comma, so an unstripped version made every
+    comma-versioned cask fail with [skip] and never install."""
+    src = WRAPPER.read_text()
+    assert "c.get('version', '?')).split(',')[0]" in src or ".split(',')[0]" in src, (
+        "install wrapper passes the cask build suffix through verbatim"
+    )
