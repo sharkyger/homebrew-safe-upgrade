@@ -1376,7 +1376,12 @@ def partition_unactionable(vulns, package_name, ecosystem, version, latest=None)
         _note(
             f"{len(unscoped)} finding(s) carry no version scope and the latest "
             f"{ecosystem} version could not be resolved, so they are treated as "
-            f"blocking. Pass an explicit version to narrow this."
+            + (
+                "blocking. Check that the Homebrew client is installed and working."
+                if ecosystem == "brew"
+                else f"blocking. No latest-version resolver exists for {ecosystem}, "
+                "so this cannot be narrowed here."
+            )
         )
     pv_latest, pv_version = parse_version(latest), parse_version(version)
     # Both unparseable compares EQUAL (None != None is False), which would read
@@ -1498,7 +1503,10 @@ def main():
     vulns, unactionable = partition_unactionable(
         vulns, package_name, ecosystem, version, latest=_resolved_latest
     )
-    for u in unactionable:
+    # Capped like print_vuln_lines(): one ~40-word sentence per finding buried
+    # the [ok] line and every other package in a multi-package run (wget alone
+    # can carry 25 records). Same convention as the CVE detail lines.
+    for u in unactionable[:3]:
         # _note(), not a bare print: the wrappers run this scanner with stderr
         # DISCARDED and surface notes from the JSON "notes" field, so a stderr
         # line would be invisible to every `brew safe-upgrade` user. A finding we
@@ -1508,6 +1516,8 @@ def main():
             f"scope, and {version} is the newest release — no version exists "
             f"without it, so it is reported rather than blocked."
         )
+    if len(unactionable) > 3:
+        _note(f"… and {len(unactionable) - 3} more finding(s) with no version scope.")
 
     # Coverage accounting, against the same `applicable` list the opening line
     # was built from. Reporting "2/3 sources checked" when NVD is the one that
@@ -1588,7 +1598,15 @@ def main():
 
         for v in vulns:
             severity_label = v["severity"]
-            score_str = f" (CVSS {v['score']})" if v["score"] > 0 else ""
+            # `or 0`: an NVD record can carry "baseScore": null, and a bare
+            # `> 0` then raises TypeError HERE — before json.dump — so the
+            # process exits 1 with EMPTY stdout. The wrappers capture stdout
+            # only, so they print [VULN] with no detail lines, and finding_ids
+            # comes back empty, which also kills the [SAME]/[IMPROVES] relative
+            # verdict: a permanent block with no reason shown. Same guard as
+            # print_vuln_lines() in both wrappers.
+            _score = v.get("score") or 0
+            score_str = f" (CVSS {_score})" if _score > 0 else ""
             print(f"  [{severity_label}] {v['id']}{score_str}", file=sys.stderr)
             print(f"    Source: {v['source']}", file=sys.stderr)
             print(f"    {v['summary']}\n", file=sys.stderr)

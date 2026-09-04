@@ -1668,8 +1668,10 @@ except Exception:
                     _dni=$(printf '%s\n' "$_DINST_IDS" | grep -c .)
                     if [ "$_dn" -eq "$_dni" ]; then
                         echo "    [SAME-DEP] $DEP $DEP_VER -- same $_dn finding(s) as installed $DEP_INSTALLED_VER, upgrade does not change exposure"
+                        print_scan_notes "$DEP_RESULT"
                     else
                         echo "    [IMPROVES-DEP] $DEP $DEP_VER -- fixes $((_dni - _dn)) of $_dni finding(s) from installed $DEP_INSTALLED_VER, introduces none"
+                        print_scan_notes "$DEP_RESULT"
                     fi
                 else
                     echo "    [VULN-DEP] $DEP $DEP_VER -- vulnerabilities found"
