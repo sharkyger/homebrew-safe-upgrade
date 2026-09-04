@@ -1446,10 +1446,14 @@ def main():
 
     vulns, unactionable = partition_unactionable(vulns, package_name, ecosystem, version)
     for u in unactionable:
-        print(
-            f"  Note: {u['id']} reported by {u['source']} with no version scope, "
-            f"and {version} is the newest release — no version exists without it.",
-            file=sys.stderr,
+        # _note(), not a bare print: the wrappers run this scanner with stderr
+        # DISCARDED and surface notes from the JSON "notes" field, so a stderr
+        # line would be invisible to every `brew safe-upgrade` user. A finding we
+        # decline to block on must still reach the person installing the package.
+        _note(
+            f"{u['id']} ({u['severity']}) reported by {u['source']} with no version "
+            f"scope, and {version} is the newest release — no version exists "
+            f"without it, so it is reported rather than blocked."
         )
 
     # Coverage accounting, against the same `applicable` list the opening line

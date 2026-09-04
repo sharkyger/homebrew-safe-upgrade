@@ -8,6 +8,8 @@ The project is pre-1.0; expect minor breaking changes between 0.x releases until
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-09-04
+
 ### Fixed
 
 - **Description-derived version bounds are now used only when the description is unambiguous.** When an NVD record carries no CPE data the affected range is read from its prose, and that reading was wrong in both directions. It dropped live CVEs: `re.search` took only the FIRST bound, so "Foo 9.x before 9.2 and 10.x before 10.1" cleared 10.0 against 9.2; a comma list of fix versions ("fixed in 9.4.55, 10.0.24, and 11.0.24") cleared 10.0.20 against the lowest; a bound was truncated at a non-numeric segment, so "through 1.3.x" became 1.3 and cleared the whole 1.3 branch; and quantities in prose ("writes up to 4.0 kilobytes", "loops through 8 entries") were read as bounds. It also blocked patched releases: requiring a version to clear bounds belonging to other release lines reported the patched Django 4.2.15 as vulnerable. The parser now clears a CVE only when the description states ONE upper bound and the version is past it — several bounds, a trailing list, or an unusable bound all keep the finding, because which release line a version belongs to is not knowable from prose. Boundary words remain distinguished: `through X` and `up to X` include X, `before X` / `prior to X` / `fixed in X` / `up to but not including X` exclude it. A bound needs a dotted component or an explicit `version`/`v` marker, which is what rules out bare quantities and prose years; the follow-word guard applies only to `up to` / `through`, since those are the only forms that collide with quantities. The Warp-style bound restated in the product's own scheme — `prior to 2024.07.18 (v0.2024.07.16.08.02)` — behaves exactly as before.
@@ -348,6 +350,7 @@ pre-tag history by theme rather than by release. Full detail is in `git log`.
 - Community health files: issue templates (bug, false-positive, feature), discussion link from README on the open `--min-age` default question.
 
 [Unreleased]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.3.5...HEAD
+[0.4.0]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.3.5...v0.4.0
 [0.3.5]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.3.4...v0.3.5
 [0.3.4]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.3.2...v0.3.3
