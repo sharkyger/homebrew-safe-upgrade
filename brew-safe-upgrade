@@ -908,13 +908,33 @@ echo "Checking for outdated packages..."
 OUTDATED_JSON=$(brew outdated --json=v2 2>/dev/null || echo '{"formulae":[],"casks":[]}')
 
 # Parse formulae
+#
+# installed_versions[-1], not [0]. brew builds that list in outdated_kegs() as
+# `all_kegs.sort_by(&:scheme_and_version)` (Homebrew's formula.rb) — ASCENDING,
+# by brew's own version ordering, which ranks revisions (10.47 < 10.47_1) in a
+# way our PEP 440 comparator deliberately does not. So the LAST entry is the keg
+# brew will upgrade FROM, and the only correct baseline for the relative verdict.
+#
+# Taking [0] read the OLDEST keg. Two kegs in the Cellar is not exotic — any
+# skipped or failed cleanup leaves one — and the consequence was fail-OPEN: a
+# stale keg carries more CVEs, so "installed has CVEs" fired and waved the
+# candidate past the freshness hold on the strength of a version the user is not
+# running. Seen live: simdjson reported as installed 4.6.4 while brew upgraded
+# from 4.6.7, bypassing the 3-day hold for a release published that same day.
+# The dependency path already took the last version (`awk '$NF'`); this brings
+# the top-level path in line.
+#
+# `or ['?']` rather than a dict default: the key can be present AND an empty
+# list, which made [0] raise IndexError. That was caught by the blanket
+# `except` below, which discards the WHOLE list — every outdated package gone,
+# "Everything up to date.", exit 0. Fail-open again, from one odd entry.
 OUTDATED_FORMULAE=$(echo "$OUTDATED_JSON" | python3 -c "
 import sys, json
 try:
     data = json.load(sys.stdin)
     for p in data.get('formulae', []):
         name = p.get('name', '')
-        installed = p.get('installed_versions', ['?'])[0]
+        installed = str((p.get('installed_versions') or ['?'])[-1])
         current = p.get('current_version', '?')
         print(f'{name} {installed} {current}')
 except Exception:
@@ -922,13 +942,18 @@ except Exception:
 " 2>/dev/null)
 
 # Parse casks (same JSON keys as formulae: name, installed_versions, current_version)
+#
+# brew only ever puts one entry in a cask's installed_versions (Cask#outdated_info
+# builds it as `[installed_version]`), so [-1] and [0] agree today. It is written
+# the same way as the formula path above on purpose: identical shape, one rule to
+# remember, and no second fail-open to find if brew ever lists cask kegs too.
 OUTDATED_CASKS=$(echo "$OUTDATED_JSON" | python3 -c "
 import sys, json
 try:
     data = json.load(sys.stdin)
     for c in data.get('casks', []):
         name = c.get('name', '')
-        installed = c.get('installed_versions', ['?'])[0]
+        installed = str((c.get('installed_versions') or ['?'])[-1])
         current = str(c.get('current_version', '?'))
         # Strip SHA suffix from cask versions (e.g. '1.2.3,abc123' -> '1.2.3')
         if ',' in current:
@@ -1109,6 +1134,10 @@ BLOCKED_PKGS=""
 SAME_PKGS=""
 IMPROVED_PKGS=""
 TAMPERED_PKGS=""
+# Packages the gate cleared that brew then declined to upgrade. Initialised here
+# because the final exit check reads it on every path, including the ones that
+# never reach the upgrade block (nothing clean, user answered "n").
+UPGRADE_FAILED_PKGS=""
 
 # One actionable note per run when NVD threw us out for asking too fast.
 # The scanner is invoked with 2>/dev/null, so its stderr hint never reaches the
@@ -1955,6 +1984,50 @@ else
         done
         SAFE_PINNED_BY_US=""
         trap - EXIT INT TERM
+
+        # Did the verdict actually land?
+        #
+        # `brew upgrade` refuses individual packages and still exits 0 for the
+        # batch, and the `|| true` above swallows even the non-zero case. The
+        # common trigger is our own pin bracket: a clean dependent that needs the
+        # latest of a dependency this run pinned makes brew print
+        #   Error: You must `brew unpin libvpx sdl3` as installing ffmpeg requires…
+        # and skip it. Seen live: ffmpeg and gnupg were announced as clean, their
+        # bottles were downloaded, neither was poured — and the run still closed
+        # with "Done." and exit 0. The gate had told the user those two upgraded.
+        #
+        # Re-ask brew what is still outdated rather than parsing its error text.
+        # The wording differs per reason (pinned dependency, no bottle, build
+        # failure, network) and brew is free to change it; the end state is the
+        # same question in every case and answers reasons we have not seen yet.
+        # This runs AFTER the unpin loop so it reports on the settled state, not
+        # on packages brew is merely refusing while our pins are up.
+        UPGRADE_FAILED_PKGS=""
+        _still_outdated=" $(HOMEBREW_NO_AUTO_UPDATE=1 brew outdated --formula --quiet 2>/dev/null | tr '\n' ' ')$(HOMEBREW_NO_AUTO_UPDATE=1 brew outdated --cask --quiet 2>/dev/null | tr '\n' ' ') "
+        for pkg in $CLEAN_PKGS; do
+            [ -z "$pkg" ] && continue
+            # Match the full name AND the basename: CLEAN_PKGS carries whatever
+            # `brew outdated --json` called it (`ddev/ddev/ddev`) while
+            # `--quiet` may print either spelling. A same-basename package from
+            # another tap could in principle match here — that direction is the
+            # safe one, since the result is a visible warning the user can check
+            # rather than the silence this replaces.
+            _bn="${pkg##*/}"
+            case "$_still_outdated" in
+                *" $pkg "* | *" $_bn "*)
+                    UPGRADE_FAILED_PKGS="$UPGRADE_FAILED_PKGS $pkg"
+                    ;;
+            esac
+        done
+        if [ -n "$UPGRADE_FAILED_PKGS" ]; then
+            echo ""
+            echo "Warning: passed the gate but did NOT upgrade:$UPGRADE_FAILED_PKGS"
+            echo "  Still on the installed version. brew's output above says why —"
+            echo "  most often a dependency this run pinned (\"You must \`brew unpin"
+            echo "  ...\`\") because that dependency could not be vetted, or a formula"
+            echo "  with no bottle. Nothing unsafe was installed; the upgrade simply"
+            echo "  did not happen. Re-run once the blocking dependency clears."
+        fi
     fi
 fi
 
@@ -1964,5 +2037,14 @@ echo "Done."
 # Tampering must surface as a non-zero exit in CI / shell pipelines, even
 # when other clean packages upgraded successfully alongside.
 if [ -n "$TAMPERED_PKGS" ]; then
+    exit 1
+fi
+
+# So must a package that cleared the gate and then failed to install. "Done."
+# plus exit 0 is a claim that the verdict was carried out; when it was not, a
+# script that only reads the exit code would go on believing the upgrade
+# landed. Not a security event like tampering — hence the distinct wording
+# above — but still a failed run.
+if [ -n "$UPGRADE_FAILED_PKGS" ]; then
     exit 1
 fi

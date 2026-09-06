@@ -156,10 +156,41 @@ print(json.dumps(out))
         ;;
     outdated)
         F="$DIR/outdated.json"
-        if [ -f "$F" ]; then
-            cat "$F"
-        else
+        # `--quiet` prints bare names, one per line, honouring --formula/--cask —
+        # the form the post-upgrade "did it actually land?" re-check uses. Without
+        # it the mock answered every shape with JSON, and the re-check would have
+        # scanned JSON for names and matched on incidental text.
+        _quiet=""
+        _only=""
+        for a in "$@"; do
+            case "$a" in
+                --quiet) _quiet=1 ;;
+                --formula | --formulae) _only="formulae" ;;
+                --cask | --casks) _only="casks" ;;
+            esac
+        done
+        if [ ! -f "$F" ]; then
+            [ -n "$_quiet" ] && exit 0
             echo '{"formulae":[],"casks":[]}'
+            exit 0
+        fi
+        if [ -n "$_quiet" ]; then
+            ONLY="$_only" python3 -c '
+import os, sys, json
+only = os.environ.get("ONLY") or ""
+keys = [only] if only else ["formulae", "casks"]
+try:
+    d = json.load(sys.stdin)
+    for k in keys:
+        for x in d.get(k, []):
+            n = x.get("name", "")
+            if n:
+                print(n)
+except Exception:
+    pass
+' <"$F" 2>/dev/null
+        else
+            cat "$F"
         fi
         ;;
     update)
@@ -188,13 +219,28 @@ print(json.dumps(out))
         # longer outdated" — required for the --self belt-and-suspenders re-check
         # (deps gated & upgraded first must read as clean before the formula
         # upgrade). Matches on full name or basename so tap-qualified args work.
+        # Test seam: MOCK_BREW_UPGRADE_REFUSE=<names> makes brew decline those
+        # packages — it prints the error real brew prints when a dependent needs
+        # the latest of a pinned dependency, upgrades everything else, and leaves
+        # the refused ones outdated. That is the shape that made ffmpeg and gnupg
+        # vanish silently: brew objects per package, the batch still succeeds.
+        _refused=" ${MOCK_BREW_UPGRADE_REFUSE:-} "
         OUTF="$DIR/outdated.json"
         if [ -f "$OUTF" ]; then
             pkgs=""
             for a in "$@"; do
                 case "$a" in
                     upgrade | --*) ;;
-                    *) pkgs="$pkgs $a" ;;
+                    *)
+                        _abn="${a##*/}"
+                        case "$_refused" in
+                            *" $a "* | *" $_abn "*)
+                                echo "Error: You must \`brew unpin somedep\` as installing $_abn requires the latest version of pinned dependencies." >&2
+                                continue
+                                ;;
+                        esac
+                        pkgs="$pkgs $a"
+                        ;;
                 esac
             done
             if [ -n "$pkgs" ]; then
