@@ -670,6 +670,28 @@ except Exception:
 " 2>/dev/null || true
 }
 
+# True when the parsed installed version is a real version rather than the "?"
+# the outdated parser emits for an entry with no usable installed_versions.
+#
+# "?" must never reach the scanner as if it were a version. parse_version()
+# returns None for it, and version_in_range() answers True — "affected" — for
+# every advisory it cannot parse against, by design (fail closed when scanning a
+# CANDIDATE). Fed the INSTALLED side that same rule inverts: the baseline comes
+# back carrying every CVE in the database, which
+#   - makes the freshness bypass fire ("installed ? has CVEs"), waving a
+#     same-day release past --min-age, and
+#   - makes the candidate's findings a subset of the baseline's, so [SAME] /
+#     [IMPROVES] clears a package that genuinely regressed.
+# Both are the exact fail-open this file has twice been fixed for. An unknown
+# installed version is not a vulnerable one — it is no baseline at all, and the
+# comparison has to be skipped rather than guessed.
+installed_version_known() {
+    case "${1:-}" in
+        "" | "?" | None | null) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
 print_vuln_lines() {
     echo "$1" | python3 -c "
 import sys, json
@@ -1077,7 +1099,13 @@ if [ "$MIN_AGE" -gt 0 ] 2>/dev/null; then
         elif [ "$AGE_DAYS" -ge 0 ] 2>/dev/null && [ "$AGE_DAYS" -lt "$MIN_AGE" ]; then
             # Known and too fresh. CVE-aware bypass: if the INSTALLED version has
             # known CVEs, this fresh release is likely the fix — let it through.
-            _INSTALLED_RESULT=$(python3 "$SCRIPT" brew "$name" "$installed" 2>/dev/null) && INSTALLED_EXIT=0 || INSTALLED_EXIT=$?
+            # No known installed version means no baseline to justify the bypass,
+            # so the hold stands (see installed_version_known).
+            INSTALLED_EXIT=0
+            _INSTALLED_RESULT=""
+            if installed_version_known "$installed"; then
+                _INSTALLED_RESULT=$(python3 "$SCRIPT" brew "$name" "$installed" 2>/dev/null) && INSTALLED_EXIT=0 || INSTALLED_EXIT=$?
+            fi
 
             if [ "$INSTALLED_EXIT" -eq 1 ]; then
                 echo "  [ok] $name $current — released $AGE_DAYS day(s) ago ($PUB_DATE), but installed $installed has CVEs — bypassing age check"
@@ -1138,6 +1166,8 @@ TAMPERED_PKGS=""
 # because the final exit check reads it on every path, including the ones that
 # never reach the upgrade block (nothing clean, user answered "n").
 UPGRADE_FAILED_PKGS=""
+# Set when the post-upgrade verification could not be performed at all.
+UPGRADE_UNVERIFIED=""
 
 # One actionable note per run when NVD threw us out for asking too fast.
 # The scanner is invoked with 2>/dev/null, so its stderr hint never reaches the
@@ -1308,7 +1338,15 @@ except Exception:
             # Because Python's newest release essentially always carries open
             # CVEs, that was a permanent deadlock, not a transient hold.
             _CAND_IDS=$(finding_ids "$RESULT_JSON")
-            _INST_JSON=$(python3 "$SCRIPT" brew "$name" "$installed" 2>/dev/null) && _INST_EXIT=0 || _INST_EXIT=$?
+            # Same guard as the freshness bypass: an unknown installed version is
+            # no baseline, and scanning "?" would return every CVE in the
+            # database — turning the candidate's findings into a subset and
+            # clearing it as [SAME]. Leaving _INST_IDS empty keeps the block.
+            _INST_EXIT=0
+            _INST_JSON=""
+            if installed_version_known "$installed"; then
+                _INST_JSON=$(python3 "$SCRIPT" brew "$name" "$installed" 2>/dev/null) && _INST_EXIT=0 || _INST_EXIT=$?
+            fi
             _INST_IDS=""
             [ "$_INST_EXIT" -eq 1 ] && _INST_IDS=$(finding_ids "$_INST_JSON")
             _NEW_IDS=""
@@ -2003,23 +2041,56 @@ else
         # This runs AFTER the unpin loop so it reports on the settled state, not
         # on packages brew is merely refusing while our pins are up.
         UPGRADE_FAILED_PKGS=""
-        _still_outdated=" $(HOMEBREW_NO_AUTO_UPDATE=1 brew outdated --formula --quiet 2>/dev/null | tr '\n' ' ')$(HOMEBREW_NO_AUTO_UPDATE=1 brew outdated --cask --quiet 2>/dev/null | tr '\n' ' ') "
-        for pkg in $CLEAN_PKGS; do
-            [ -z "$pkg" ] && continue
-            # Match the full name AND the basename: CLEAN_PKGS carries whatever
-            # `brew outdated --json` called it (`ddev/ddev/ddev`) while
-            # `--quiet` may print either spelling. A same-basename package from
-            # another tap could in principle match here — that direction is the
-            # safe one, since the result is a visible warning the user can check
-            # rather than the silence this replaces.
-            _bn="${pkg##*/}"
-            case "$_still_outdated" in
-                *" $pkg "* | *" $_bn "*)
+        # Formulae and casks are kept in separate namespaces. The same token can
+        # be both (docker, wireshark), so pooling the two lists and matching by
+        # basename would let a still-outdated cask condemn a formula that
+        # upgraded perfectly well — and that misreport now carries exit 1, so
+        # "it errs safe" is not an argument for it.
+        _still_formulae=" $(HOMEBREW_NO_AUTO_UPDATE=1 brew outdated --formula --quiet 2>/dev/null | tr '\n' ' ') "
+        _f_rc=$?
+        _still_casks=" $(HOMEBREW_NO_AUTO_UPDATE=1 brew outdated --cask --quiet 2>/dev/null | tr '\n' ' ') "
+        _c_rc=$?
+        if [ "$_f_rc" -ne 0 ] || [ "$_c_rc" -ne 0 ]; then
+            # The verification itself failed (broken tap, unreadable API JSON, a
+            # brew that just died). Both substitutions would be empty, nothing
+            # would match, and the run would print "Done." and exit 0 — asserting
+            # the very thing it could not check. Say so instead, and fail closed.
+            UPGRADE_UNVERIFIED=1
+        else
+            _check_landed() { # $1 = package list, $2 = the matching outdated list
+                for pkg in $1; do
+                    [ -z "$pkg" ] && continue
+                    # CLEAN_PKGS carries whatever `brew outdated --json` called it
+                    # (`ddev/ddev/ddev`) while `--quiet` may print either spelling,
+                    # so match the full name and the basename.
+                    _bn="${pkg##*/}"
+                    case "$2" in
+                        *" $pkg "* | *" $_bn "*) ;;
+                        *) continue ;;
+                    esac
+                    # A formula the USER pinned is listed by `brew outdated` (brew
+                    # annotates it "[pinned at ...]" rather than filtering it) and
+                    # is refused by `brew upgrade` by definition. That is the
+                    # user's standing choice, not a failed upgrade: reporting it
+                    # would fire on every single run, forever, and take exit 1
+                    # with it. PREEXISTING_PINS is the set recorded before this
+                    # run added any pins of its own, so it is exactly "pinned by
+                    # the user". Our own pins are already released by here.
+                    case "$PREEXISTING_PINS" in
+                        *" $pkg "* | *" $_bn "*) continue ;;
+                    esac
                     UPGRADE_FAILED_PKGS="$UPGRADE_FAILED_PKGS $pkg"
-                    ;;
-            esac
-        done
-        if [ -n "$UPGRADE_FAILED_PKGS" ]; then
+                done
+            }
+            _check_landed "$CLEAN_PKGS_FORMULAE" "$_still_formulae"
+            _check_landed "$CLEAN_PKGS_CASKS" "$_still_casks"
+        fi
+        if [ -n "$UPGRADE_UNVERIFIED" ]; then
+            echo ""
+            echo "Warning: could not verify that the upgrades landed —"
+            echo "  'brew outdated' failed when re-checked. The packages above may"
+            echo "  or may not have upgraded; check with 'brew outdated' yourself."
+        elif [ -n "$UPGRADE_FAILED_PKGS" ]; then
             echo ""
             echo "Warning: passed the gate but did NOT upgrade:$UPGRADE_FAILED_PKGS"
             echo "  Still on the installed version. brew's output above says why —"
@@ -2046,5 +2117,12 @@ fi
 # landed. Not a security event like tampering — hence the distinct wording
 # above — but still a failed run.
 if [ -n "$UPGRADE_FAILED_PKGS" ]; then
+    exit 1
+fi
+
+# And so must an upgrade we could not verify at all. Exiting 0 here would assert
+# the one thing the run just failed to establish — in a fail-closed tool, "I
+# could not check" is not "it is fine".
+if [ -n "$UPGRADE_UNVERIFIED" ]; then
     exit 1
 fi
