@@ -204,7 +204,10 @@ def test_running_keg_cves_still_bypass_the_freshness_hold(brew_env, tmp_path):
     fresh_commit(os.environ["MOCK_COMMITS_API_DIR"], "simdjson", days=0)
     result = run_upgrade(env_extra={"DEPENDENCY_SECURITY_CHECK": str(stub)})
     assert "bypassing age check" in result.stdout, result.stdout
-    assert "installed 4.6.7 has CVEs" in result.stdout, result.stdout
+    # The message names the keg the reduction was measured against — 4.6.7, the
+    # one actually in use, never the stale 4.6.4.
+    assert "from installed 4.6.7" in result.stdout, result.stdout
+    assert "4.6.4" not in result.stdout.split("bypassing age check")[0].splitlines()[-1]
 
 
 def test_single_keg_is_unchanged(brew_env, tmp_path):

@@ -8,6 +8,12 @@ The project is pre-1.0; expect minor breaking changes between 0.x releases until
 
 ## [Unreleased]
 
+### Changed
+
+- **The freshness hold is waived only for an upgrade that demonstrably reduces exposure.** The CVE-aware bypass used to fire whenever the *installed* version had any finding at all, on the reasoning that a fresh release is "likely the fix". Likely is not evidence. On a real run, three of four bypasses bought nothing: `hugo`, `nss` and `snyk` each skipped the 3-day hold on findings the new version carried identically — hugo's four, including a CRITICAL, are reported against 0.166.0 too, because NVD never tied them to a version. Only `vscodium` earned it, fixing 13 of 14. So a one-day-old release skipped the supply-chain hold in exchange for no known reduction — the riskier half of the trade, taken for free.
+
+  The rule is now the strict-subset test the `[IMPROVES]` verdict already uses: the candidate must drop at least one finding and add none. It works because the comparison folds in findings that carry no version scope — those are not *fixed* by an upgrade, they are merely not grounds to block, and they apply to both versions equally. That reasoning was already settled for the block decision in v0.3.5; this is the bypass decision catching up. A held package now says why, rather than looking like its CVEs went unnoticed, and `--min-age 0` still overrides per run. Costs one extra scan, only for a package that is both too fresh and carries findings.
+
 ## [0.4.1] — 2026-09-10
 
 ### Fixed

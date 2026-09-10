@@ -309,10 +309,11 @@ def test_upgrade_non_lib_l_formula_still_uses_first_letter(age_env):
 
 
 def test_upgrade_too_fresh_but_installed_has_cve_bypasses_hold(age_env, monkeypatch):
-    """CVE-aware bypass (unchanged behavior): a too-fresh upgrade is allowed when
-    the INSTALLED version has known CVEs — the fresh release is likely the fix.
-    Must remain on the *known* path only, never the unknown-age path.
-    The bypass message must NAME the CVEs (#72) so the user decides on data."""
+    """CVE-aware bypass: a too-fresh upgrade is allowed when the candidate
+    demonstrably REDUCES exposure — here installed 1.24.0 carries a finding and
+    1.25.0 carries none, so the upgrade is evidence of a fix rather than merely
+    of exposure. Must remain on the *known* age path only, never the unknown-age
+    path. The message must NAME the CVEs (#72) so the user decides on data."""
     write_outdated(
         age_env["brew"],
         formulae=[{"name": "wget", "installed_versions": ["1.24.0"], "current_version": "1.25.0"}],
@@ -339,7 +340,8 @@ def test_upgrade_too_fresh_but_installed_has_cve_bypasses_hold(age_env, monkeypa
 
     result = run_upgrade(["--no-deps", "--min-age", "3"])
 
-    assert "but installed 1.24.0 has CVEs — bypassing age check" in result.stdout
+    assert "fixes 1 of 1 finding(s) from installed 1.24.0 and adds none" in result.stdout
+    assert "bypassing age check" in result.stdout
     # The CVE detail line prints under the bypass line, naming the CVE (#72).
     bypass_idx = result.stdout.index("bypassing age check")
     assert "[HIGH] CVE-2099-1234 (CVSS 8.1) — NIST NVD" in result.stdout

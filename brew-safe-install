@@ -847,9 +847,11 @@ CLEAN_PKGS=$(echo "$CLEAN_PKGS" | xargs) # trim
 # --- Transitive dependency check (default on; --no-deps to skip) ---
 #
 # Design note: the CVE-aware bypass that skips --min-age for the user-named
-# package when the installed version has known CVEs is intentionally NOT
-# applied to transitive deps. Reasons: (1) the user explicitly opted into
-# the named package, deps came along; (2) deps follow stricter rules so a
+# package when the upgrade demonstrably REDUCES its findings (a strict subset
+# of the installed version's — see brew-safe-upgrade, which tightened this from
+# "installed has any CVE" once three of four live bypasses turned out to buy no
+# reduction at all) is intentionally NOT applied to transitive deps. Reasons:
+# (1) the user explicitly opted into the named package, deps came along; (2) deps follow stricter rules so a
 # fresh unverified dep can't ride in under cover of "the parent has CVEs";
 # (3) running an installed-version CVE query for every dep would double
 # rate-limited NVD traffic with little practical benefit. Held deps are
