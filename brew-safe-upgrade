@@ -685,9 +685,15 @@ except Exception:
 # Both are the exact fail-open this file has twice been fixed for. An unknown
 # installed version is not a vulnerable one — it is no baseline at all, and the
 # comparison has to be skipped rather than guessed.
+# HEAD* is rejected here as well as filtered in the parser above. Belt and
+# braces on purpose: this guard is the last thing standing between an
+# unparseable version and a scanner call that would read it as "affected by
+# everything", and the same hole has now been reached by three different
+# spellings ('?', a JSON null, and a HEAD keg).
 installed_version_known() {
     case "${1:-}" in
         "" | "?" | None | null) return 1 ;;
+        HEAD | HEAD-* | HEAD_*) return 1 ;;
         *) return 0 ;;
     esac
 }
@@ -952,11 +958,32 @@ OUTDATED_JSON=$(brew outdated --json=v2 2>/dev/null || echo '{"formulae":[],"cas
 # "Everything up to date.", exit 0. Fail-open again, from one odd entry.
 OUTDATED_FORMULAE=$(echo "$OUTDATED_JSON" | python3 -c "
 import sys, json
+
+def installed_of(entry):
+    vs = entry.get('installed_versions') or []
+    # Drop HEAD kegs before taking the last one. brew appends a HEAD keg to
+    # all_kegs BEFORE its own \`next if version.head?\` (formula.rb), and
+    # Version#<=> ranks HEAD above every numbered version, so HEAD sorts LAST
+    # and [-1] would return 'HEAD-9f3a1'. parse_version() cannot read that, and
+    # version_in_range() answers 'affected' for anything it cannot parse — so
+    # the baseline would come back carrying every CVE in the database, firing
+    # the freshness bypass and reducing every real regression to [SAME]. That is
+    # the same fail-open as the '?' sentinel, reached by a different spelling.
+    # A rack holding only HEAD kegs has no usable baseline and yields '?', which
+    # installed_version_known() rejects.
+    #
+    # Falsy entries are dropped in the same pass: a cask's installed_version can
+    # be the empty string, and an empty field would collapse this line's three
+    # space-separated columns down to two — \`read name installed current\` then
+    # slides current into installed and leaves current empty.
+    real = [str(v) for v in vs if v and not str(v).startswith('HEAD')]
+    return real[-1] if real else '?'
+
 try:
     data = json.load(sys.stdin)
     for p in data.get('formulae', []):
         name = p.get('name', '')
-        installed = str((p.get('installed_versions') or ['?'])[-1])
+        installed = installed_of(p)
         current = p.get('current_version', '?')
         print(f'{name} {installed} {current}')
 except Exception:
@@ -971,11 +998,21 @@ except Exception:
 # remember, and no second fail-open to find if brew ever lists cask kegs too.
 OUTDATED_CASKS=$(echo "$OUTDATED_JSON" | python3 -c "
 import sys, json
+
+def installed_of(entry):
+    # Same rules as the formula parser above — see the comment there. A cask's
+    # installed_version is built as \`outdated_version(...).to_s\`, which is the
+    # empty string when that resolves to nil, so the falsy filter is load-bearing
+    # on this path in particular.
+    vs = entry.get('installed_versions') or []
+    real = [str(v) for v in vs if v and not str(v).startswith('HEAD')]
+    return real[-1] if real else '?'
+
 try:
     data = json.load(sys.stdin)
     for c in data.get('casks', []):
         name = c.get('name', '')
-        installed = str((c.get('installed_versions') or ['?'])[-1])
+        installed = installed_of(c)
         current = str(c.get('current_version', '?'))
         # Strip SHA suffix from cask versions (e.g. '1.2.3,abc123' -> '1.2.3')
         if ',' in current:
@@ -2075,49 +2112,77 @@ else
         # This runs AFTER the unpin loop so it reports on the settled state, not
         # on packages brew is merely refusing while our pins are up.
         UPGRADE_FAILED_PKGS=""
-        # Formulae and casks are kept in separate namespaces. The same token can
-        # be both (docker, wireshark), so pooling the two lists and matching by
-        # basename would let a still-outdated cask condemn a formula that
-        # upgraded perfectly well — and that misreport now carries exit 1, so
-        # "it errs safe" is not an argument for it.
-        _still_formulae=" $(HOMEBREW_NO_AUTO_UPDATE=1 brew outdated --formula --quiet 2>/dev/null | tr '\n' ' ') "
-        _f_rc=$?
-        _still_casks=" $(HOMEBREW_NO_AUTO_UPDATE=1 brew outdated --cask --quiet 2>/dev/null | tr '\n' ' ') "
-        _c_rc=$?
-        if [ "$_f_rc" -ne 0 ] || [ "$_c_rc" -ne 0 ]; then
-            # The verification itself failed (broken tap, unreadable API JSON, a
-            # brew that just died). Both substitutions would be empty, nothing
-            # would match, and the run would print "Done." and exit 0 — asserting
-            # the very thing it could not check. Say so instead, and fail closed.
-            UPGRADE_UNVERIFIED=1
-        else
-            _check_landed() { # $1 = package list, $2 = the matching outdated list
-                for pkg in $1; do
-                    [ -z "$pkg" ] && continue
-                    # CLEAN_PKGS carries whatever `brew outdated --json` called it
-                    # (`ddev/ddev/ddev`) while `--quiet` may print either spelling,
-                    # so match the full name and the basename.
-                    _bn="${pkg##*/}"
-                    case "$2" in
-                        *" $pkg "* | *" $_bn "*) ;;
-                        *) continue ;;
-                    esac
-                    # A formula the USER pinned is listed by `brew outdated` (brew
-                    # annotates it "[pinned at ...]" rather than filtering it) and
-                    # is refused by `brew upgrade` by definition. That is the
-                    # user's standing choice, not a failed upgrade: reporting it
-                    # would fire on every single run, forever, and take exit 1
-                    # with it. PREEXISTING_PINS is the set recorded before this
-                    # run added any pins of its own, so it is exactly "pinned by
-                    # the user". Our own pins are already released by here.
-                    case "$PREEXISTING_PINS" in
-                        *" $pkg "* | *" $_bn "*) continue ;;
-                    esac
-                    UPGRADE_FAILED_PKGS="$UPGRADE_FAILED_PKGS $pkg"
-                done
-            }
-            _check_landed "$CLEAN_PKGS_FORMULAE" "$_still_formulae"
-            _check_landed "$CLEAN_PKGS_CASKS" "$_still_casks"
+        # The re-check reads --json=v2, NOT --quiet. Both spellings are "the
+        # outdated list", but they are not the same string: the JSON carries
+        # `f.full_name` while --quiet prints `f.full_installed_specified_name`,
+        # which is the ALIAS recorded in the install receipt when one was used
+        # (formula.rb). A formula installed as `brew install postgresql` is
+        # `postgresql@18` in CLEAN_PKGS and `postgresql` under --quiet, so
+        # neither the full name nor the basename matched and a genuinely refused
+        # upgrade read as landed — silent, exit 0, the fail-open direction for
+        # this whole feature. CLEAN_PKGS was itself built from --json=v2, so
+        # using it here means both sides are the same field by construction and
+        # an exact match is enough.
+        #
+        # Each namespace is queried only when something in it was announced, and
+        # a failure marks only that namespace unverified. Querying casks during a
+        # formula-only run meant a broken cask tap (or a brew where --cask errors
+        # at all — linuxbrew is one of this repo's dogfood beds) could end a
+        # perfectly successful formula upgrade with "could not verify" and exit 1.
+        #
+        # `if ! _x=$(...)` rather than `_x=$(... | tr ...); rc=$?`: the pipeline
+        # form only reported brew's failure because `set -o pipefail` is on ~2000
+        # lines up. If that were ever narrowed the detection would die silently
+        # and the run would go back to asserting success it never checked, which
+        # is precisely the bug this block exists to prevent.
+        _outdated_names() { # $1 = raw --json=v2 output, $2 = formulae|casks
+            printf '%s' "$1" | python3 -c "
+import sys, json
+try:
+    for x in json.load(sys.stdin).get(sys.argv[1], []):
+        n = x.get('name', '')
+        if n:
+            print(n)
+except Exception:
+    pass
+" "$2" 2>/dev/null
+        }
+        _check_landed() { # $1 = announced packages, $2 = the matching outdated list
+            for pkg in $1; do
+                [ -z "$pkg" ] && continue
+                case "$2" in
+                    *" $pkg "*) ;;
+                    *) continue ;;
+                esac
+                # A package the USER pinned is listed by `brew outdated` (brew
+                # annotates it "[pinned at ...]" rather than filtering it) and is
+                # refused by `brew upgrade` by definition. That is a standing
+                # choice, not a failed upgrade: reporting it would fire on every
+                # single run, forever, and take exit 1 with it. PREEXISTING_PINS
+                # is the set recorded before this run added any pins of its own,
+                # so it is exactly "pinned by the user"; ours are released by
+                # here. `brew list --pinned` prints bare names, hence the
+                # basename arm on this match only.
+                _bn="${pkg##*/}"
+                case "$PREEXISTING_PINS" in
+                    *" $pkg "* | *" $_bn "*) continue ;;
+                esac
+                UPGRADE_FAILED_PKGS="$UPGRADE_FAILED_PKGS $pkg"
+            done
+        }
+        if [ -n "${CLEAN_PKGS_FORMULAE// /}" ]; then
+            if _recheck_json=$(HOMEBREW_NO_AUTO_UPDATE=1 brew outdated --json=v2 --formula 2>/dev/null); then
+                _check_landed "$CLEAN_PKGS_FORMULAE" " $(_outdated_names "$_recheck_json" formulae | tr '\n' ' ') "
+            else
+                UPGRADE_UNVERIFIED=1
+            fi
+        fi
+        if [ -n "${CLEAN_PKGS_CASKS// /}" ]; then
+            if _recheck_json=$(HOMEBREW_NO_AUTO_UPDATE=1 brew outdated --json=v2 --cask 2>/dev/null); then
+                _check_landed "$CLEAN_PKGS_CASKS" " $(_outdated_names "$_recheck_json" casks | tr '\n' ' ') "
+            else
+                UPGRADE_UNVERIFIED=1
+            fi
         fi
         if [ -n "$UPGRADE_UNVERIFIED" ]; then
             echo ""

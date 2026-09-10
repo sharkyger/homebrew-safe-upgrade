@@ -169,13 +169,20 @@ print(json.dumps(out))
                 --cask | --casks) _only="casks" ;;
             esac
         done
-        # Test seam: MOCK_BREW_OUTDATED_QUIET_FAIL=1 fails ONLY the --quiet form,
-        # which is the post-upgrade verification and nothing else. A blanket
-        # MOCK_BREW_FAIL=outdated would kill the run's first outdated call too,
-        # so the wrapper would never reach the code under test.
-        if [ -n "$_quiet" ] && [ -n "${MOCK_BREW_OUTDATED_QUIET_FAIL:-}" ]; then
-            echo "Error: mock brew: simulated 'outdated --quiet' failure" >&2
-            exit 1
+        # Test seam: MOCK_BREW_OUTDATED_RECHECK_FAIL fails ONLY the post-upgrade
+        # verification, never the run's first outdated call — a blanket
+        # MOCK_BREW_FAIL=outdated would kill that one too and the wrapper would
+        # never reach the code under test. The two are told apart by shape: the
+        # first call is a bare `--json=v2`, the re-check adds --formula or
+        # --cask. Set it to "formulae", "casks", or "1" for both, so a test can
+        # fail one namespace and assert the other still verifies.
+        if [ -n "$_only" ] && [ -z "$_quiet" ] && [ -n "${MOCK_BREW_OUTDATED_RECHECK_FAIL:-}" ]; then
+            case "${MOCK_BREW_OUTDATED_RECHECK_FAIL}" in
+                1 | both | "$_only")
+                    echo "Error: mock brew: simulated 'outdated --json=v2 --$_only' failure" >&2
+                    exit 1
+                    ;;
+            esac
         fi
         if [ ! -f "$F" ]; then
             [ -n "$_quiet" ] && exit 0

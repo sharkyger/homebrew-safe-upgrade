@@ -237,7 +237,7 @@ def test_failed_verification_is_reported_not_treated_as_success(brew_env, tmp_pa
     result = run_upgrade(
         {
             "DEPENDENCY_SECURITY_CHECK": str(clean_stub(tmp_path)),
-            "MOCK_BREW_OUTDATED_QUIET_FAIL": "1",
+            "MOCK_BREW_OUTDATED_RECHECK_FAIL": "1",
         },
         input_text="y\n",
     )
@@ -256,7 +256,7 @@ def test_failed_verification_does_not_accuse_any_package(brew_env, tmp_path):
     result = run_upgrade(
         {
             "DEPENDENCY_SECURITY_CHECK": str(clean_stub(tmp_path)),
-            "MOCK_BREW_OUTDATED_QUIET_FAIL": "1",
+            "MOCK_BREW_OUTDATED_RECHECK_FAIL": "1",
         },
         input_text="y\n",
     )
@@ -300,3 +300,157 @@ def test_outdated_cask_does_not_condemn_a_same_named_formula(brew_env, tmp_path)
     assert "did NOT upgrade" in result.stdout, result.stdout
     named = result.stdout.split("did NOT upgrade:", 1)[1].split("\n", 1)[0]
     assert named.split() == ["docker"], f"the formula was accused too: {named!r}"
+
+
+# ---- 5. a HEAD keg is not a usable baseline --------------------------------
+
+
+def test_head_keg_is_not_used_as_the_baseline(brew_env, tmp_path):
+    """brew appends a HEAD keg to all_kegs BEFORE its own `next if version.head?`
+    (formula.rb), and Version#<=> ranks HEAD above every numbered version, so
+    HEAD sorts LAST. Taking [-1] therefore picked `HEAD-9f3a1` where the old [0]
+    picked the real version — and parse_version() cannot read it, so
+    version_in_range() calls the baseline affected by everything. Same fail-open
+    as the '?' sentinel, reached by a third spelling."""
+    write_outdated(
+        brew_env,
+        [
+            {
+                "name": "widget",
+                "installed_versions": ["1.2.3", "HEAD-9f3a1"],
+                "current_version": "2.0",
+            }
+        ],
+    )
+    write_formula_info(brew_env, "widget", "2.0")
+    write_deps(brew_env, "widget")
+    fresh_commit("widget", days=0)
+    result = run_upgrade({"DEPENDENCY_SECURITY_CHECK": str(always_vulnerable_stub(tmp_path))})
+    # The real keg is 1.2.3 and the stub calls everything vulnerable, so the
+    # bypass is legitimate here — but it must name the version, not HEAD.
+    assert "HEAD" not in result.stdout, result.stdout
+    row = [ln for ln in result.stdout.splitlines() if ln.strip().startswith("widget")]
+    assert row and "1.2.3" in row[0], result.stdout
+
+
+def test_head_only_rack_has_no_baseline_and_holds(brew_env, tmp_path):
+    """Nothing but HEAD kegs means no usable baseline at all, so the freshness
+    hold must stand rather than being bypassed on an unreadable version."""
+    write_outdated(
+        brew_env,
+        [{"name": "widget", "installed_versions": ["HEAD-9f3a1"], "current_version": "2.0"}],
+    )
+    write_formula_info(brew_env, "widget", "2.0")
+    write_deps(brew_env, "widget")
+    fresh_commit("widget", days=0)
+    result = run_upgrade({"DEPENDENCY_SECURITY_CHECK": str(always_vulnerable_stub(tmp_path))})
+    assert "bypassing age check" not in result.stdout, result.stdout
+    assert "[HOLD] widget" in result.stdout, result.stdout
+
+
+# ---- 6. blank installed version does not collapse the columns ---------------
+
+
+def test_blank_installed_version_does_not_shift_the_columns(brew_env, tmp_path):
+    """A cask's installed_version is `outdated_version(...).to_s`, which is ""
+    when that resolves to nil. An empty middle field collapses the three
+    space-separated columns to two, and `read name installed current` then
+    slides current into installed and leaves current empty — so the age check
+    gets a blank version and the scanner gets the wrong baseline."""
+    write_outdated(
+        brew_env,
+        casks=[{"name": "widget", "installed_versions": [""], "current_version": "2.0"}],
+    )
+    write_formula_info(brew_env, "widget", "2.0")
+    write_deps(brew_env, "widget")
+    result = run_upgrade({"DEPENDENCY_SECURITY_CHECK": str(clean_stub(tmp_path))})
+    row = [ln for ln in result.stdout.splitlines() if ln.strip().startswith("widget")]
+    assert row, result.stdout
+    # Assert the CURRENT column specifically. Pre-fix the row read
+    #   widget  cask  2.0  ->
+    # with the *current* version slid left into the installed column and current
+    # left empty — so "2.0 is somewhere in the row" passes either way and proves
+    # nothing. The available version must sit on the right of the arrow.
+    assert row[0].rstrip().endswith("-> 2.0"), f"columns shifted: {row[0]!r}"
+    # And the scanner must be handed a version at all: pre-fix this line was
+    # "[ok] widget " with the version missing entirely.
+    assert "[ok] widget 2.0" in result.stdout, result.stdout
+
+
+# ---- 7. re-check scoping ----------------------------------------------------
+
+
+def test_cask_recheck_failure_does_not_fail_a_formula_only_run(brew_env, tmp_path):
+    """The cask namespace is not even queried when no cask was announced, so a
+    broken cask tap (or a brew where --cask errors at all — linuxbrew is one of
+    this repo's dogfood beds) cannot end a clean formula-only upgrade with
+    "could not verify" and exit 1.
+
+    Forward guard, not a reproduction: the seam this drives did not exist in the
+    shape the bug had, so it cannot fail against the commit that carried it. Its
+    job is to stop the cask query being made unconditionally again.
+    """
+    write_outdated(
+        brew_env, [{"name": "keeper", "installed_versions": ["1.0"], "current_version": "2.0"}]
+    )
+    write_formula_info(brew_env, "keeper", "2.0")
+    write_deps(brew_env, "keeper")
+    result = run_upgrade(
+        {
+            "DEPENDENCY_SECURITY_CHECK": str(clean_stub(tmp_path)),
+            "MOCK_BREW_OUTDATED_RECHECK_FAIL": "casks",
+        },
+        input_text="y\n",
+    )
+    assert "could not verify" not in result.stdout, result.stdout
+    assert result.returncode == 0, f"{result.returncode}\n{result.stdout}"
+
+
+def test_formula_recheck_failure_is_still_reported(brew_env, tmp_path):
+    """Don't overcorrect: a failure in the namespace that WAS in scope must
+    still mark the run unverified."""
+    write_outdated(
+        brew_env, [{"name": "keeper", "installed_versions": ["1.0"], "current_version": "2.0"}]
+    )
+    write_formula_info(brew_env, "keeper", "2.0")
+    write_deps(brew_env, "keeper")
+    result = run_upgrade(
+        {
+            "DEPENDENCY_SECURITY_CHECK": str(clean_stub(tmp_path)),
+            "MOCK_BREW_OUTDATED_RECHECK_FAIL": "formulae",
+        },
+        input_text="y\n",
+    )
+    assert "could not verify" in result.stdout, result.stdout
+    assert result.returncode != 0
+
+
+def test_recheck_reads_json_not_quiet(brew_env, tmp_path):
+    """Structural guard for the alias mismatch.
+
+    `brew outdated --json=v2` reports `f.full_name`; `--quiet` prints
+    `f.full_installed_specified_name`, which is the ALIAS from the install
+    receipt when one was used. A formula installed as `brew install postgresql`
+    is `postgresql@18` in CLEAN_PKGS (built from the JSON) but `postgresql`
+    under --quiet, so neither the full name nor the basename matched and a
+    genuinely refused upgrade read as landed — silent, exit 0.
+
+    Reading the JSON on both sides makes the two the same field by
+    construction. Since that is a property of WHICH command is run rather than
+    of its output, assert on the calls themselves; switching back to --quiet
+    would reintroduce a fail-open that no output-level test would catch.
+    """
+    write_outdated(
+        brew_env, [{"name": "keeper", "installed_versions": ["1.0"], "current_version": "2.0"}]
+    )
+    write_formula_info(brew_env, "keeper", "2.0")
+    write_deps(brew_env, "keeper")
+    log = tmp_path / "brew_calls.log"
+    run_upgrade(
+        {"DEPENDENCY_SECURITY_CHECK": str(clean_stub(tmp_path)), "MOCK_BREW_CALL_LOG": str(log)},
+        input_text="y\n",
+    )
+    calls = [ln for ln in log.read_text().splitlines() if ln.startswith("outdated")]
+    assert calls, "brew outdated was never called"
+    assert not any("--quiet" in c for c in calls), f"re-check fell back to --quiet: {calls}"
+    assert any("--json=v2" in c and "--formula" in c for c in calls), calls
