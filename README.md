@@ -103,6 +103,19 @@ The rule for both verdicts is the same: **what the candidate adds blocks it; wha
 
 Under `[s]` / `--skip-unsafe` the excluded formulae are `brew pin`-ed for the duration of the upgrade so brew cannot pull a flagged dependency in underneath something else. The pins are released on exit, including on Ctrl-C or a `kill` (the wrapper prints the list it released). A SIGKILL or a host crash cannot run the trap — after one of those, check `brew list --pinned`. Pins you set yourself are never touched.
 
+Those pins have a visible consequence worth knowing about: if a package that **passed** every check happens to need the newest version of one that did not, brew refuses to install it and says so — ``Error: You must `brew unpin …` as installing <pkg> requires the latest version of pinned dependencies``. That is the pin doing its job, not a bug. The upgrade simply does not happen for that package; nothing unsafe is installed. Every package announced under "Clean formulae to upgrade" is re-checked once the pins are released, and any that did not land is listed:
+
+```
+Warning: passed the gate but did NOT upgrade: ffmpeg gnupg
+  Still on the installed version. brew's output above says why — most often a
+  dependency this run pinned ("You must `brew unpin ...`") because that
+  dependency could not be vetted, or a formula with no bottle. Nothing unsafe
+  was installed; the upgrade simply did not happen. Re-run once the blocking
+  dependency clears.
+```
+
+The run then exits non-zero, so a script cannot read `Done.` and exit 0 as confirmation that an upgrade it never got actually landed. The usual fix is to re-run once whatever blocked the dependency has cleared — for a dependency held only because it could not be vetted, that often just means giving NVD a working API key (see [`NVD_API_KEY` — strongly recommended](#nvd_api_key--strongly-recommended)).
+
 ### Getting help
 
 Every command answers `--help` (or `-h`) with a synopsis, a flag listing, and

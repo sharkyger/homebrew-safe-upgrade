@@ -156,10 +156,56 @@ print(json.dumps(out))
         ;;
     outdated)
         F="$DIR/outdated.json"
-        if [ -f "$F" ]; then
-            cat "$F"
-        else
+        # `--quiet` prints bare names, one per line, honouring --formula/--cask —
+        # the form the post-upgrade "did it actually land?" re-check uses. Without
+        # it the mock answered every shape with JSON, and the re-check would have
+        # scanned JSON for names and matched on incidental text.
+        _quiet=""
+        _only=""
+        for a in "$@"; do
+            case "$a" in
+                --quiet) _quiet=1 ;;
+                --formula | --formulae) _only="formulae" ;;
+                --cask | --casks) _only="casks" ;;
+            esac
+        done
+        # Test seam: MOCK_BREW_OUTDATED_RECHECK_FAIL fails ONLY the post-upgrade
+        # verification, never the run's first outdated call — a blanket
+        # MOCK_BREW_FAIL=outdated would kill that one too and the wrapper would
+        # never reach the code under test. The two are told apart by shape: the
+        # first call is a bare `--json=v2`, the re-check adds --formula or
+        # --cask. Set it to "formulae", "casks", or "1" for both, so a test can
+        # fail one namespace and assert the other still verifies.
+        if [ -n "$_only" ] && [ -z "$_quiet" ] && [ -n "${MOCK_BREW_OUTDATED_RECHECK_FAIL:-}" ]; then
+            case "${MOCK_BREW_OUTDATED_RECHECK_FAIL}" in
+                1 | both | "$_only")
+                    echo "Error: mock brew: simulated 'outdated --json=v2 --$_only' failure" >&2
+                    exit 1
+                    ;;
+            esac
+        fi
+        if [ ! -f "$F" ]; then
+            [ -n "$_quiet" ] && exit 0
             echo '{"formulae":[],"casks":[]}'
+            exit 0
+        fi
+        if [ -n "$_quiet" ]; then
+            ONLY="$_only" python3 -c '
+import os, sys, json
+only = os.environ.get("ONLY") or ""
+keys = [only] if only else ["formulae", "casks"]
+try:
+    d = json.load(sys.stdin)
+    for k in keys:
+        for x in d.get(k, []):
+            n = x.get("name", "")
+            if n:
+                print(n)
+except Exception:
+    pass
+' <"$F" 2>/dev/null
+        else
+            cat "$F"
         fi
         ;;
     update)
@@ -188,26 +234,74 @@ print(json.dumps(out))
         # longer outdated" — required for the --self belt-and-suspenders re-check
         # (deps gated & upgraded first must read as clean before the formula
         # upgrade). Matches on full name or basename so tap-qualified args work.
+        # Test seam: MOCK_BREW_UPGRADE_REFUSE=<names> makes brew decline those
+        # packages — it prints the error real brew prints when a dependent needs
+        # the latest of a pinned dependency, upgrades everything else, and leaves
+        # the refused ones outdated. That is the shape that made ffmpeg and gnupg
+        # vanish silently: brew objects per package, the batch still succeeds.
+        _refused=" ${MOCK_BREW_UPGRADE_REFUSE:-} "
+        # Cask-scoped variant. A bare MOCK_BREW_UPGRADE_REFUSE matches on
+        # basename and so would refuse a formula AND a cask sharing a token
+        # (docker, wireshark) — which makes the formula/cask namespace split
+        # untestable, since that is precisely the collision under test.
+        case " $* " in
+            *" --cask "* | *" --casks "*)
+                _refused="$_refused ${MOCK_BREW_UPGRADE_REFUSE_CASKS:-} "
+                ;;
+        esac
+        # Which list this call touches. Real `brew upgrade --formula a b` cannot
+        # upgrade a cask, and the wrapper always passes one or the other — so the
+        # mock must not drop a cask when a same-named formula is upgraded, or the
+        # formula/cask token-collision case (docker, wireshark) is untestable.
+        _which="both"
+        for a in "$@"; do
+            case "$a" in
+                --formula | --formulae) _which="formulae" ;;
+                --cask | --casks) _which="casks" ;;
+            esac
+        done
         OUTF="$DIR/outdated.json"
         if [ -f "$OUTF" ]; then
             pkgs=""
             for a in "$@"; do
                 case "$a" in
                     upgrade | --*) ;;
-                    *) pkgs="$pkgs $a" ;;
+                    *)
+                        _abn="${a##*/}"
+                        case "$_refused" in
+                            *" $a "* | *" $_abn "*)
+                                echo "Error: You must \`brew unpin somedep\` as installing $_abn requires the latest version of pinned dependencies." >&2
+                                continue
+                                ;;
+                        esac
+                        # NB: a pin in $DIR/pinned/ is deliberately NOT consulted
+                        # here. Real brew pins per PACKAGE TYPE — `brew pin` takes
+                        # formulae and casks alike (cmd/pin.rb names both, and
+                        # Cask::Cask implements pin/unpin), and a pinned cask does
+                        # not stop a same-named formula upgrading. This mock's pin
+                        # store is a flat directory keyed on the bare name, so
+                        # honouring it here would conflate the two types and block
+                        # the formula — the very bug tracked in
+                        # .codereview/exclude-pkgs-type-conflation.local.md.
+                        # A test that wants brew to decline a pinned package says
+                        # so with MOCK_BREW_UPGRADE_REFUSE.
+                        pkgs="$pkgs $a"
+                        ;;
                 esac
             done
             if [ -n "$pkgs" ]; then
-                PKGS="$pkgs" OUTF="$OUTF" python3 -c '
+                PKGS="$pkgs" OUTF="$OUTF" WHICH="$_which" python3 -c '
 import os, json
 outf = os.environ["OUTF"]
+which = os.environ.get("WHICH", "both")
+keys = ("formulae", "casks") if which == "both" else (which,)
 # Match on basename in BOTH directions so a tap-qualified upgrade arg
 # (sharkyger/tap/foo) drops a bare outdated entry (foo) and vice-versa.
 upg = {u.split("/")[-1] for u in os.environ["PKGS"].split()}
 try:
     with open(outf) as f:
         d = json.load(f)
-    for key in ("formulae", "casks"):
+    for key in keys:
         d[key] = [
             x for x in d.get(key, [])
             if x.get("name", "").split("/")[-1] not in upg
