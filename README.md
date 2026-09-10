@@ -313,7 +313,22 @@ Checking package age (min-age: 3 days)...
 
 **Fail closed.** If the release age cannot be verified — the home repo is unreachable, or a tap uses a non-standard layout — the package is **held**, never waved through. This is deliberate: a freshness hold that silently no-ops the moment it can't reach the registry would be worthless exactly when an attacker can induce that condition. Pass `--allow-unknown-age` to permit unverifiable-age packages when you accept that risk.
 
-**CVE-aware bypass:** If your *installed* version has known CVEs, the freshness hold on a too-fresh upgrade is skipped — the fresh version is likely the fix, and holding it back would leave you exposed. So `--min-age` never prevents security patches from reaching you.
+**CVE-aware bypass:** The freshness hold on a too-fresh upgrade is skipped when the new version **demonstrably reduces** your exposure — its findings are a strict subset of your installed version's, so it fixes at least one and introduces none. That is the same test behind the `[IMPROVES]` verdict, and it means `--min-age` does not hold back a release that is genuinely the fix:
+
+```
+[ok] vscodium 1.135.06055 — released 1 day(s) ago (2026-09-09), fixes 13 of 14
+     finding(s) from installed 1.126.04524 and adds none — bypassing age check
+```
+
+Exposure alone is *not* enough. When both versions carry the same findings — common when NVD has not tied a CVE to any version, so it is reported against every release including the newest — upgrading buys no known reduction, and the hold stands:
+
+```
+[HOLD] hugo 0.166.0 — released 1 day(s) ago (2026-09-09), min-age: 3 days;
+       installed 0.165.0 has findings but 0.166.0 does not demonstrably fix
+       them (--min-age 0 overrides)
+```
+
+This is deliberately the conservative side of a real trade-off. A one-day-old release is exactly the window a supply-chain compromise lands in, so waiving that hold needs evidence rather than a plausible guess. If you know from outside this tool that the new release fixes what you have, `--min-age 0` takes it immediately.
 
 Use `--min-age 0` to disable the freshness hold entirely.
 

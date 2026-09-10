@@ -761,6 +761,54 @@ except Exception:
 # subset of what is already on the machine, so blocking it can only keep the
 # user on the more vulnerable version. Both inputs come from finding_ids (sorted,
 # unique); re-sorting is cheap and keeps comm's precondition local.
+# Finding ids from a scan, but only when the scan can be TRUSTED as a finding
+# set. Prints the ids and returns 0; prints nothing and returns 1 when the
+# result is not a usable answer, so a caller can tell "nothing found" apart from
+# "nothing came back".
+#
+#   exit 0  — scanned, no blocking vulns. Still parsed: a package whose only
+#             findings are UNACTIONABLE exits 0 and those ids must be compared,
+#             which is the whole hugo case.
+#   exit 1  — findings reported. Trustworthy ONLY if ids actually parse: the
+#             scanner also exits 1 with EMPTY stdout when it dies before
+#             json.dump (see the `or 0` note in dependency_security_check.py,
+#             which shipped exactly that bug once). Empty here means "crashed",
+#             never "clean" — and reading it as clean makes a candidate look
+#             like it fixed everything.
+#   exit 2+ — no source could answer. Not an answer.
+trusted_finding_ids() { # $1 = json, $2 = exit code
+    local _json="$1" _exit="$2" _ids
+    case "$_exit" in
+        0 | 1) ;;
+        *) return 1 ;;
+    esac
+    _ids=$(finding_ids "$_json")
+    if [ "$_exit" -eq 1 ] && [ -z "$_ids" ]; then
+        return 1
+    fi
+    printf '%s\n' "$_ids"
+    return 0
+}
+
+# How many of the applicable vulnerability sources actually answered.
+# Comparing two scans is only meaningful when the second looked at least as hard
+# as the first: a candidate scanned with fewer sources reporting will naturally
+# show fewer findings, which is indistinguishable from a fix.
+#
+# For the `brew` ecosystem this is currently always 1 or 0 — NVD is the only
+# applicable source, so a failure means sources_ok 0, which already exits 2 and
+# is rejected above. The guard is here so that adding an OSV/GHSA Homebrew
+# mapping later cannot silently turn partial coverage into a phantom reduction.
+scan_sources_ok() { # $1 = json; prints an integer (0 when unreadable)
+    echo "$1" | python3 -c "
+import sys, json
+try:
+    print(int(json.load(sys.stdin).get('sources_ok', 0) or 0))
+except Exception:
+    print(0)
+" 2>/dev/null || echo 0
+}
+
 new_findings() {
     comm -23 \
         <(printf '%s\n' "$1" | grep -v '^$' | sort -u) \
@@ -1134,22 +1182,95 @@ if [ "$MIN_AGE" -gt 0 ] 2>/dev/null; then
                 rate_limit_abort "$AGE_INFO"
             fi
         elif [ "$AGE_DAYS" -ge 0 ] 2>/dev/null && [ "$AGE_DAYS" -lt "$MIN_AGE" ]; then
-            # Known and too fresh. CVE-aware bypass: if the INSTALLED version has
-            # known CVEs, this fresh release is likely the fix — let it through.
-            # No known installed version means no baseline to justify the bypass,
-            # so the hold stands (see installed_version_known).
+            # Known and too fresh. The freshness hold is waived only for a
+            # candidate that demonstrably REDUCES exposure — the same strict-subset
+            # test the [IMPROVES] verdict uses, and for the same reason
+            # finding_ids() folds `unactionable` into the comparison: a finding NVD
+            # could not tie to a version is not fixed by the upgrade, it is merely
+            # not grounds to block, and it applies to both sides equally.
+            #
+            # "Installed has CVEs" alone was the old trigger, and it fired on mere
+            # exposure. Live 2026-09-10: hugo, nss and snyk each waived the hold on
+            # findings the candidate carried identically — hugo's four, including a
+            # CRITICAL, are no-version-scope on 0.166.0 too — so a one-day-old
+            # release skipped the supply-chain hold and bought no known reduction.
+            # Only vscodium earned it, fixing 13 of 14. Three of four were
+            # unjustified. The block decision was made relative in v0.3.5; this is
+            # the bypass decision catching up.
+            #
+            # Costs one extra scan, only for a package that is BOTH too fresh AND
+            # carries findings on the installed side — four packages in that run.
+            # No known installed version, or an unreadable candidate scan, leaves
+            # no evidence of reduction, so the hold stands (fail closed).
             INSTALLED_EXIT=0
             _INSTALLED_RESULT=""
             if installed_version_known "$installed"; then
                 _INSTALLED_RESULT=$(python3 "$SCRIPT" brew "$name" "$installed" 2>/dev/null) && INSTALLED_EXIT=0 || INSTALLED_EXIT=$?
             fi
 
+            _BYPASS_OK=false
+            _BYPASS_FIXED=0
+            _n_inst=0
+            # Why the bypass was not granted, so the hold line states what was
+            # actually determined instead of asserting a comparison that never
+            # ran: "compared" (no reduction) vs "unreadable" (could not compare).
+            _BYPASS_WHY=""
             if [ "$INSTALLED_EXIT" -eq 1 ]; then
-                echo "  [ok] $name $current — released $AGE_DAYS day(s) ago ($PUB_DATE), but installed $installed has CVEs — bypassing age check"
+                if _AGE_INST_IDS=$(trusted_finding_ids "$_INSTALLED_RESULT" "$INSTALLED_EXIT"); then
+                    _AGE_CAND_EXIT=0
+                    _AGE_CAND_RESULT=$(python3 "$SCRIPT" brew "$name" "$current" 2>/dev/null) || _AGE_CAND_EXIT=$?
+                    if _AGE_CAND_IDS=$(trusted_finding_ids "$_AGE_CAND_RESULT" "$_AGE_CAND_EXIT"); then
+                        _inst_srcs=$(scan_sources_ok "$_INSTALLED_RESULT")
+                        _cand_srcs=$(scan_sources_ok "$_AGE_CAND_RESULT")
+                        if [ "$_cand_srcs" -lt "$_inst_srcs" ]; then
+                            # Fewer databases answered for the candidate, so
+                            # "fewer findings" is not evidence of a fix.
+                            _BYPASS_WHY="unreadable"
+                        else
+                            _AGE_NEW_IDS=$(new_findings "$_AGE_CAND_IDS" "$_AGE_INST_IDS")
+                            _n_inst=$(printf '%s\n' "$_AGE_INST_IDS" | grep -c .)
+                            _n_cand=$(printf '%s\n' "$_AGE_CAND_IDS" | grep -c .)
+                            # Strict improvement: adds nothing, drops at least one.
+                            if [ -z "$_AGE_NEW_IDS" ] && [ "$_n_cand" -lt "$_n_inst" ]; then
+                                _BYPASS_OK=true
+                                _BYPASS_FIXED=$((_n_inst - _n_cand))
+                            else
+                                _BYPASS_WHY="compared"
+                            fi
+                        fi
+                    else
+                        _BYPASS_WHY="unreadable"
+                    fi
+                else
+                    _BYPASS_WHY="unreadable"
+                fi
+            fi
+
+            if [ "$_BYPASS_OK" = true ]; then
+                echo "  [ok] $name $current — released $AGE_DAYS day(s) ago ($PUB_DATE), fixes $_BYPASS_FIXED of $_n_inst finding(s) from installed $installed and adds none — bypassing age check"
                 # Name the CVEs (#72) so the decision rests on data, not on a
                 # bare "CVE! update!" note.
                 print_vuln_lines "$_INSTALLED_RESULT"
                 FILTERED_OUTDATED="${FILTERED_OUTDATED}${name} ${installed} ${current}"$'\n'
+            elif [ "$_BYPASS_WHY" = "compared" ]; then
+                # Exposed, and the candidate was scanned, but it is not evidence
+                # of a fix. Say that plainly — the old line announced a bypass as
+                # if it were earned.
+                echo "  [HOLD] $name $current — released $AGE_DAYS day(s) ago ($PUB_DATE), min-age: $MIN_AGE days; installed $installed has findings but $current does not demonstrably fix them (--min-age 0 overrides)"
+                # Same #72 contract as the bypass line above: the user is being
+                # asked to weigh a manual --min-age 0 override, so name what they
+                # are exposed to. Omitting it here read as "your CVEs went
+                # unnoticed" precisely where the detail mattered most.
+                print_vuln_lines "$_INSTALLED_RESULT"
+                HELD_PKGS="$HELD_PKGS $name"
+                HELD_COUNT=$((HELD_COUNT + 1))
+            elif [ "$_BYPASS_WHY" = "unreadable" ]; then
+                # Never claim "does not fix them" here: no comparison happened.
+                # The fix is different too — retry, or set an NVD API key.
+                echo "  [HOLD] $name $current — released $AGE_DAYS day(s) ago ($PUB_DATE), min-age: $MIN_AGE days; installed $installed has findings but $current could not be checked to compare (--min-age 0 overrides)"
+                print_vuln_lines "$_INSTALLED_RESULT"
+                HELD_PKGS="$HELD_PKGS $name"
+                HELD_COUNT=$((HELD_COUNT + 1))
             else
                 echo "  [HOLD] $name $current — released $AGE_DAYS day(s) ago ($PUB_DATE), min-age: $MIN_AGE days"
                 HELD_PKGS="$HELD_PKGS $name"
