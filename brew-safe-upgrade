@@ -1395,9 +1395,43 @@ EXCLUDE_PKGS="$BLOCKED_PKGS $TAMPERED_PKGS $SKIPPED_PKGS $HELD_PKGS"
 CLEAN_PKGS_FORMULAE=""
 CLEAN_PKGS_CASKS=""
 
+# Membership by literal token (`case`), not `grep -qw` — the same correction the
+# dependency path already carries a few hundred lines below, which the top-level
+# build never received.
+#
+# `grep -qw "$name"` treated the package name as a BRE and matched on word
+# boundaries, and Homebrew names are full of characters grep counts as
+# boundaries: @ - + . So an excluded package silently suppressed every OTHER
+# outdated package whose name was a word-component of it —
+#
+#     held  python@3.12  ->  also dropped  python
+#     held  node@22      ->  also dropped  node
+#     held  openssl@3    ->  also dropped  openssl
+#
+# and the suppressed package had already been printed as [ok] and counted in
+# "Results: N clean". It then vanished: not upgraded, not listed as held, no
+# line anywhere explaining it, exit 0. Versioned formulae are everywhere in
+# Homebrew and a freshness hold on one is routine, so this was not a corner
+# case. It fails closed (nothing unsafe is installed) but it is a silent
+# correctness failure, and the post-upgrade verification cannot catch it —
+# a suppressed package never enters CLEAN_PKGS, so it is never announced and
+# never re-checked.
+#
+# `case` patterns match literally, so a package can only match itself.
+#
+# NOTE: this does NOT separate a formula from a cask of the same token — they
+# genuinely share a name here, and untangling that needs type-tagged exclusion
+# entries. Tracked in .codereview/exclude-pkgs-type-conflation.local.md.
+_is_excluded() {
+    case " $EXCLUDE_PKGS " in
+        *" $1 "*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 if [ -n "$OUTDATED_FORMULAE" ]; then
     while read -r name installed current; do
-        if ! echo "$EXCLUDE_PKGS" | grep -qw "$name"; then
+        if ! _is_excluded "$name"; then
             CLEAN_PKGS_FORMULAE="$CLEAN_PKGS_FORMULAE $name"
         fi
     done <<<"$OUTDATED_FORMULAE"
@@ -1405,7 +1439,7 @@ fi
 
 if [ -n "$OUTDATED_CASKS" ]; then
     while read -r name installed current; do
-        if ! echo "$EXCLUDE_PKGS" | grep -qw "$name"; then
+        if ! _is_excluded "$name"; then
             CLEAN_PKGS_CASKS="$CLEAN_PKGS_CASKS $name"
         fi
     done <<<"$OUTDATED_CASKS"

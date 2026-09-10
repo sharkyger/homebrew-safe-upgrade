@@ -268,13 +268,16 @@ except Exception:
                                 ;;
                         esac
                         # NB: a pin in $DIR/pinned/ is deliberately NOT consulted
-                        # here. Real `brew pin` is formula-only, and the wrapper
-                        # pins every excluded name — casks included, where the
-                        # pin simply fails and is unclaimed. Refusing on the pin
-                        # store would make a pinned CASK token block a same-named
-                        # FORMULA's upgrade, which real brew never does. A test
-                        # that wants brew to decline a pinned formula says so with
-                        # MOCK_BREW_UPGRADE_REFUSE.
+                        # here. Real brew pins per PACKAGE TYPE — `brew pin` takes
+                        # formulae and casks alike (cmd/pin.rb names both, and
+                        # Cask::Cask implements pin/unpin), and a pinned cask does
+                        # not stop a same-named formula upgrading. This mock's pin
+                        # store is a flat directory keyed on the bare name, so
+                        # honouring it here would conflate the two types and block
+                        # the formula — the very bug tracked in
+                        # .codereview/exclude-pkgs-type-conflation.local.md.
+                        # A test that wants brew to decline a pinned package says
+                        # so with MOCK_BREW_UPGRADE_REFUSE.
                         pkgs="$pkgs $a"
                         ;;
                 esac
