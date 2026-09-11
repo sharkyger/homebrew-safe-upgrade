@@ -256,9 +256,26 @@ try:
         score = v.get('score') or 0  # a null score must not erase the whole list
         src = v.get('source', '?')
         score_str = f' (CVSS {score})' if score > 0 else ''
-        print(f'    [{sev}] {vid}{score_str} — {src}')
+        # Mark ONLY an explicit False. An absent key means the source has no
+        # concept of CPE scoping (OSV, the GitHub Advisory Database) — not that
+        # the finding is unscoped — and marking those would mark nearly
+        # everything, which marks nothing.
+        scope_str = ' (no version scope)' if v.get('scoped') is False else ''
+        print(f'    [{sev}] {vid}{score_str} — {src}{scope_str}')
     if len(vulns) > 5:
         print(f'    … and {len(vulns) - 5} more ({len(vulns)} total)')
+    # Counted over ALL findings, not the five displayed: the caller most in need
+    # of this line is a freshness hold, whose list is usually truncated.
+    unscoped = sum(1 for v in vulns if v.get('scoped') is False)
+    if unscoped:
+        # NOT the 'note:' prefix — that one belongs to print_scan_notes and
+        # relays the SCANNER's own words. When resolve_latest_version() fails,
+        # the scanner emits its own unscoped-findings note with a different
+        # count of the same set, and two 'note:' lines disagreeing about one set
+        # is worse than no line at all.
+        print(f'    why: {unscoped} of {len(vulns)} finding(s) carry no version '
+              'scope — nothing ties them to a particular version, so no upgrade '
+              'can be shown to fix them.')
 except Exception:
     pass
 " 2>/dev/null || true

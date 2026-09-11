@@ -648,10 +648,6 @@ run_brew_update() {
     return "$rc"
 }
 
-# Print up to 5 CVE detail lines ("    [SEV] CVE-ID (CVSS n.n) — source") from
-# a scanner JSON verdict ($1). Shared by the security-check loop and the
-# age-check CVE bypass (#72), so every "has CVEs" verdict names the CVEs the
-# user is being asked to act on.
 # One-line "SEV CVE-id" summary of the worst finding in a verdict ($1), for the
 # end-of-run blocked-dependency reasons. Reads the JSON: the verdict is captured
 # with 2>/dev/null, so the scanner's human-readable stderr lines are not there to
@@ -664,7 +660,11 @@ try:
     v = sorted(json.load(sys.stdin).get('vulnerabilities', []),
                key=lambda x: (-(x.get('score') or 0), x.get('id', '')))
     if v:
-        print(f\"{v[0].get('severity','?')} {v[0].get('id','?')}\")
+        # Same scope marker as print_vuln_lines: a dependency blocked solely by
+        # an unscoped finding taints every dependent, so the end-of-run reason
+        # must not imply a version-pinned vulnerability it cannot support.
+        scope = ' (no version scope)' if v[0].get('scoped') is False else ''
+        print(f\"{v[0].get('severity','?')} {v[0].get('id','?')}{scope}\")
 except Exception:
     pass
 " 2>/dev/null || true
@@ -698,6 +698,20 @@ installed_version_known() {
     esac
 }
 
+# Print up to 5 CVE detail lines ("    [SEV] CVE-ID (CVSS n.n) — source") from
+# a scanner JSON verdict ($1). Shared by the security-check loop and the
+# age-check CVE bypass (#72), so every "has CVEs" verdict names the CVEs the
+# user is being asked to act on.
+#
+# A finding carrying no version scope is marked as such, and a trailing note
+# counts them. This matters most under a freshness hold: the hold scans the
+# INSTALLED version, which is never the latest, so partition_unactionable()
+# leaves its unscoped findings in "vulnerabilities" (still blocking, fail-closed)
+# rather than demoting them to "unactionable". Rendered bare, they read as
+# actionable — and then "does not demonstrably fix them" reads as a
+# contradiction, when it is in fact the direct consequence of their being
+# unscoped. Presentation only: finding_ids() still folds both groups into the
+# comparison, so no hold or bypass decision changes here.
 print_vuln_lines() {
     echo "$1" | python3 -c "
 import sys, json
@@ -714,9 +728,26 @@ try:
         score = v.get('score') or 0  # a null score must not erase the whole list
         src = v.get('source', '?')
         score_str = f' (CVSS {score})' if score > 0 else ''
-        print(f'    [{sev}] {vid}{score_str} — {src}')
+        # Mark ONLY an explicit False. An absent key means the source has no
+        # concept of CPE scoping (OSV, the GitHub Advisory Database) — not that
+        # the finding is unscoped — and marking those would mark nearly
+        # everything, which marks nothing.
+        scope_str = ' (no version scope)' if v.get('scoped') is False else ''
+        print(f'    [{sev}] {vid}{score_str} — {src}{scope_str}')
     if len(vulns) > 5:
         print(f'    … and {len(vulns) - 5} more ({len(vulns)} total)')
+    # Counted over ALL findings, not the five displayed: the caller most in need
+    # of this line is a freshness hold, whose list is usually truncated.
+    unscoped = sum(1 for v in vulns if v.get('scoped') is False)
+    if unscoped:
+        # NOT the 'note:' prefix — that one belongs to print_scan_notes and
+        # relays the SCANNER's own words. When resolve_latest_version() fails,
+        # the scanner emits its own unscoped-findings note with a different
+        # count of the same set, and two 'note:' lines disagreeing about one set
+        # is worse than no line at all.
+        print(f'    why: {unscoped} of {len(vulns)} finding(s) carry no version '
+              'scope — nothing ties them to a particular version, so no upgrade '
+              'can be shown to fix them.')
 except Exception:
     pass
 " 2>/dev/null || true
