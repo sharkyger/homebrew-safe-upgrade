@@ -8,6 +8,8 @@ The project is pre-1.0; expect minor breaking changes between 0.x releases until
 
 ## [Unreleased]
 
+## [0.4.2] — 2026-09-11
+
 ### Changed
 
 - **The freshness hold is waived only for an upgrade that demonstrably reduces exposure.** The CVE-aware bypass used to fire whenever the *installed* version had any finding at all, on the reasoning that a fresh release is "likely the fix". Likely is not evidence. On a real run, three of four bypasses bought nothing: `hugo`, `nss` and `snyk` each skipped the 3-day hold on findings the new version carried identically — hugo's four, including a CRITICAL, are reported against 0.166.0 too, because NVD never tied them to a version. Only `vscodium` earned it, fixing 13 of 14. So a one-day-old release skipped the supply-chain hold in exchange for no known reduction — the riskier half of the trade, taken for free.
@@ -379,7 +381,8 @@ pre-tag history by theme rather than by release. Full detail is in `git log`.
 - CodeQL, gitleaks, and dependabot wired up.
 - Community health files: issue templates (bug, false-positive, feature), discussion link from README on the open `--min-age` default question.
 
-[Unreleased]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.4.2...HEAD
+[0.4.2]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.3.5...v0.4.0
 [0.3.5]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.3.4...v0.3.5
