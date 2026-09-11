@@ -9,6 +9,7 @@ that took it as a parameter tripped F811.
 import datetime
 import json
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -76,3 +77,44 @@ def brew_env(tmp_path, monkeypatch):
     monkeypatch.setenv("MOCK_COMMITS_API_DIR", str(commits_dir))
     monkeypatch.setenv("MOCK_INTERACTIVE_MODE", "1")
     return fixture_dir
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """Fail a run that had an NVD key and still asserted nothing against a live database.
+
+    The live-API tests skip when no source answers in time, which is right for a
+    rate limit — but the skip path cannot tell throttling from a scanner that
+    hangs, and the first timeout retires the rest of the sweep. Without this, a
+    regression that wedges query_nvd would show up as a green build with zero
+    CVE-classification coverage.
+
+    A key is the discriminator. Without one, skipping is expected and forgiven:
+    a fork's PR never receives repository secrets, and NVD's anonymous 5/30s
+    ceiling is tripped by an ordinary sweep. WITH one, the sweep is supposed to
+    get answers, so getting none means something is wrong and the run should say
+    so rather than pass quietly.
+    """
+    if exitstatus != 0:
+        return  # already failing; don't relabel someone else's failure
+
+    dsc = sys.modules.get("tests.test_dependency_security_check")
+    if dsc is None:
+        return  # live module never imported — nothing to say
+
+    if dsc.live_skips == 0 or dsc.live_verdicts > 0:
+        return  # nothing skipped, or something still asserted: real coverage
+
+    if not (os.environ.get("NVD_API_KEY") or os.environ.get("HOMEBREW_NVD_API_KEY")):
+        return  # no key: skipping is the documented, expected outcome
+
+    reporter = session.config.pluginmanager.get_plugin("terminalreporter")
+    if reporter is not None:
+        reporter.write_sep("=", "live vulnerability-database coverage", red=True)
+        reporter.write_line(
+            f"NVD_API_KEY was set, but all {dsc.live_skips} live check(s) skipped and "
+            "none produced a verdict. With a key the databases should answer, so this "
+            "is more likely a wedged scanner than a rate limit. Re-run with -rs to see "
+            "the skip reasons; if the databases really are down, re-run without the key "
+            "to get the documented skip behaviour."
+        )
+    session.exitstatus = 1
