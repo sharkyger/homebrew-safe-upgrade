@@ -8,6 +8,12 @@ The project is pre-1.0; expect minor breaking changes between 0.x releases until
 
 ## [Unreleased]
 
+## [0.4.3] — 2026-09-11
+
+### Fixed
+
+- **The pre-commit manifest check now watches every file the manifest covers.** `formula_cpe_map.py` is in `SHA256SUMS` but was missing from the `sha256sums-sync` hook's file pattern, so a commit touching only that file passed pre-commit with a silently stale manifest. Nothing unsafe could ship — CI re-checks it and `install.sh` aborts fail-closed on a hash mismatch — but the local fast-fail was lost, which is the failure mode that broke CI in #70 when a manifest regen was deferred to a later commit. The pattern is now covered by a test that derives the expectation from the install set rather than restating it, so the two cannot drift apart again.
+
 ### Fixed
 
 - **A finding with no version scope now says so wherever it is listed.** A freshness hold prints the installed version's findings, and it printed them all identically — so `hugo` held with a bare `[CRITICAL] CVE-2026-51785 (CVSS 9.8)` directly under the sentence "0.166.0 does not demonstrably fix them". Those two statements read as a contradiction: a critical vulnerability that an upgrade inexplicably declines to fix. They were never in conflict. NVD has not tied that record to any version, which is *precisely why* no upgrade can be shown to fix it — but nothing in the output said so, and `nss` made it starker by listing a 2015 and a 2007 CVE against a 2026 release with no explanation.
@@ -399,7 +405,8 @@ pre-tag history by theme rather than by release. Full detail is in `git log`.
 - CodeQL, gitleaks, and dependabot wired up.
 - Community health files: issue templates (bug, false-positive, feature), discussion link from README on the open `--min-age` default question.
 
-[Unreleased]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.4.2...HEAD
+[Unreleased]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.4.3...HEAD
+[0.4.3]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/sharkyger/homebrew-safe-upgrade/compare/v0.3.5...v0.4.0
