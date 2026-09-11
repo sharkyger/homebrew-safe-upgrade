@@ -26,6 +26,73 @@ All three databases are free and public, and no key is required to use the tool.
 
 ## How it works
 
+### The routine: three commands, in this order
+
+```bash
+brew update        # 1. refresh Homebrew's view of what exists
+brew safe-update   # 2. update the gate itself, through the gate
+brew safe-upgrade  # 3. upgrade your packages through the gate
+```
+
+Always the same three, always in that order. It is worth building the habit
+deliberately: a week of typing it and it becomes muscle memory you never have to
+think about again — which is the point, because the step most worth doing is the
+one easiest to skip. Each command earns its place, and one of the orderings is
+load-bearing rather than stylistic (explained at the end).
+
+**1. `brew update` — so a metadata failure is something you act on, not something you scroll past.**
+
+`brew safe-upgrade` does refresh Homebrew itself, but it deliberately *tolerates*
+failure there: a transient tap error should not abort your whole upgrade run. It
+still prints whatever brew printed — what it discards is the exit status, so the
+run continues either way and the error scrolls by in the middle of a long output,
+minutes before the verdicts it silently undermines. Every verdict afterwards is
+computed against whatever metadata you happen to have, possibly last week's.
+Running the refresh as its own step puts any failure on its own, at a moment when
+stopping costs you nothing. It also ends by listing your outdated formulae and
+casks, so you see what is coming before you commit to anything.
+
+**2. `brew safe-update` — because the gate is only as good as its own last release.**
+
+This is the step people skip, and it is the one that matters most. The checks are
+not static: what counts as a match, which CPE and cask mappings exist, how the
+installed baseline is chosen, when the freshness hold may be waived — all of that
+lives in safe-upgrade itself and all of it has changed across releases, including
+fixes for cases where an older version let something through. Gating today's
+packages with last month's build means accepting last month's blind spots. Update
+the thing that judges before you ask it to judge.
+
+`brew safe-update` is how the tool updates itself properly, and it is the one
+command to remember for either install route. On a **script install** it
+re-fetches the tools from the latest release, verifies every file against the
+`SHA256SUMS` manifest and swaps them in atomically. On a **formula install** it
+detects the Cellar layout and routes to `brew safe-upgrade --self`, which is
+deliberately *stricter* than a normal run: it gates safe-upgrade's own
+dependencies fail-closed before touching the
+formula, and unlike step 3 it **aborts** if `brew update` fails rather than
+proceeding on stale metadata. A plain `brew upgrade safe-upgrade` also works, but
+it pulls those dependencies in unchecked — the one moment you least want an
+ungated dependency is while replacing the thing that does the gating.
+
+**3. `brew safe-upgrade` — now the verdicts mean what they say.**
+
+The metadata is fresh and the gate is current, so a `[ok]` reflects today's
+advisory data judged by today's logic.
+
+**The one ordering that genuinely matters is step 2 before step 3.** safe-upgrade
+does not exclude itself from a normal run, so if you let step 3 upgrade the gate,
+that entire run was judged by the *old* binary — the new one only takes effect
+the next time you invoke it. Doing it as its own step is what makes the upgrade
+you are about to run the one your current gate actually evaluated.
+
+Step 1 is a habit rather than a dependency: step 2 refreshes metadata itself
+(fail-closed) on a formula install, and on a script install it does not consult
+Homebrew's metadata at all — it resolves the latest release straight from GitHub.
+Run it first anyway, for the reason above: it is how you find out the refresh
+failed.
+
+### A single run
+
 ```
 brew safe-upgrade
 ```
@@ -418,15 +485,7 @@ Why `--self`: a plain `brew upgrade safe-upgrade` pulls safe-upgrade's own depen
 
 > This updates **the tool itself**. To CVE-gate an upgrade of *all* your outdated packages, that's the everyday `brew safe-upgrade` (no `--self`).
 
-**Full update routine** — bring both the tool and everything else current, in order:
-
-```bash
-brew update        # refresh Homebrew's metadata
-brew safe-update   # update safe-upgrade itself (gated — runs --self on a formula install)
-brew safe-upgrade  # then CVE-gate an upgrade of everything else outdated
-```
-
-Update the updater first, then everything else — the same *refresh, then upgrade* rhythm you already know from `apt update && apt upgrade` (or `dnf upgrade`, `pacman -Syu`, …). The leading `brew update` is optional — `safe-update` and `safe-upgrade` each run it internally.
+Whichever of the two lines above applies to you, `brew safe-update` is the single command that covers it — and it is step 2 of the everyday three-command routine, not the plain `brew safe-upgrade` named just above. See [The routine](#the-routine-three-commands-in-this-order) at the top for all three and why the order matters. Update the updater first, then everything else: the same *refresh, then upgrade* rhythm you already know from `apt update && apt upgrade` (or `dnf upgrade`, `pacman -Syu`, …).
 
 ## brew safe-install
 
@@ -483,7 +542,7 @@ Packages that are already installed are detected and skipped.
 
 ## brew safe-update
 
-Updates all tools to the latest version from GitHub. This is for the **script / manual** install — it refreshes the copies in your Homebrew `bin`.
+Updates the tools themselves, from either install route. On a **script / manual** install it refreshes the copies in your Homebrew `bin` from the latest GitHub release. On a **Homebrew formula** install it routes to `brew safe-upgrade --self` instead, upgrading the formula through its own gate (see [The routine](#the-routine-three-commands-in-this-order)).
 
 ```
 brew safe-update
