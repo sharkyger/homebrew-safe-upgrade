@@ -115,3 +115,23 @@ def test_pyproject_version_matches_version_file():
     assert pyproject["project"]["version"] == version, (
         "pyproject version drifted from the VERSION file — keep them in lockstep"
     )
+
+
+def test_precommit_manifest_hook_watches_every_manifest_file():
+    """The local fast-fail must cover the same files the manifest does.
+
+    `formula_cpe_map.py` was in SHA256SUMS but absent from the hook's `files:`
+    pattern, so a commit touching only that file passed pre-commit with a
+    silently stale manifest. CI and install.sh both still fail closed, so this
+    never shipped a bad artifact — but it costs the local catch, which is the
+    exact failure mode that broke CI in #70 (a manifest regen deferred to a
+    later commit). Deriving the expectation from EXPECTED_INSTALL_SET rather
+    than restating it keeps the two from drifting apart again.
+    """
+    config = (REPO / ".pre-commit-config.yaml").read_text()
+    m = re.search(r"id: sha256sums-sync.*?files: (\S+)", config, re.S)
+    assert m, "sha256sums-sync hook or its files: pattern not found"
+    pattern = re.compile(m.group(1))
+    missing = [f for f in EXPECTED_INSTALL_SET if not pattern.match(f)]
+    assert not missing, f"pre-commit manifest hook does not watch: {sorted(missing)}"
+    assert pattern.match("SHA256SUMS"), "the manifest itself must be watched too"

@@ -57,4 +57,4 @@ repos:
         entry: scripts/gen-sha256sums.sh --check
         language: system
         pass_filenames: false
-        files: ^(VERSION|bottle_resolver\.py|cask_nvd_map\.py|dependency_security_check\.py|brew-safe-(upgrade|install|update)|SHA256SUMS)$
+        files: ^(VERSION|bottle_resolver\.py|cask_nvd_map\.py|formula_cpe_map\.py|dependency_security_check\.py|brew-safe-(upgrade|install|update)|SHA256SUMS)$
