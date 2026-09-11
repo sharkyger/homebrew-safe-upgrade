@@ -69,6 +69,16 @@ jobs:
           cache: pip
       - run: pip install -r requirements-dev.txt
       - run: pytest
+        env:
+          # Raises NVD's anonymous 5-requests/30s ceiling to 50, so the live-API
+          # tests in test_dependency_security_check.py assert a real verdict
+          # instead of skipping on a rate limit. Optional by design: the secret
+          # is absent on forked PRs, and on Dependabot runs unless set in the
+          # Dependabot store too, so the suite degrades to skips, never failures.
+          # Note the 50/30s ceiling is per KEY, not per job: the two test matrix
+          # legs and the macOS smoke run concurrently and share it, so a keyed
+          # run can still be throttled into skipping.
+          NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
 
   install-smoke:
     # Exercise the real script installer (install.sh) end-to-end, hermetically:
@@ -119,6 +129,16 @@ jobs:
       # Real-arch coverage of resolution / strand / fail-closed / symlink / --version.
       - name: pytest on real macOS arch
         run: pytest
+        env:
+          # Raises NVD's anonymous 5-requests/30s ceiling to 50, so the live-API
+          # tests in test_dependency_security_check.py assert a real verdict
+          # instead of skipping on a rate limit. Optional by design: the secret
+          # is absent on forked PRs, and on Dependabot runs unless set in the
+          # Dependabot store too, so the suite degrades to skips, never failures.
+          # Note the 50/30s ceiling is per KEY, not per job: the two test matrix
+          # legs and the macOS smoke run concurrently and share it, so a keyed
+          # run can still be throttled into skipping.
+          NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
       - name: Script-install layout, then run the real command (no override)
         run: |
           set -euo pipefail

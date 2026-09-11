@@ -8,6 +8,12 @@ The project is pre-1.0; expect minor breaking changes between 0.x releases until
 
 ## [Unreleased]
 
+### Changed
+
+- **A throttled vulnerability database no longer fails the test suite.** The live-API tests already skipped when the scanner reported that no source answered, but the subprocess cap that guarded them was 60 seconds — less than the scanner's own worst-case retry schedule (three attempts per NVD page, each socket wait up to 15s, with backoff sleeps a `Retry-After` header can stretch to 30s apiece). A rate limit therefore killed the checker mid-retry and surfaced as `TimeoutExpired`, a hard error that never reached the skip path; `test_missing_version_handled` additionally asserted straight against the exit code without consulting it at all. The cap is now derived from that schedule, a timeout skips with the cause named, and the first one short-circuits the rest of the sweep instead of re-spending the budget per case. An **offline** call still fails on a hang — there is no rate limit to forgive there — and that boundary is covered by tests of its own.
+
+  Skipping on timeout is the dangerous half of that, since nothing out here can distinguish a rate limit from a scanner that hangs: one wedged query could retire the whole live sweep and leave the build green with no CVE-classification coverage at all. A key is the discriminator. Without one, skipping is expected and forgiven — an anonymous sweep trips NVD's 5-requests/30s ceiling routinely, and a PR from a fork never receives repository secrets. **With** one, the databases are supposed to answer, so a run that asserted nothing against them now fails and says why. CI passes `NVD_API_KEY` to `pytest` where the secret exists; note the keyed 50/30s ceiling is per key rather than per job, so concurrent matrix legs share it.
+
 ## [0.4.2] — 2026-09-11
 
 ### Changed

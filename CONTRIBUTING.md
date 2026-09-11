@@ -32,6 +32,18 @@ Run the tests:
 pytest
 ```
 
+Some tests in `tests/test_dependency_security_check.py` query the live
+vulnerability databases on purpose — that is the only way to verify the tool
+classifies real CVEs correctly. NVD throttles anonymous callers to 5 requests
+per 30 seconds, so those tests **skip** rather than fail when no source answers
+in time. Run `pytest -rs` to see which ones skipped and why.
+
+Setting `NVD_API_KEY` raises the limit to 50/30s and turns those skips back into
+real assertions. The key is free and issued without an approval wait:
+<https://nvd.nist.gov/developers/request-an-api-key>. It is optional — CI passes
+without one, and a PR from a fork never receives repository secrets, so skips
+there are expected and are not something you need to fix.
+
 Run the linters (CI will block your PR if these fail):
 
 ```bash
