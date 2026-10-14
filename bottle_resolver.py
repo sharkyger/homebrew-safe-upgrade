@@ -3,7 +3,7 @@
 
 Why this exists
 ---------------
-The SHA-verify step compares the locally-installed bottle SHA (from
+The SHA-verify step compares the incoming bottle SHA reported locally (from
 ``brew info --json=v2``) against the canonical one (from
 ``formulae.brew.sh/api/formula/<f>.json``). The previous extractors each took
 the *first* bottle tag in dict-iteration order. ``brew info`` and
@@ -42,6 +42,7 @@ import sys
 
 # macOS codenames, newest -> oldest, keyed by product major version.
 _CODENAMES = [
+    (27, "golden_gate"),
     (26, "tahoe"),
     (15, "sequoia"),
     (14, "sonoma"),

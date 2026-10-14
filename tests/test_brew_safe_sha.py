@@ -437,6 +437,36 @@ _ARM_SHA = "1" * 64
 _INTEL_SHA = "3" * 64
 
 
+@pytest.mark.parametrize("script", [SAFE_INSTALL, SAFE_UPGRADE])
+@pytest.mark.parametrize("tampered", [False, True])
+def test_macos_27_platform_specific_local_bottle(sha_env, script, tampered):
+    """Homebrew's platform API exposes only golden_gate; canonical has all OSes."""
+    local = {"arm64_golden_gate": {"sha256": TAMPERED_SHA if tampered else CLEAN_SHA}}
+    canonical = {
+        "arm64_tahoe": {"sha256": _ARM_SHA},
+        "arm64_golden_gate": {"sha256": CLEAN_SHA},
+    }
+    write_formula_info_files(sha_env["brew"], "cmake", "4.4.4", local)
+    write_canonical_files(sha_env["api"], "cmake", canonical)
+    write_deps(sha_env["brew"], "cmake", [])
+    write_outdated(sha_env["brew"], [outdated_entry("cmake", "4.4.3", "4.4.4")])
+    args = ["--min-age", "0"]
+    if script == SAFE_INSTALL:
+        args.append("cmake")
+    result = run_safe(
+        script,
+        args,
+        env_extra={"BREW_SAFE_HOST_ARCH": "arm64", "BREW_SAFE_HOST_OS": "27"},
+        input_text="n\n",
+    )
+    if tampered:
+        assert "SHA mismatch" in result.stdout, result.stdout
+        assert f"canonical : {CLEAN_SHA}" in result.stdout, result.stdout
+    else:
+        assert "[sha] verified" in result.stdout, result.stdout
+        assert "SHA mismatch" not in result.stdout
+
+
 def _multiarch_canonical():
     # arm64 tags first, as formulae.brew.sh serves them.
     return {

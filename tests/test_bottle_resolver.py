@@ -170,11 +170,22 @@ def test_detect_codename_accepts_version_number(monkeypatch):
     assert br.detect_codename() == "sonoma"
     monkeypatch.setenv("BREW_SAFE_HOST_OS", "26")
     assert br.detect_codename() == "tahoe"
+    monkeypatch.setenv("BREW_SAFE_HOST_OS", "27")
+    assert br.detect_codename() == "golden_gate"
 
 
 def test_detect_codename_future_os_maps_to_newest_known(monkeypatch):
     monkeypatch.setenv("BREW_SAFE_HOST_OS", "99")
-    assert br.detect_codename() == "tahoe"
+    assert br.detect_codename() == "golden_gate"
+
+
+def test_macos_27_without_new_bottle_falls_back_to_tahoe():
+    assert br.resolve_sha(multiarch_files(CANON_ORDER), "arm64", "golden_gate") == ARM_TAHOE_SHA
+
+
+def test_macos_26_does_not_select_macos_27_bottle():
+    files = multiarch_files([("arm64_golden_gate", "5" * 64), *CANON_ORDER])
+    assert br.resolve_sha(files, "arm64", "tahoe") == ARM_TAHOE_SHA
 
 
 # ----------------------- degenerate inputs -----------------------
